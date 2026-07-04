@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 /* ── Right Panel ─────────────────────── */
 #right-panel {
   width: 330px; background: var(--glass1);
@@ -41,3 +42,48 @@
 .spark { width:100%; height:54px; display:block; }
 .dash-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; }
 
+=======
+/* ── Right Panel ─────────────────────── */
+#right-panel {
+  width: 330px; background: var(--glass1);
+  backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%);
+  border-left: 1px solid rgba(123,159,255,.1);
+  display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
+}
+#right-panel .section { padding: 16px; border-bottom: 1px solid var(--border); }
+#right-panel h3 {
+  font-size: .76em; text-transform: uppercase; letter-spacing: .06em;
+  color: var(--text3); margin-bottom: 10px; display: flex; align-items: center; gap: 6px;
+}
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.stat-item { background: var(--bg2); border-radius: var(--radius-sm); padding: 11px 13px; border:1px solid var(--border); transition: var(--transition); }
+.stat-item:hover { border-color: var(--border-focus); }
+.stat-item .label { font-size: .74em; color: var(--text3); }
+.stat-item .value { font-size: 1.15em; font-weight: 600; margin-top: 2px; }
+.stat-item .value.ok { color: var(--green); }
+.stat-item .value.warn { color: var(--yellow); }
+
+/* ── 高级统计仪表盘 (§11/§12) ─────────── */
+.dash-section { margin: 14px 0; }
+.dash-section > h4 { font-size:.74em; text-transform:uppercase; letter-spacing:.08em; color:var(--text3); margin-bottom:10px; font-weight:600; }
+.ring-row { display:flex; gap:12px; flex-wrap:wrap; justify-content:space-around; }
+.ring-item { display:flex; flex-direction:column; align-items:center; gap:6px; }
+.ring-chart {
+  width: 76px; height: 76px; border-radius:50%; position:relative;
+  display:flex; align-items:center; justify-content:center;
+  background: conic-gradient(var(--ring-color, var(--accent)) calc(var(--pct,0)*1%), var(--bg3) 0);
+  transition: background .8s var(--transition);
+}
+.ring-chart::after { content:''; position:absolute; width:56px; height:56px; border-radius:50%; background:var(--bg1); }
+.ring-chart .rv { position:relative; z-index:1; font-weight:700; font-size:1.05em; }
+.ring-item .rlabel { font-size:.74em; color:var(--text2); }
+.glow-bar { height:9px; border-radius:5px; background:var(--bg3); overflow:hidden; margin-top:6px; }
+.glow-bar .fill { height:100%; border-radius:5px; background:var(--accent-grad); box-shadow:0 0 14px var(--accent-glow); transition:width .8s var(--transition); }
+.avg-pill { display:inline-flex; align-items:center; gap:6px; margin-top:10px; padding:6px 14px; border-radius:14px; background:var(--accent-glow); color:var(--accent); font-weight:600; font-size:.9em; }
+.metric-row { display:flex; justify-content:space-between; padding:6px 0; border-bottom:1px solid var(--border); font-size:.86em; }
+.metric-row:last-child { border-bottom:none; }
+.metric-row .mv { font-weight:600; color:var(--text); }
+.spark { width:100%; height:54px; display:block; }
+.dash-card { background:var(--bg2); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; }
+
+>>>>>>> f7b98f9b6ecabf8d800f9c0521948f7f5db79dbc

@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
 :root {
   --bg0: #060913; --bg1: #0e1220; --bg2: #161c2e; --bg3: #1f2740;
@@ -39,3 +40,46 @@ body::before {
 }
 @keyframes ambientShift { 0%{opacity:.7;transform:scale(1)} 100%{opacity:1;transform:scale(1.06)} }
 
+=======
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+:root {
+  --bg0: #060913; --bg1: #0e1220; --bg2: #161c2e; --bg3: #1f2740;
+  --glass1: rgba(14,18,32,.72); --glass2: rgba(22,28,46,.62);
+  --border: #262f47; --border-focus: #4a5a8a;
+  --text: #e8ecf7; --text2: #8e9abb; --text3: #5e6b8c;
+  --accent: #7b9fff; --accent2: #b594ff; --accent-glow: rgba(123,159,255,.38);
+  --accent-grad: linear-gradient(135deg, #7b9fff, #b594ff);
+  --green: #3ce68a; --green-bg: #3ce68a1f;
+  --red: #ff6b6b; --red-bg: #ff6b6b1f;
+  --yellow: #f5c542; --yellow-bg: #f5c5421f;
+  --purple: #c39bff; --purple-bg: #c39bff1f;
+  --radius: 15px; --radius-sm: 9px;
+  --font: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+  --shadow: 0 10px 40px rgba(0,0,0,.45);
+  --shadow-sm: 0 2px 12px rgba(0,0,0,.28);
+  --transition: .2s cubic-bezier(.4,0,.2,1);
+  --bounce: cubic-bezier(.34,1.56,.64,1);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--bg3); border-radius: 5px; border: 2px solid transparent; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-focus); background-clip: padding-box; }
+body {
+  font-family: var(--font); background: var(--bg0); color: var(--text);
+  height: 100vh; display:flex; overflow: hidden;
+  letter-spacing: -0.01em;
+}
+/* 动态光晕环境背景 (§12.2.2) */
+body::before {
+  content:''; position:fixed; inset:0; z-index:-1; pointer-events:none;
+  background:
+    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(123,159,255,.10) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 55% at 85% 25%, rgba(181,148,255,.08) 0%, transparent 62%),
+    radial-gradient(ellipse 45% 45% at 55% 95%, rgba(60,230,138,.05) 0%, transparent 60%);
+  animation: ambientShift 22s ease-in-out infinite alternate;
+}
+@keyframes ambientShift { 0%{opacity:.7;transform:scale(1)} 100%{opacity:1;transform:scale(1.06)} }
+
+>>>>>>> f7b98f9b6ecabf8d800f9c0521948f7f5db79dbc
