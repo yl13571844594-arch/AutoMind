@@ -1,0 +1,7 @@
+{
+  "name": "task-timer",
+  "version": "1.0.0",
+  "description": "记录每个任务的起止时间与耗时（示例插件）",
+  "author": "AutoMind Examples",
+  "entry_point": "hooks:get_hooks"
+}

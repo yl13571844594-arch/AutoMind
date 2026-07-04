@@ -1,0 +1,905 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AutoMind 使用手册 — v0.3.0</title>
+<style>
+:root{
+  --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
+  --text:#e8ecf6; --text2:#a7b0c8; --text3:#6b7591;
+  --accent:#7b9fff; --accent2:#b594ff; --green:#3ce68a; --red:#ff6b6b; --yellow:#f5c542; --cyan:#6ce0ff;
+  --grad:linear-gradient(135deg,#7b9fff,#b594ff);
+  --border:rgba(108,140,255,.14); --glow:rgba(123,159,255,.35);
+  --radius:16px; --mono:'Cascadia Code','JetBrains Mono',Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:'Inter',system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+  background:var(--bg0); color:var(--text); line-height:1.75; font-size:15.5px;
+}
+body::before{content:'';position:fixed;inset:0;z-index:-1;background:
+  radial-gradient(ellipse 60% 50% at 15% 40%,rgba(108,140,255,.07) 0%,transparent 70%),
+  radial-gradient(ellipse 50% 60% at 85% 25%,rgba(157,123,255,.06) 0%,transparent 70%),
+  radial-gradient(ellipse 40% 40% at 50% 90%,rgba(58,209,127,.04) 0%,transparent 70%);}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+
+/* ── 布局 ── */
+#wrap{display:flex;max-width:1280px;margin:0 auto}
+#toc{
+  width:240px;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto;
+  padding:28px 14px 40px 20px;border-right:1px solid var(--border);
+  background:rgba(10,14,26,.5);backdrop-filter:blur(20px);
+}
+#toc .logo{font-weight:800;font-size:1.15em;margin-bottom:4px;
+  background:var(--grad);-webkit-background-clip:text;background-clip:text;color:transparent}
+#toc .ver{font-size:.72em;color:var(--text3);margin-bottom:18px}
+#toc a{display:block;padding:5px 10px;margin:1px 0;border-radius:8px;color:var(--text2);
+  font-size:.84em;transition:.18s}
+#toc a:hover{background:var(--bg2);color:var(--text);text-decoration:none}
+#toc a.sub{padding-left:24px;font-size:.78em;color:var(--text3)}
+main{flex:1;min-width:0;padding:0 40px 100px}
+@media(max-width:900px){#toc{display:none}main{padding:0 18px 60px}}
+
+/* ── Hero ── */
+#hero{padding:64px 0 40px;text-align:center;position:relative}
+#hero h1{font-size:2.6em;font-weight:800;letter-spacing:-.02em;
+  background:linear-gradient(135deg,#7b9fff 0%,#b594ff 45%,#6ce0ff 90%);
+  -webkit-background-clip:text;background-clip:text;color:transparent}
+#hero .sub{color:var(--text2);margin-top:10px;font-size:1.05em}
+#hero .chips{margin-top:22px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}
+.chip{padding:6px 16px;border-radius:99px;border:1px solid var(--border);
+  background:var(--bg2);backdrop-filter:blur(10px);font-size:.82em;color:var(--text2)}
+.chip b{color:var(--text)}
+
+/* ── 章节 ── */
+section{margin-top:64px;scroll-margin-top:24px}
+h2{font-size:1.7em;font-weight:800;letter-spacing:-.01em;margin-bottom:6px;
+  display:flex;align-items:center;gap:12px}
+h2 .num{font-size:.55em;font-weight:700;color:var(--bg0);background:var(--grad);
+  border-radius:8px;padding:3px 10px;box-shadow:0 3px 14px var(--glow)}
+h3{font-size:1.12em;margin:30px 0 10px;color:var(--cyan);font-weight:700}
+.lead{color:var(--text2);margin:8px 0 20px}
+p{margin:10px 0}
+strong{color:#fff}
+
+/* ── 卡片 ── */
+.card{background:var(--bg1);border:1px solid var(--border);border-radius:var(--radius);
+  padding:20px 24px;margin:16px 0;backdrop-filter:blur(18px) saturate(130%);
+  box-shadow:0 4px 24px rgba(0,0,0,.25), inset 0 1px 0 rgba(255,255,255,.03)}
+.grid{display:grid;gap:14px;margin:16px 0}
+.g2{grid-template-columns:repeat(auto-fit,minmax(280px,1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}
+.tile{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:18px;
+  backdrop-filter:blur(12px);transition:.25s}
+.tile:hover{border-color:rgba(123,159,255,.35);box-shadow:0 6px 32px rgba(123,159,255,.1);transform:translateY(-2px)}
+.tile .ic{font-size:1.7em;margin-bottom:8px}
+.tile b{display:block;margin-bottom:6px;font-size:1.02em}
+.tile p{color:var(--text2);font-size:.86em;margin:0}
+
+/* ── 表格 ── */
+table{width:100%;border-collapse:collapse;margin:14px 0;font-size:.88em;
+  background:var(--bg1);border-radius:12px;overflow:hidden}
+th{background:rgba(123,159,255,.1);color:var(--accent);text-align:left;
+  padding:10px 14px;font-weight:700;border-bottom:1px solid var(--border)}
+td{padding:9px 14px;border-bottom:1px solid rgba(108,140,255,.07);color:var(--text2);vertical-align:top}
+tr:last-child td{border-bottom:none}
+td b, td code{color:var(--text)}
+.tbl-wrap{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}
+.tbl-wrap table{margin:0;border-radius:0}
+
+/* ── 代码 ── */
+code{font-family:var(--mono);font-size:.86em;background:rgba(123,159,255,.12);
+  padding:1.5px 7px;border-radius:6px;color:var(--cyan)}
+pre{background:#0a0e1c;border:1px solid var(--border);border-radius:12px;
+  padding:16px 20px;overflow-x:auto;margin:14px 0;position:relative}
+pre code{background:none;padding:0;color:#c9d4f0;font-size:.85em;line-height:1.7}
+pre .cm{color:var(--text3)}
+pre .kw{color:var(--accent2)}
+pre .st{color:var(--green)}
+
+/* ── 提示框 ── */
+.note{border-left:3px solid var(--accent);background:rgba(123,159,255,.07);
+  border-radius:0 12px 12px 0;padding:12px 18px;margin:14px 0;font-size:.92em;color:var(--text2)}
+.note.warn{border-color:var(--yellow);background:rgba(245,197,66,.07)}
+.note.danger{border-color:var(--red);background:rgba(255,107,107,.07)}
+.note.ok{border-color:var(--green);background:rgba(60,230,138,.06)}
+.note b{color:var(--text)}
+
+/* ── 标签 ── */
+.tag{display:inline-block;padding:1px 10px;border-radius:99px;font-size:.74em;font-weight:600}
+.tag.safe{background:rgba(60,230,138,.15);color:var(--green)}
+.tag.sen{background:rgba(245,197,66,.15);color:var(--yellow)}
+.tag.dan{background:rgba(255,107,107,.15);color:var(--red)}
+.kbd{font-family:var(--mono);font-size:.8em;background:var(--bg3);border:1px solid var(--border);
+  border-bottom-width:2.5px;border-radius:7px;padding:2px 9px;color:var(--text)}
+
+/* ── 步骤条 ── */
+.steps{display:flex;gap:0;margin:26px 0;flex-wrap:wrap}
+.step{flex:1;min-width:190px;position:relative;padding:0 14px 0 0}
+.step .dot{width:40px;height:40px;border-radius:50%;background:var(--grad);
+  display:flex;align-items:center;justify-content:center;font-weight:800;color:#0a0e1c;
+  box-shadow:0 4px 18px var(--glow);margin-bottom:12px;font-size:1.05em}
+.step::after{content:'';position:absolute;top:20px;left:52px;right:6px;height:2px;
+  background:linear-gradient(90deg,rgba(123,159,255,.5),rgba(123,159,255,.08))}
+.step:last-child::after{display:none}
+.step b{display:block;margin-bottom:4px}
+.step p{font-size:.84em;color:var(--text2);margin:0}
+
+/* ── 模式卡 ── */
+.mode-card{border-radius:var(--radius);padding:22px 26px;margin:18px 0;
+  background:var(--bg1);border:1px solid var(--border);backdrop-filter:blur(16px);
+  border-left-width:4px}
+.mode-card h4{font-size:1.15em;margin-bottom:8px;display:flex;align-items:center;gap:10px}
+.mode-card h4 .sub{font-size:.68em;color:var(--text3);font-weight:500}
+.mc-chat{border-left-color:var(--accent)} .mc-work{border-left-color:var(--green)}
+.mc-code{border-left-color:var(--cyan)} .mc-multi{border-left-color:var(--accent2)}
+.mc-loop{border-left-color:var(--yellow)}
+.mode-card .row{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}
+.pill{font-size:.76em;padding:3px 12px;border-radius:99px;background:var(--bg3);color:var(--text2);
+  border:1px solid var(--border)}
+
+/* ── SVG 图 ── */
+.fig{margin:22px 0;text-align:center}
+.fig svg{max-width:100%;height:auto}
+.fig .cap{font-size:.8em;color:var(--text3);margin-top:8px}
+
+/* ── FAQ ── */
+details{background:var(--bg1);border:1px solid var(--border);border-radius:12px;
+  margin:10px 0;overflow:hidden;backdrop-filter:blur(12px)}
+summary{padding:14px 20px;cursor:pointer;font-weight:600;list-style:none;
+  display:flex;align-items:center;gap:10px;transition:.2s}
+summary::before{content:'▸';color:var(--accent);transition:.2s}
+details[open] summary::before{transform:rotate(90deg)}
+summary:hover{background:rgba(123,159,255,.06)}
+details .body{padding:2px 20px 16px 42px;color:var(--text2);font-size:.92em}
+
+footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
+  text-align:center;color:var(--text3);font-size:.84em}
+.hr{height:1px;background:linear-gradient(90deg,transparent,var(--border),transparent);margin:34px 0}
+</style>
+</head>
+<body>
+<div id="wrap">
+
+<!-- ═══════ 目录 ═══════ -->
+<nav id="toc">
+  <div class="logo">⬢ AutoMind</div>
+  <div class="ver">使用手册 · v0.3.0</div>
+  <a href="#intro">1 · 产品简介</a>
+  <a href="#quick">2 · 快速上手</a>
+  <a href="#ui">3 · 界面总览</a>
+  <a href="#modes">4 · 五种交互模式</a>
+  <a class="sub" href="#m-chat">💬 对话</a>
+  <a class="sub" href="#m-work">⚙️ 工作</a>
+  <a class="sub" href="#m-code">💻 编程</a>
+  <a class="sub" href="#m-multi">🤝 协同</a>
+  <a class="sub" href="#m-loop">🔁 循环</a>
+  <a href="#safety">5 · 审批与安全</a>
+  <a href="#models">6 · 模型配置</a>
+  <a href="#tools">7 · 工具面板</a>
+  <a class="sub" href="#t-tools">🔧 工具</a>
+  <a class="sub" href="#t-skills">✨ 技能</a>
+  <a class="sub" href="#t-mcp">🔌 MCP</a>
+  <a class="sub" href="#t-plugins">🧩 插件</a>
+  <a href="#advanced">8 · 高级功能</a>
+  <a class="sub" href="#autopilot">🔄 自主闭环</a>
+  <a href="#cli">9 · 命令行与 REPL</a>
+  <a href="#deploy">10 · 部署与运维</a>
+  <a href="#faq">11 · 常见问题</a>
+  <a href="#appendix">12 · 附录速查</a>
+</nav>
+
+<main>
+
+<!-- ═══════ Hero ═══════ -->
+<div id="hero">
+  <h1>AutoMind 使用手册</h1>
+  <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
+  <div class="chips">
+    <span class="chip">版本 <b>v0.3.0</b></span>
+    <span class="chip">🖥 本地运行 · 数据不上传</span>
+    <span class="chip">🛡 全程审批与审计</span>
+    <span class="chip">🧠 10+ 模型提供商</span>
+  </div>
+</div>
+
+<!-- ═══════ 1 产品简介 ═══════ -->
+<section id="intro">
+  <h2><span class="num">01</span>产品简介</h2>
+  <p class="lead">普通 AI 聊天工具只能"说"；<strong>AutoMind 除了聊天，还能真正在你的电脑上执行操作</strong>：
+  创建文件、修改代码、运行命令、抓取网页、生成报告——并且做每件事之前先自己<strong>规划步骤</strong>，
+  做完自己<strong>检查结果</strong>，出错自己<strong>纠正重试</strong>。</p>
+
+  <div class="grid g3">
+    <div class="tile"><div class="ic">🧭</div><b>先规划再动手</b><p>大任务自动拆解为目标树，按依赖顺序逐步执行，每步验证效果</p></div>
+    <div class="tile"><div class="ic">🛡️</div><b>安全可控</b><p>每次工具调用经风险评估与审批门控，高危操作必须你亲自批准</p></div>
+    <div class="tile"><div class="ic">🔄</div><b>自我纠错</b><p>失败时自动分析错误、生成修正方案重试，必要时回溯调整计划</p></div>
+    <div class="tile"><div class="ic">🔌</div><b>模型自由</b><p>OpenAI / Claude / DeepSeek / Kimi / 通义 / 智谱 / 豆包 / Ollama / 中转代理</p></div>
+    <div class="tile"><div class="ic">🧩</div><b>三套扩展体系</b><p>技能 Skill · MCP 服务器 · 生命周期插件，随需接入你的专属能力</p></div>
+    <div class="tile"><div class="ic">🏠</div><b>本地私有</b><p>配置、聊天记录、API Key 全部保存在你自己的电脑，绝不上传</p></div>
+  </div>
+
+  <h3>它能帮你做什么？</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>你想做的事</th><th>AutoMind 怎么帮你</th></tr>
+    <tr><td>问问题、写文案、翻译</td><td>💬 对话模式，像聊天软件一样直接问</td></tr>
+    <tr><td>「帮我建一个 Python 项目」</td><td>⚙️ 工作模式：自动建目录、写配置、装依赖</td></tr>
+    <tr><td>「修复 main.py 里的 bug」</td><td>💻 编程模式：读代码 → 分析 → 改代码 → 验证</td></tr>
+    <tr><td>「写一份行业调研报告」</td><td>🤝 协同模式：研究员 + 编写员 + 审阅员多角色协作</td></tr>
+    <tr><td>「持续优化代码直到测试全过」</td><td>🔁 循环模式：反复"执行→检查→改进"直到达标</td></tr>
+    <tr><td>「每天 9 点汇总昨日日志」</td><td>⏰ 定时任务：后台自动执行并记录结果</td></tr>
+  </table></div>
+</section>
+
+<!-- ═══════ 2 快速上手 ═══════ -->
+<section id="quick">
+  <h2><span class="num">02</span>快速上手（零基础五分钟）</h2>
+
+  <div class="steps">
+    <div class="step"><div class="dot">1</div><b>安装</b><p>软件目录打开命令行执行<br><code>pip install -e ".[web]"</code></p></div>
+    <div class="step"><div class="dot">2</div><b>启动</b><p>双击 <code>launch.bat</code> 选 [2]，<br>或 <code>python -m automind.server</code></p></div>
+    <div class="step"><div class="dot">3</div><b>配置模型</b><p>右上角「🔑 API Keys」填 Key，<br>点「🔌 测试连接」变绿即成功</p></div>
+    <div class="step"><div class="dot">4</div><b>第一个任务</b><p>切「⚙️ 工作」模式，输入任务，<br>看它实时规划并执行</p></div>
+  </div>
+
+  <div class="note"><b>前提：</b>电脑已安装 Python 3.11+（命令行输入 <code>python --version</code> 查看）。
+  服务器部署可直接 <code>docker compose up --build</code>。</div>
+
+  <h3>三种启动方式</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>方式</th><th>操作</th><th>适合</th></tr>
+    <tr><td><b>Windows 一键</b></td><td>双击 <code>launch.bat</code>，选 <code>[2]</code> 自动打开浏览器</td><td>最简单</td></tr>
+    <tr><td><b>命令行</b></td><td><code>python -m automind.server --port 8765</code> → 浏览器打开 <code>http://localhost:8765</code></td><td>通用</td></tr>
+    <tr><td><b>Docker</b></td><td><code>docker compose up --build</code></td><td>服务器部署</td></tr>
+  </table></div>
+
+  <div class="note ok"><b>没有任何 API Key？</b>两个零成本方案：
+  ① 本地 <b>Ollama</b>——安装后 <code>ollama run llama3.2</code>，无需 Key；
+  ② <b>中转代理</b>——API Keys 面板底部「自定义 OpenAI 标准接口」填入代理的 api_base、模型名和 Key。</div>
+
+  <h3>试一试：第一个任务</h3>
+  <pre><code><span class="cm"># 模式切到「⚙️ 工作」，输入框输入：</span>
+在当前目录创建 hello.txt，内容为 Hello AutoMind</code></pre>
+  <p>执行时：聊天区出现<strong>「⚙️ 执行过程」实时轨迹</strong>（计划生成 → 逐步执行 → 完成），
+  右侧「📋 执行计划」同步刷新每步状态（○ 待执行 → ◐ 执行中 → ✓ 完成），
+  完成后项目目录里 <code>hello.txt</code> 真实存在。</p>
+</section>
+
+<!-- ═══════ 3 界面总览 ═══════ -->
+<section id="ui">
+  <h2><span class="num">03</span>界面总览</h2>
+
+  <div class="fig">
+  <svg viewBox="0 0 860 430" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="13">
+    <defs>
+      <linearGradient id="gd" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#7b9fff"/><stop offset="1" stop-color="#b594ff"/>
+      </linearGradient>
+    </defs>
+    <!-- 外框 -->
+    <rect x="10" y="10" width="840" height="410" rx="16" fill="#0d1222" stroke="#2a3557"/>
+    <!-- 侧边栏 -->
+    <rect x="10" y="10" width="150" height="410" rx="16" fill="#101830"/>
+    <rect x="26" y="30" width="118" height="26" rx="8" fill="url(#gd)" opacity=".9"/>
+    <text x="85" y="48" text-anchor="middle" fill="#0a0e1c" font-weight="700">⬢ AutoMind</text>
+    <text x="26" y="86" fill="#6b7591" font-size="10">工作区</text>
+    <g fill="#a7b0c8">
+      <text x="30" y="108">💬 对话工作台</text>
+      <text x="30" y="132">📋 计划视图</text>
+      <text x="30" y="156">🔧 工具面板</text>
+    </g>
+    <text x="26" y="184" fill="#6b7591" font-size="10">系统</text>
+    <g fill="#a7b0c8">
+      <text x="30" y="206">📊 统计分析</text>
+      <text x="30" y="230">⏰ 定时任务</text>
+      <text x="30" y="254">📜 任务历史</text>
+      <text x="30" y="278">🛡️ 安全审计</text>
+    </g>
+    <!-- 顶栏 -->
+    <rect x="170" y="22" width="460" height="34" rx="10" fill="#141c36"/>
+    <rect x="178" y="28" width="52" height="22" rx="7" fill="url(#gd)"/>
+    <text x="204" y="43" text-anchor="middle" fill="#0a0e1c" font-size="11" font-weight="700">💬对话</text>
+    <text x="248" y="43" fill="#a7b0c8" font-size="11">⚙️工作</text>
+    <text x="298" y="43" fill="#a7b0c8" font-size="11">💻编程</text>
+    <text x="348" y="43" fill="#a7b0c8" font-size="11">🤝协同</text>
+    <text x="398" y="43" fill="#a7b0c8" font-size="11">🔁循环</text>
+    <rect x="448" y="27" width="66" height="23" rx="7" fill="#1a2340" stroke="#2a3557"/>
+    <text x="481" y="43" text-anchor="middle" fill="#f5c542" font-size="10">⚡ 自动 ▾</text>
+    <rect x="522" y="27" width="100" height="23" rx="7" fill="#0f2a1e"/>
+    <text x="572" y="43" text-anchor="middle" fill="#3ce68a" font-size="10">deepseek/chat ●</text>
+    <!-- 顶栏按钮 -->
+    <g fill="#a7b0c8" font-size="10.5">
+      <text x="644" y="43">🖥模型 🔑Keys ⚙设置 🔄新会话</text>
+    </g>
+    <!-- 聊天区 -->
+    <rect x="170" y="66" width="460" height="290" rx="12" fill="#0a0f20"/>
+    <rect x="186" y="84" width="300" height="46" rx="12" fill="#141c36"/>
+    <text x="200" y="103" fill="#a7b0c8" font-size="11">👋 欢迎使用 AutoMind 通用自动化 Agent</text>
+    <text x="200" y="120" fill="#6b7591" font-size="10">顶部可切换五种模式…</text>
+    <rect x="330" y="142" width="284" height="34" rx="12" fill="url(#gd)" opacity=".85"/>
+    <text x="472" y="163" text-anchor="middle" fill="#0a0e1c" font-size="11" font-weight="600">创建一个 FastAPI 项目，带健康检查</text>
+    <rect x="186" y="188" width="360" height="110" rx="12" fill="#141c36" stroke="#2a3557"/>
+    <text x="200" y="210" fill="#b594ff" font-size="11" font-weight="700">⚙️ 执行过程</text>
+    <g font-size="10.5">
+      <text x="204" y="232" fill="#7b9fff">🧠 规划：拆解为 4 个步骤…</text>
+      <text x="204" y="252" fill="#3ce68a">🔧 terminal → mkdir fastapi-demo ✓</text>
+      <text x="204" y="272" fill="#3ce68a">🔧 file_write → main.py ✓</text>
+      <text x="204" y="292" fill="#a7b0c8">◐ 正在执行：pip install fastapi…</text>
+    </g>
+    <!-- 输入区 -->
+    <rect x="170" y="366" width="460" height="42" rx="12" fill="#141c36"/>
+    <text x="186" y="392" fill="#a7b0c8" font-size="13">📎 🎤</text>
+    <text x="236" y="392" fill="#6b7591" font-size="11">输入消息，Enter 发送，Shift+Enter 换行…</text>
+    <rect x="560" y="373" width="28" height="28" rx="9" fill="url(#gd)"/>
+    <text x="574" y="392" text-anchor="middle" fill="#0a0e1c" font-weight="700">▶</text>
+    <rect x="594" y="373" width="28" height="28" rx="9" fill="#2a1a1a"/>
+    <text x="608" y="392" text-anchor="middle" fill="#ff6b6b" font-weight="700">■</text>
+    <!-- 右栏 -->
+    <rect x="640" y="22" width="200" height="386" rx="12" fill="#101830"/>
+    <text x="656" y="46" fill="#e8ecf6" font-size="11" font-weight="700">📊 实时状态</text>
+    <g font-size="10">
+      <rect x="654" y="56" width="82" height="34" rx="8" fill="#1a2340"/>
+      <text x="662" y="70" fill="#6b7591">步骤</text><text x="662" y="84" fill="#e8ecf6" font-weight="700">3</text>
+      <rect x="744" y="56" width="82" height="34" rx="8" fill="#1a2340"/>
+      <text x="752" y="70" fill="#6b7591">Tokens</text><text x="752" y="84" fill="#e8ecf6" font-weight="700">2,418</text>
+    </g>
+    <text x="656" y="118" fill="#e8ecf6" font-size="11" font-weight="700">🪙 Token 用量</text>
+    <rect x="654" y="128" width="172" height="8" rx="4" fill="#1a2340"/>
+    <rect x="654" y="128" width="96" height="8" rx="4" fill="url(#gd)"/>
+    <text x="656" y="162" fill="#e8ecf6" font-size="11" font-weight="700">📋 执行计划</text>
+    <g font-size="10" fill="#a7b0c8">
+      <text x="660" y="182">✓ 创建项目目录</text>
+      <text x="660" y="200">✓ 编写 main.py</text>
+      <text x="660" y="218" fill="#7b9fff">◐ 安装依赖</text>
+      <text x="660" y="236" fill="#6b7591">○ 运行验证</text>
+    </g>
+    <text x="656" y="268" fill="#e8ecf6" font-size="11" font-weight="700">🌐 HTML 预览</text>
+    <text x="660" y="288" fill="#6b7591" font-size="10">report.html →</text>
+    <text x="656" y="318" fill="#e8ecf6" font-size="11" font-weight="700">🛡️ 审计概览</text>
+    <g font-size="10" fill="#a7b0c8">
+      <text x="660" y="338">terminal <tspan fill="#3ce68a">allow</tspan></text>
+      <text x="660" y="356">file_write <tspan fill="#3ce68a">allow</tspan></text>
+    </g>
+    <!-- 标注 -->
+    <g font-size="11" font-weight="700">
+      <text x="85" y="405" text-anchor="middle" fill="#7b9fff">① 侧边栏</text>
+      <text x="400" y="14" text-anchor="middle" fill="#7b9fff">② 模式 + 审批 + 状态</text>
+      <text x="708" y="14" fill="#7b9fff">③ 观测面板</text>
+    </g>
+  </svg>
+  <div class="cap">图 3-1 · 界面三区布局：① 侧边栏导航 ② 顶部控制 + 聊天工作区 ③ 右侧实时观测面板</div>
+  </div>
+
+  <h3>键盘快捷键</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>快捷键</th><th>功能</th></tr>
+    <tr><td><span class="kbd">Enter</span> / <span class="kbd">Shift+Enter</span></td><td>发送 / 换行</td></tr>
+    <tr><td><span class="kbd">Esc</span></td><td>关闭所有弹窗</td></tr>
+    <tr><td><span class="kbd">Ctrl + .</span></td><td>中断当前任务</td></tr>
+    <tr><td><span class="kbd">Ctrl + L</span></td><td>新会话（清空当前模式对话）</td></tr>
+  </table></div>
+
+  <div class="note"><b>会话隔离：</b>五种模式的聊天内容<strong>互相独立</strong>，切换模式不丢各自记录；
+  每个浏览器也持有独立会话 ID，多人共用一台服务互不可见。</div>
+</section>
+
+<!-- ═══════ 4 五种模式 ═══════ -->
+<section id="modes">
+  <h2><span class="num">04</span>五种交互模式深度解读</h2>
+  <p class="lead">模式决定了 AutoMind「怎么思考、要不要动手、如何收尾」。选对模式，事半功倍。</p>
+
+  <div class="mode-card mc-chat" id="m-chat">
+    <h4>💬 对话模式 <span class="sub">—— "问答专家"</span></h4>
+    <p><b>原理：</b>纯多轮对话直连大模型，不调用任何工具，响应最快。支持图片输入（需视觉模型如 gpt-4o / qwen-vl）。</p>
+    <div class="row"><span class="pill">知识问答</span><span class="pill">文案 / 翻译 / 润色</span><span class="pill">头脑风暴</span><span class="pill">看图提问 / 读报错截图</span></div>
+    <div class="note warn" style="margin-bottom:0"><b>不适合：</b>需要操作文件/命令的任务——它在此模式下没有"手"，请切工作或编程模式。</div>
+  </div>
+
+  <div class="mode-card mc-work" id="m-work">
+    <h4>⚙️ 工作模式 <span class="sub">—— "项目经理 + 执行团队"（Plan-and-Execute）</span></h4>
+    <div class="fig">
+    <svg viewBox="0 0 820 130" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+      <defs><marker id="ar" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+        <path d="M0,0 L7,3 L0,6" fill="none" stroke="#7b9fff" stroke-width="1.4"/></marker></defs>
+      <g text-anchor="middle">
+        <rect x="10" y="35" width="130" height="52" rx="12" fill="rgba(123,159,255,.12)" stroke="#7b9fff"/>
+        <text x="75" y="57" fill="#e8ecf6" font-weight="700">① 分层规划</text>
+        <text x="75" y="75" fill="#a7b0c8" font-size="10">任务拆成目标树</text>
+        <rect x="175" y="35" width="130" height="52" rx="12" fill="rgba(123,159,255,.12)" stroke="#7b9fff"/>
+        <text x="240" y="57" fill="#e8ecf6" font-weight="700">② 依赖排序</text>
+        <text x="240" y="75" fill="#a7b0c8" font-size="10">先建目录再写文件</text>
+        <rect x="340" y="35" width="130" height="52" rx="12" fill="rgba(60,230,138,.12)" stroke="#3ce68a"/>
+        <text x="405" y="57" fill="#e8ecf6" font-weight="700">③ 逐步执行</text>
+        <text x="405" y="75" fill="#a7b0c8" font-size="10">工具调用过审批门控</text>
+        <rect x="505" y="35" width="130" height="52" rx="12" fill="rgba(108,224,255,.12)" stroke="#6ce0ff"/>
+        <text x="570" y="57" fill="#e8ecf6" font-weight="700">④ 符号验证</text>
+        <text x="570" y="75" fill="#a7b0c8" font-size="10">校验预期效果</text>
+        <rect x="670" y="35" width="140" height="52" rx="12" fill="rgba(245,197,66,.12)" stroke="#f5c542"/>
+        <text x="740" y="57" fill="#e8ecf6" font-weight="700">⑤ 纠错 / 回溯</text>
+        <text x="740" y="75" fill="#a7b0c8" font-size="10">失败自动修正重试</text>
+      </g>
+      <g stroke="#7b9fff" stroke-width="1.4" marker-end="url(#ar)" fill="none">
+        <line x1="140" y1="61" x2="172" y2="61"/><line x1="305" y1="61" x2="337" y2="61"/>
+        <line x1="470" y1="61" x2="502" y2="61"/><line x1="635" y1="61" x2="667" y2="61"/>
+      </g>
+      <path d="M 740 87 Q 740 118 405 118 Q 405 100 405 90" fill="none" stroke="#f5c542" stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar)"/>
+      <text x="572" y="114" fill="#f5c542" font-size="10" text-anchor="middle">修正后重新执行该步</text>
+    </svg>
+    <div class="cap">图 4-1 · 工作模式五步流水线</div>
+    </div>
+    <div class="row"><span class="pill">「初始化一个 FastAPI 项目，带健康检查和 Dockerfile」</span>
+    <span class="pill">「合并目录下所有 CSV 并生成汇总图表」</span><span class="pill">多步骤有依赖的自动化</span></div>
+    <div class="note ok" style="margin-bottom:0"><b>建议：</b>任务描述越具体（目标目录、技术栈、验收标准），规划质量越高。
+    执行时盯右栏「📋 执行计划」树与聊天区「⚙️ 执行过程」轨迹即可看懂它"在想什么"。</div>
+  </div>
+
+  <div class="mode-card mc-code" id="m-code">
+    <h4>💻 编程模式 <span class="sub">—— "结对程序员"（ReAct 循环）</span></h4>
+    <div class="fig">
+    <svg viewBox="0 0 560 170" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+      <defs><marker id="ar2" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+        <path d="M0,0 L7,3 L0,6" fill="none" stroke="#6ce0ff" stroke-width="1.4"/></marker></defs>
+      <g text-anchor="middle">
+        <ellipse cx="120" cy="55" rx="75" ry="32" fill="rgba(123,159,255,.12)" stroke="#7b9fff"/>
+        <text x="120" y="52" fill="#e8ecf6" font-weight="700">🧠 思考</text>
+        <text x="120" y="68" fill="#a7b0c8" font-size="10">下一步该做什么？</text>
+        <ellipse cx="300" cy="55" rx="75" ry="32" fill="rgba(60,230,138,.12)" stroke="#3ce68a"/>
+        <text x="300" y="52" fill="#e8ecf6" font-weight="700">🔧 行动</text>
+        <text x="300" y="68" fill="#a7b0c8" font-size="10">读文件 / 改代码 / 跑命令</text>
+        <ellipse cx="480" cy="55" rx="72" ry="32" fill="rgba(108,224,255,.12)" stroke="#6ce0ff"/>
+        <text x="480" y="52" fill="#e8ecf6" font-weight="700">👁 观察</text>
+        <text x="480" y="68" fill="#a7b0c8" font-size="10">结果如何？</text>
+      </g>
+      <g stroke="#6ce0ff" stroke-width="1.4" marker-end="url(#ar2)" fill="none">
+        <line x1="196" y1="55" x2="222" y2="55"/>
+        <line x1="376" y1="55" x2="404" y2="55"/>
+        <path d="M 452 85 Q 300 150 148 85"/>
+      </g>
+      <text x="300" y="135" fill="#6ce0ff" font-size="10.5" text-anchor="middle">带着观察结果进入下一轮，直到判断任务完成</text>
+    </svg>
+    <div class="cap">图 4-2 · ReAct 思考-行动-观察循环</div>
+    </div>
+    <p><b>与工作模式的区别：</b>不预先定死计划，<strong>边做边调整</strong>——更适合"看了代码才知道下一步"的探索性任务。
+    思考（蓝卡）与工具调用（绿卡）全程流式展示。</p>
+    <div class="row"><span class="pill">「找出 main.py 启动报错的原因并修好」</span><span class="pill">补类型注解 / 写测试 / 重构</span>
+    <span class="pill">代码审查</span></div>
+    <div class="note" style="margin-bottom:0"><b>建议：</b>先在「⚙ 设置」把<strong>项目目录</strong>指到代码仓库根——它读写以此为根，且受路径防护约束不会越界。</div>
+  </div>
+
+  <div class="mode-card mc-multi" id="m-multi">
+    <h4>🤝 协同模式 <span class="sub">—— "多角色专家组"（多智能体编排）</span></h4>
+    <p><b>原理：</b>任务分派给多个角色（规划者 / 研究员 / 编程者 / 审阅者），
+    各自基于<strong>共享白板</strong>完成子任务并互相看得到彼此成果，最后综合产出。</p>
+    <div class="row"><span class="pill">「调研三个向量数据库优劣并给选型建议」</span>
+    <span class="pill">「设计签到系统：方案 + 骨架 + 风险评估」</span><span class="pill">需要多视角的复杂长任务</span></div>
+  </div>
+
+  <div class="mode-card mc-loop" id="m-loop">
+    <h4>🔁 循环模式 <span class="sub">—— "不达目标不罢休"（Loop Engineering）</span></h4>
+    <p><b>原理：</b>执行 → 判定"目标达成了吗" → 未达成则带着反馈继续下一轮。内置<strong>四重停止条件</strong>防死循环：</p>
+    <div class="fig">
+    <svg viewBox="0 0 780 96" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+      <g text-anchor="middle">
+        <rect x="8" y="18" width="180" height="58" rx="12" fill="rgba(60,230,138,.1)" stroke="#3ce68a"/>
+        <text x="98" y="42" fill="#3ce68a" font-weight="700">① 语义完成</text>
+        <text x="98" y="62" fill="#a7b0c8" font-size="10.5">模型判定任务已达标</text>
+        <rect x="204" y="18" width="180" height="58" rx="12" fill="rgba(108,224,255,.1)" stroke="#6ce0ff"/>
+        <text x="294" y="42" fill="#6ce0ff" font-weight="700">② 输出收敛</text>
+        <text x="294" y="62" fill="#a7b0c8" font-size="10.5">连续两轮相似度 &gt; 0.95</text>
+        <rect x="400" y="18" width="180" height="58" rx="12" fill="rgba(245,197,66,.1)" stroke="#f5c542"/>
+        <text x="490" y="42" fill="#f5c542" font-weight="700">③ 连续空转</text>
+        <text x="490" y="62" fill="#a7b0c8" font-size="10.5">两轮无任何实际操作</text>
+        <rect x="596" y="18" width="176" height="58" rx="12" fill="rgba(255,107,107,.1)" stroke="#ff6b6b"/>
+        <text x="684" y="42" fill="#ff6b6b" font-weight="700">④ 最大轮数</text>
+        <text x="684" y="62" fill="#a7b0c8" font-size="10.5">兜底上限</text>
+      </g>
+    </svg>
+    <div class="cap">图 4-3 · 循环模式四重停止条件</div>
+    </div>
+    <div class="row"><span class="pill">「优化到基准测试 &lt;100ms」</span><span class="pill">「修到测试全部通过」</span>
+    <span class="pill">「压缩到 500 字且保留要点」</span></div>
+    <div class="note ok" style="margin-bottom:0"><b>关键技巧：</b>任务里<strong>写清验收标准</strong>（"直到测试全过"），判定器才有明确依据。可随时 ■ 中断。</div>
+  </div>
+
+  <h3>模式选择决策</h3>
+  <div class="card" style="font-family:var(--mono);font-size:.9em;color:var(--text2)">
+    只是想问 / 写点东西？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 💬 对话<br>
+    让它替我做一件多步骤的事？&nbsp;&nbsp;→ ⚙️ 工作<br>
+    围绕代码读改测？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 💻 编程<br>
+    复杂问题要多角度方案？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 🤝 协同<br>
+    有明确标准要迭代到达标？&nbsp;&nbsp;&nbsp;&nbsp;→ 🔁 循环
+  </div>
+</section>
+
+<!-- ═══════ 5 安全 ═══════ -->
+<section id="safety">
+  <h2><span class="num">05</span>工具审批与安全体系</h2>
+  <p class="lead">每次工具调用都被安全体系拦截评估——你可以精确控制"它能做什么"。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 820 210" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+    <defs><marker id="ar3" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6" fill="none" stroke="#a7b0c8" stroke-width="1.4"/></marker></defs>
+    <rect x="10" y="72" width="140" height="56" rx="12" fill="rgba(123,159,255,.12)" stroke="#7b9fff"/>
+    <text x="80" y="96" text-anchor="middle" fill="#e8ecf6" font-weight="700">工具调用请求</text>
+    <text x="80" y="114" text-anchor="middle" fill="#a7b0c8" font-size="10">terminal / file_write…</text>
+    <line x1="150" y1="100" x2="192" y2="100" stroke="#a7b0c8" stroke-width="1.4" marker-end="url(#ar3)"/>
+    <rect x="196" y="60" width="150" height="80" rx="12" fill="rgba(245,197,66,.1)" stroke="#f5c542"/>
+    <text x="271" y="88" text-anchor="middle" fill="#f5c542" font-weight="700">风险评估</text>
+    <text x="271" y="107" text-anchor="middle" fill="#a7b0c8" font-size="10">权限等级 + 动态风险分</text>
+    <text x="271" y="124" text-anchor="middle" fill="#a7b0c8" font-size="10">命令预检 / 路径检查</text>
+    <line x1="346" y1="100" x2="388" y2="100" stroke="#a7b0c8" stroke-width="1.4" marker-end="url(#ar3)"/>
+    <rect x="392" y="60" width="140" height="80" rx="12" fill="rgba(157,123,255,.12)" stroke="#b594ff"/>
+    <text x="462" y="88" text-anchor="middle" fill="#b594ff" font-weight="700">审批门控</text>
+    <text x="462" y="107" text-anchor="middle" fill="#a7b0c8" font-size="10">deny &gt; ask &gt; allow</text>
+    <text x="462" y="124" text-anchor="middle" fill="#a7b0c8" font-size="10">按当前审批模式</text>
+    <g stroke-width="1.4" fill="none" marker-end="url(#ar3)">
+      <line x1="532" y1="78" x2="588" y2="42" stroke="#3ce68a"/>
+      <line x1="532" y1="100" x2="588" y2="100" stroke="#f5c542"/>
+      <line x1="532" y1="122" x2="588" y2="162" stroke="#ff6b6b"/>
+    </g>
+    <rect x="592" y="22" width="122" height="40" rx="10" fill="rgba(60,230,138,.12)" stroke="#3ce68a"/>
+    <text x="653" y="47" text-anchor="middle" fill="#3ce68a" font-weight="700">放行执行 ✓</text>
+    <rect x="592" y="80" width="122" height="40" rx="10" fill="rgba(245,197,66,.12)" stroke="#f5c542"/>
+    <text x="653" y="105" text-anchor="middle" fill="#f5c542" font-weight="700">弹窗请你批准</text>
+    <rect x="592" y="142" width="122" height="40" rx="10" fill="rgba(255,107,107,.12)" stroke="#ff6b6b"/>
+    <text x="653" y="167" text-anchor="middle" fill="#ff6b6b" font-weight="700">直接拒绝 ✗</text>
+    <rect x="736" y="80" width="74" height="40" rx="10" fill="#141c36" stroke="#2a3557"/>
+    <text x="773" y="99" text-anchor="middle" fill="#a7b0c8" font-size="10.5">🛡️ 全部</text>
+    <text x="773" y="113" text-anchor="middle" fill="#a7b0c8" font-size="10.5">记入审计</text>
+    <line x1="714" y1="100" x2="732" y2="100" stroke="#a7b0c8" stroke-width="1.2" marker-end="url(#ar3)"/>
+  </svg>
+  <div class="cap">图 5-1 · 工具调用安全流水线：评估 → 门控 → 审计</div>
+  </div>
+
+  <h3>三种审批模式（顶部下拉切换）</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>模式</th><th>行为</th><th>适合场景</th></tr>
+    <tr><td>🙋 <b>询问</b></td><td>除只读操作外，<b>每次</b>工具调用都弹窗请你批准</td><td>首次使用 / 重要项目 / 想完全掌控</td></tr>
+    <tr><td>⚡ <b>自动</b>（默认）</td><td>低风险自动放行；风险分 ≥60 的敏感操作与所有高危操作需确认</td><td>日常使用最佳平衡</td></tr>
+    <tr><td>✅ <b>全批准</b></td><td>跳过所有审批，完全自主运行</td><td>沙箱环境批量任务；<b>慎用</b></td></tr>
+  </table></div>
+
+  <h3>权限分级</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>等级</th><th>示例</th><th>处理</th></tr>
+    <tr><td><span class="tag safe">safe 安全</span></td><td>读文件、列目录、git status</td><td>直接放行</td></tr>
+    <tr><td><span class="tag sen">sensitive 敏感</span></td><td>写文件、装依赖、git commit</td><td>按审批模式处理</td></tr>
+    <tr><td><span class="tag dan">dangerous 高危</span></td><td>rm -rf、sudo、强制推送</td><td>必须人工批准</td></tr>
+  </table></div>
+
+  <div class="note danger"><b>三重硬防护（独立于审批模式，始终生效）：</b>
+  ① <b>命令注入拦截</b> —— <code>rm -rf /</code>、fork bomb、写磁盘设备等灾难命令直接拒绝；
+  ② <b>路径防护</b> —— 文件读写限定在项目目录内，<code>../</code> 越界直接拒绝；
+  ③ <b>Python 沙箱</b> —— 代码执行仅允许白名单模块，禁止 os / subprocess。</div>
+
+  <p>事后追责：侧边栏「🛡️ 安全审计」记录每次调用的时间、工具、参数、决策、风险分与原因，
+  并汇总放行 / 询问 / 拒绝 / 高危次数。</p>
+</section>
+
+<!-- ═══════ 6 模型配置 ═══════ -->
+<section id="models">
+  <h2><span class="num">06</span>模型配置详解</h2>
+
+  <h3>支持的提供商（右上角 🔑 API Keys）</h3>
+  <div class="grid g3">
+    <div class="tile"><b>OpenAI</b><p>gpt-4o · platform.openai.com</p></div>
+    <div class="tile"><b>Anthropic Claude</b><p>claude-sonnet · console.anthropic.com</p></div>
+    <div class="tile"><b>DeepSeek</b><p>deepseek-chat · 性价比之选</p></div>
+    <div class="tile"><b>Kimi (Moonshot)</b><p>moonshot-v1 · platform.moonshot.cn</p></div>
+    <div class="tile"><b>百炼 (通义 Qwen)</b><p>qwen-max · dashscope.aliyun.com</p></div>
+    <div class="tile"><b>智谱 GLM</b><p>glm-4 · open.bigmodel.cn</p></div>
+    <div class="tile"><b>豆包 Doubao</b><p>volcengine.com</p></div>
+    <div class="tile"><b>Gemini / Grok</b><p>ai.google.dev · x.ai</p></div>
+    <div class="tile"><b>Ollama 本地 🆓</b><p>llama3.2 · 无需 Key，本机 ollama serve</p></div>
+  </div>
+
+  <div class="note"><b>自定义中转代理：</b>API Keys 面板底部填 <code>api_base</code>
+  （如 <code>https://api.your-proxy.com/v1</code>）+ 默认模型 + Key，
+  即可对接任何 OpenAI 兼容 <code>/v1/chat/completions</code> 服务。
+  Key 只保存在本地 <code>.automind_config.json</code>；也支持环境变量
+  （<code>OPENAI_API_KEY</code>、<code>DEEPSEEK_API_KEY</code> 等）。</div>
+
+  <h3>省钱与提效：各模式专用模型</h3>
+  <p>「🖥 模型」面板可为五种模式<strong>分别指定不同模型</strong>——
+  对话用便宜快的 <code>deepseek-chat</code>，编程用强力的 <code>claude-sonnet</code>，
+  实现<strong>成本 / 能力的精准分配</strong>。未指定的模式沿用全局默认。</p>
+
+  <h3>通用设置（⚙ 设置）</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>设置项</th><th>说明</th><th>建议</th></tr>
+    <tr><td><b>项目目录</b></td><td>Agent 一切文件操作的根（带可视化目录浏览器）</td><td>为不同项目切换对应目录，准确又安全</td></tr>
+    <tr><td><b>Temperature</b></td><td>0–2，越低越严谨、越高越发散</td><td>代码 0–0.3；创意 0.7+</td></tr>
+    <tr><td><b>最大输出 Token</b></td><td>单次回复长度上限</td><td>默认即可，长文档任务调大</td></tr>
+  </table></div>
+
+  <div class="note ok"><b>排障利器「🔌 测试连接」：</b>逐阶段验证 解析 → 连接 → 认证 → 响应，
+  精确告诉你 Key 失效、api_base 写错还是网络不通。</div>
+</section>
+
+<!-- ═══════ 7 工具面板 ═══════ -->
+<section id="tools">
+  <h2><span class="num">07</span>工具面板：工具 / 技能 / MCP / 插件</h2>
+  <p class="lead">侧边栏「🔧 工具面板」四个分段，对应 AutoMind 的四类可扩展能力。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 760 210" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+    <defs><linearGradient id="gd2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#7b9fff"/><stop offset="1" stop-color="#b594ff"/></linearGradient></defs>
+    <ellipse cx="380" cy="105" rx="105" ry="46" fill="url(#gd2)" opacity=".9"/>
+    <text x="380" y="100" text-anchor="middle" fill="#0a0e1c" font-weight="800" font-size="15">AutoMind</text>
+    <text x="380" y="120" text-anchor="middle" fill="#0a0e1c" font-size="11">Agent 核心</text>
+    <g fill="none" stroke="#3f4c76" stroke-width="1.3" stroke-dasharray="5 4">
+      <line x1="290" y1="72" x2="170" y2="44"/><line x1="470" y1="72" x2="590" y2="44"/>
+      <line x1="290" y1="138" x2="170" y2="168"/><line x1="470" y1="138" x2="590" y2="168"/>
+    </g>
+    <g text-anchor="middle">
+      <rect x="30" y="10" width="150" height="60" rx="12" fill="rgba(60,230,138,.1)" stroke="#3ce68a"/>
+      <text x="105" y="34" fill="#3ce68a" font-weight="700">🔧 工具</text>
+      <text x="105" y="54" fill="#a7b0c8" font-size="10">终端·文件·沙箱·浏览器</text>
+      <rect x="580" y="10" width="150" height="60" rx="12" fill="rgba(108,224,255,.1)" stroke="#6ce0ff"/>
+      <text x="655" y="34" fill="#6ce0ff" font-weight="700">✨ 技能</text>
+      <text x="655" y="54" fill="#a7b0c8" font-size="10">内置6个 + SKILL.md + .py</text>
+      <rect x="30" y="140" width="150" height="60" rx="12" fill="rgba(245,197,66,.1)" stroke="#f5c542"/>
+      <text x="105" y="164" fill="#f5c542" font-weight="700">🔌 MCP</text>
+      <text x="105" y="184" fill="#a7b0c8" font-size="10">外部工具生态接入</text>
+      <rect x="580" y="140" width="150" height="60" rx="12" fill="rgba(157,123,255,.12)" stroke="#b594ff"/>
+      <text x="655" y="164" fill="#b594ff" font-weight="700">🧩 插件</text>
+      <text x="655" y="184" fill="#a7b0c8" font-size="10">生命周期钩子扩展</text>
+    </g>
+  </svg>
+  <div class="cap">图 7-1 · 四类能力围绕 Agent 核心：工具是"手"，技能是"专家流程"，MCP 接生态，插件挂钩子</div>
+  </div>
+
+  <h3 id="t-tools">🔧 工具 —— Agent 的"手"</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>工具</th><th>等级</th><th>功能</th></tr>
+    <tr><td><code>terminal</code></td><td><span class="tag sen">敏感</span></td><td>执行命令行（装依赖、跑脚本、git）</td></tr>
+    <tr><td><code>file_read</code></td><td><span class="tag safe">安全</span></td><td>读取文件内容</td></tr>
+    <tr><td><code>file_write</code></td><td><span class="tag sen">敏感</span></td><td>创建 / 覆盖文件</td></tr>
+    <tr><td><code>file_edit</code></td><td><span class="tag sen">敏感</span></td><td>精确字符串替换编辑（带 diff 与回滚）</td></tr>
+    <tr><td><code>python_sandbox</code></td><td><span class="tag sen">敏感</span></td><td>沙箱执行 Python 片段（计算 / 数据处理）</td></tr>
+    <tr><td><code>web_fetch</code></td><td><span class="tag safe">安全</span></td><td>抓网页提取正文与链接</td></tr>
+    <tr><td><code>browser</code></td><td><span class="tag sen">敏感</span></td><td>Playwright 浏览器自动化</td></tr>
+  </table></div>
+  <div class="note"><b>开关用法：</b>每个工具卡片带开关，关掉后 Agent 就"看不到"它。
+  不想让它上网 → 关 <code>web_fetch</code> 和 <code>browser</code>；只读分析 → 只留 <code>file_read</code>。</div>
+
+  <h3 id="t-skills">✨ 技能 —— 预制的"专家流程"</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>内置技能</th><th>功能</th><th>典型指令</th></tr>
+    <tr><td><code>project_init</code></td><td>项目脚手架（目录/pyproject/venv/git）</td><td>「初始化一个新项目」</td></tr>
+    <tr><td><code>code_generator</code></td><td>代码生成 / <b>补全</b> / 脚手架，带语法校验与自动修复</td><td>「生成一个爬虫脚本」</td></tr>
+    <tr><td><code>test_runner</code></td><td>发现并运行测试、收集失败</td><td>「跑一下测试」</td></tr>
+    <tr><td><code>log_analyzer</code></td><td>日志级别统计 / 错误样本 / 高频模式聚类</td><td>「分析这个日志文件」</td></tr>
+    <tr><td><code>doc_generator</code></td><td>从 Python 源码生成 Markdown API 文档</td><td>「给 src 生成 API 文档」</td></tr>
+    <tr><td><code>dep_audit</code></td><td>依赖审计：未固定版本 / 重复声明</td><td>「检查依赖健康度」</td></tr>
+  </table></div>
+  <p><b>导入自定义技能：</b>「📁 加载目录」批量导入 <b>SKILL.md 技能包</b>（YAML 头 + 指令正文，无代码）；
+  「📄 导入 .py」导入继承 <code>AbstractSkill</code> 的 Python 技能（模板见 <code>examples/03-skill-development/</code>）；
+  「⬇️ 一键导入桌面 skills 文件夹」直接吸收技能库。</p>
+
+  <h3 id="t-mcp">🔌 MCP —— 连接外部工具生态</h3>
+  <p>MCP（Model Context Protocol）是开放协议，接入后外部服务的工具<strong>自动出现在工具列表</strong>供
+  Agent 调用（文件系统、数据库、搜索、地图…）。支持单个添加（stdio 本地命令 / sse URL）
+  或直接粘贴 Claude Desktop 格式的 <code>{"mcpServers": {...}}</code> 批量导入。需先 <code>pip install mcp</code>。</p>
+
+  <h3 id="t-plugins">🧩 插件 —— 生命周期钩子扩展</h3>
+  <p>插件在任务<strong>开始 / 结束 / 解析后 / 计划后 / 出错</strong>等时机自动执行你的逻辑
+  （记日志、发通知、审计上报），不改动主程序。面板中「加载 / 卸载」即时生效。</p>
+  <pre><code><span class="cm"># 插件目录结构</span>
+~/.automind/plugins/task-timer/
+├── plugin.json     <span class="cm"># {"name":"task-timer","version":"1.0.0","description":"…"}</span>
+└── hooks.py        <span class="cm"># def get_hooks() -> AgentHooks</span></code></pre>
+  <div class="note ok"><b>安全设计：</b>插件内部异常会被系统吞掉，<strong>永远不会影响任务主流程</strong>。
+  完整示例见 <code>examples/04-plugin-development/</code>。</div>
+</section>
+
+<!-- ═══════ 8 高级功能 ═══════ -->
+<section id="advanced">
+  <h2><span class="num">08</span>高级功能</h2>
+
+  <h3 id="autopilot">🔄 自主任务闭环（v0.3 新增，默认开启）</h3>
+  <p>工作 / 编程模式任务完成后自动执行"质检流水线"，不合格<strong>自动返工</strong>——
+  把"AI 说做完了"变成"验证过真的做完了"。</p>
+
+  <div class="fig">
+  <svg viewBox="0 0 820 150" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
+    <defs><marker id="ar9" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6" fill="none" stroke="#a7b0c8" stroke-width="1.4"/></marker></defs>
+    <g text-anchor="middle">
+      <rect x="8" y="40" width="120" height="54" rx="12" fill="rgba(123,159,255,.12)" stroke="#7b9fff"/>
+      <text x="68" y="63" fill="#e8ecf6" font-weight="700">任务执行完成</text>
+      <text x="68" y="81" fill="#a7b0c8" font-size="10">工作 / 编程模式</text>
+      <rect x="158" y="40" width="140" height="54" rx="12" fill="rgba(108,224,255,.1)" stroke="#6ce0ff"/>
+      <text x="228" y="63" fill="#6ce0ff" font-weight="700">🧪 TDD 测试</text>
+      <text x="228" y="81" fill="#a7b0c8" font-size="10">自动跑 pytest（编程）</text>
+      <rect x="328" y="40" width="150" height="54" rx="12" fill="rgba(157,123,255,.12)" stroke="#b594ff"/>
+      <text x="403" y="63" fill="#b594ff" font-weight="700">🧐 多Agent审查</text>
+      <text x="403" y="81" fill="#a7b0c8" font-size="10">审阅者复核（工作）</text>
+      <rect x="508" y="40" width="140" height="54" rx="12" fill="rgba(60,230,138,.1)" stroke="#3ce68a"/>
+      <text x="578" y="63" fill="#3ce68a" font-weight="700">✅ Loop 验收</text>
+      <text x="578" y="81" fill="#a7b0c8" font-size="10">语义判定是否完成</text>
+      <rect x="678" y="40" width="134" height="54" rx="12" fill="rgba(245,197,66,.1)" stroke="#f5c542"/>
+      <text x="745" y="63" fill="#f5c542" font-weight="700">🔧 自动修复</text>
+      <text x="745" y="81" fill="#a7b0c8" font-size="10">带反馈返工 ≤2 轮</text>
+    </g>
+    <g stroke="#a7b0c8" stroke-width="1.4" fill="none" marker-end="url(#ar9)">
+      <line x1="128" y1="67" x2="154" y2="67"/><line x1="298" y1="67" x2="324" y2="67"/>
+      <line x1="478" y1="67" x2="504" y2="67"/><line x1="648" y1="67" x2="674" y2="67"/>
+    </g>
+    <path d="M 745 94 Q 745 132 578 132 Q 578 110 578 98" fill="none" stroke="#f5c542"
+      stroke-width="1.2" stroke-dasharray="4 3" marker-end="url(#ar9)"/>
+    <text x="662" y="128" fill="#f5c542" font-size="10" text-anchor="middle">修复后重新验收</text>
+  </svg>
+  <div class="cap">图 8-1 · 自主任务闭环流水线（各环节可在设置中单独开关）</div>
+  </div>
+
+  <div class="tbl-wrap"><table>
+    <tr><th>开关（⚙ 设置 → 通用）</th><th>作用</th><th>何时关闭</th></tr>
+    <tr><td>🧐 多Agent审查</td><td>工作模式完成后审阅者角色复核，可调用只读工具核实（MCP 工具共享）</td><td>追求极致速度 / 省 Token</td></tr>
+    <tr><td>✅ Loop 验收</td><td>语义验收 + 未过带反馈自动修复（≤2 轮）</td><td>简单任务不需返工</td></tr>
+    <tr><td>🧪 TDD 测试</td><td>编程模式改 .py 即时语法验证；收尾自动跑 pytest</td><td>项目测试极慢时</td></tr>
+    <tr><td>⚡ 并行执行</td><td>计划中互不依赖的步骤 asyncio.gather 并发</td><td>步骤有隐式资源冲突时</td></tr>
+    <tr><td>📦 子任务缓存</td><td>同任务内相同只读调用结果复用</td><td>需每次强制重读时</td></tr>
+  </table></div>
+
+  <div class="note ok"><b>编程模式 TDD 内环：</b>每次写入/编辑 <code>.py</code> 后系统立即语法检查，
+  把 <code>syntax_check: OK / FAILED</code> 注入模型观察——有错它下一步就看到并立刻修复，
+  形成 <strong>编辑 → 验证 → 修复</strong> 闭环。另有 <code>code_generate</code> 工具
+  （语言检测、语法校验 + 自动修复、<code>mode='complete'</code> 代码补全）。</div>
+
+  <div class="note"><b>安全边界：</b>并行只发生在互不依赖的步骤间；缓存只作用于 SAFE 级只读工具
+  （写文件、执行命令永远真实执行）；审阅者只能调用只读工具。</div>
+
+  <div class="grid g2">
+    <div class="tile"><div class="ic">⏰</div><b>定时任务</b>
+      <p>任务内容 + 模式（五种均可）+ 间隔（每5分钟 / 每小时 / 每6小时 / 每天）。
+      后台调度、结果入历史、重启自动恢复。<br><br>
+      <b>场景：</b>每天汇总日志错误、每小时抓数据追加 CSV、每 6 小时跑测试。</p></div>
+    <div class="tile"><div class="ic">📊</div><b>统计分析仪表盘</b>
+      <p>四个命中率圆环（工具/计划/任务/自我修正 + 综合平均）、上下文使用率发光条、
+      最近 50 次趋势折线、Token 效率、记忆系统指标。<br><br>
+      <b>用途：</b>评估模型效果、监控 Token 花销、发现异常任务。</p></div>
+    <div class="tile"><div class="ic">🌐</div><b>HTML 预览</b>
+      <p>Agent 生成的 HTML（报告/图表/页面）出现在右栏列表，点击即在弹窗内直接渲染，免去手动找文件。</p></div>
+    <div class="tile"><div class="ic">📎🎤</div><b>多模态输入</b>
+      <p>对话模式上传图片（可多张）配视觉模型看图问答；🎤 语音实时转文字输入（Web Speech API）。</p></div>
+    <div class="tile"><div class="ic">👥</div><b>多用户会话隔离</b>
+      <p>每个浏览器独立会话 ID：团队共用一台服务，聊天记录互不可见、互不清除。</p></div>
+    <div class="tile"><div class="ic">⧉</div><b>输出便捷操作</b>
+      <p>每条 AI 消息悬浮「⧉ 复制」；每个代码块带语言标签和独立复制按钮。</p></div>
+  </div>
+</section>
+
+<!-- ═══════ 9 CLI ═══════ -->
+<section id="cli">
+  <h2><span class="num">09</span>命令行与 REPL</h2>
+  <p class="lead">不开浏览器也能用。安装后命令行直接可用 <code>automind</code> 命令。</p>
+
+  <pre><code><span class="cm"># 单次任务（默认工作模式）</span>
+automind <span class="st">"创建一个 requirements.txt 包含 fastapi 和 uvicorn"</span>
+
+<span class="cm"># 指定模式 / 模型 / 项目目录</span>
+automind --mode react --provider deepseek -p D:\myproj <span class="st">"修复 main.py 的报错"</span>
+
+<span class="cm"># 信息查询</span>
+automind --version        automind --list-tools
+automind --list-skills    automind --list-providers</code></pre>
+
+  <h3>Rich REPL（交互式彩色终端）</h3>
+  <p>不带参数运行 <code>automind</code> 进入：</p>
+  <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
+    <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.3.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
+    <b style="color:#6ce0ff">automind&gt;</b> <span style="color:#a7b0c8">_</span>
+  </div>
+  <div class="tbl-wrap"><table>
+    <tr><th>REPL 命令</th><th>功能</th></tr>
+    <tr><td><code>/help</code></td><td>帮助</td></tr>
+    <tr><td><code>/mode react</code> · <code>/mode plan_and_execute</code></td><td>切换执行模式</td></tr>
+    <tr><td><code>/tools</code> · <code>/skills</code></td><td>表格列出工具 / 技能</td></tr>
+    <tr><td><code>/stats</code></td><td>本次会话任务数与 Token</td></tr>
+    <tr><td><code>/clear</code> · <code>/exit</code></td><td>清屏 · 退出（带 Token 总摘要）</td></tr>
+    <tr><td>其他任何输入</td><td>作为任务执行，结果 Markdown 面板渲染</td></tr>
+  </table></div>
+</section>
+
+<!-- ═══════ 10 部署 ═══════ -->
+<section id="deploy">
+  <h2><span class="num">10</span>部署与运维（团队 / 生产）</h2>
+
+  <h3>Docker 部署</h3>
+  <pre><code>docker compose up --build
+<span class="cm"># 数据（配置/记忆/检查点）持久化在 automind_data 卷</span>
+<span class="cm"># 镜像特性：非 root 用户、/data 工作卷、自带健康检查</span></code></pre>
+
+  <h3>生产加固环境变量（默认全关，按需开启）</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>变量</th><th>作用</th><th>建议</th></tr>
+    <tr><td><code>AUTOMIND_AUTH_TOKEN</code></td><td>所有 API 与 WebSocket 需带 Bearer 令牌</td><td>暴露公网必开</td></tr>
+    <tr><td><code>AUTOMIND_CORS_ORIGINS</code></td><td>收紧跨域来源（逗号分隔）</td><td>配合前端域名</td></tr>
+    <tr><td><code>AUTOMIND_MAX_CONCURRENT</code></td><td>并发任务上限（默认 8，超出 429）</td><td>按机器性能调</td></tr>
+    <tr><td><code>AUTOMIND_RATE_LIMIT</code></td><td>/api/run 每客户端每分钟次数（0=关）</td><td>公网建议 30</td></tr>
+    <tr><td><code>AUTOMIND_REDACT_SECRETS</code></td><td>输出中的 API Key / 密码自动打码</td><td>多人环境建议开</td></tr>
+    <tr><td><code>AUTOMIND_ALLOWED_ORIGINS</code></td><td>WebSocket Origin 白名单</td><td>防跨站劫持</td></tr>
+  </table></div>
+
+  <div class="note"><b>运维接口：</b><code>GET /api/health</code>（免鉴权）返回版本 / 运行任务数 / 并发上限 / 运行时长，供探活与负载均衡。
+  安装 <code>structlog</code> 输出 JSON 结构化日志，未装自动降级标准格式。服务退出自动释放 MCP / 向量库 / 模型连接池。</div>
+</section>
+
+<!-- ═══════ 11 FAQ ═══════ -->
+<section id="faq">
+  <h2><span class="num">11</span>常见问题 FAQ</h2>
+
+  <details><summary>顶部模型徽标一直是红色「未配置」？</summary>
+    <div class="body">还没配 API Key。点「🔑 API Keys」为当前提供商填 Key 并「测试连接」。</div></details>
+  <details><summary>徽标黄色带 ⚠？</summary>
+    <div class="body">有 Key 但初始化失败。常见原因：Key 失效、api_base 写错、网络不通。「测试连接」会告诉你卡在哪个阶段。</div></details>
+  <details><summary>任务卡住不动 / 想中断？</summary>
+    <div class="body">点输入区 ■ 或按 <span class="kbd">Ctrl + .</span>。循环模式还会在收敛 / 空转时自动停止。</div></details>
+  <details><summary>为什么它说「文件不存在」？</summary>
+    <div class="body">检查右上角 📁 项目目录是否指向正确位置——所有相对路径以它为根，且出于安全不允许访问目录之外的文件。</div></details>
+  <details><summary>担心它乱删文件？</summary>
+    <div class="body">三层保险：① 审批切「🙋 询问」逐一批准；② 高危命令（rm -rf 等）被硬拦截；③ 事后「🛡️ 安全审计」核查每次调用。</div></details>
+  <details><summary>换台电脑打开，聊天记录不见了？</summary>
+    <div class="body">正常。会话按浏览器隔离（多用户设计）。记录都在服务器本地 <code>.automind/chats/</code> 下。</div></details>
+  <details><summary>Token 花得快怎么办？</summary>
+    <div class="body">① 「🖥 模型」给对话模式配便宜模型；② 「📊 统计分析」看 Token 效率定位大户任务；③ 任务描述精准、避免反复试错。</div></details>
+  <details><summary>想让它用我公司内部的工具？</summary>
+    <div class="body">三选一：写 Python 技能（最简单，见 examples/03）；架 MCP 服务器（标准协议，生态互通）；写插件（适合通知 / 审计等旁路逻辑）。</div></details>
+</section>
+
+<!-- ═══════ 12 附录 ═══════ -->
+<section id="appendix">
+  <h2><span class="num">12</span>附录：速查表</h2>
+
+  <h3>五种模式一句话</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>模式</th><th>引擎</th><th>一句话</th></tr>
+    <tr><td>💬 对话</td><td>直连 LLM</td><td>只聊不动手</td></tr>
+    <tr><td>⚙️ 工作</td><td>Plan-and-Execute</td><td>先列计划再逐步干</td></tr>
+    <tr><td>💻 编程</td><td>ReAct 循环</td><td>边看边改边验证</td></tr>
+    <tr><td>🤝 协同</td><td>多智能体编排</td><td>专家组分工协作</td></tr>
+    <tr><td>🔁 循环</td><td>Loop Engineering</td><td>迭代到达标为止</td></tr>
+  </table></div>
+
+  <h3>常用 API 端点（二次开发）</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>端点</th><th>方法</th><th>功能</th></tr>
+    <tr><td><code>/api/health</code></td><td>GET</td><td>健康检查（免鉴权）</td></tr>
+    <tr><td><code>/api/run</code></td><td>POST</td><td>执行任务 {task, interaction, session_id}</td></tr>
+    <tr><td><code>/ws</code></td><td>WebSocket</td><td>流式执行 + 实时事件 + 审批交互</td></tr>
+    <tr><td><code>/api/status</code> · <code>/api/stats/detail</code></td><td>GET</td><td>状态 · 高级统计</td></tr>
+    <tr><td><code>/api/skills</code> · <code>/api/mcp</code> · <code>/api/plugins</code></td><td>GET/POST</td><td>三类扩展管理</td></tr>
+    <tr><td><code>/api/schedule</code> · <code>/api/audit</code></td><td>GET/POST</td><td>定时任务 · 审计日志</td></tr>
+  </table></div>
+
+  <h3>文件位置</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>内容</th><th>位置</th></tr>
+    <tr><td>配置与 API Keys</td><td>项目目录 <code>.automind_config.json</code></td></tr>
+    <tr><td>聊天记录</td><td><code>.automind/chats/&lt;会话ID&gt;.json</code></td></tr>
+    <tr><td>长期记忆（向量库）</td><td><code>.automind/chroma/</code></td></tr>
+    <tr><td>检查点</td><td><code>.automind/checkpoints/</code></td></tr>
+    <tr><td>插件</td><td><code>~/.automind/plugins/</code></td></tr>
+    <tr><td>教程示例</td><td>仓库 <code>examples/</code> 目录</td></tr>
+  </table></div>
+</section>
+
+<footer>
+  AutoMind 使用手册 · 与软件 v0.3.0 同步 ·
+  遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
+</footer>
+
+</main>
+</div>
+</body>
+</html>

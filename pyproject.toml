@@ -1,0 +1,110 @@
+[build-system]
+requires = ["setuptools>=75.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "automind-agent"
+# 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
+version = "0.5.0"
+description = "通用自动化 Agent 框架 - 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [{name = "AutoMind Team"}]
+keywords = ["agent", "automation", "llm", "mcp", "planning"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+dependencies = [
+    "pydantic>=2.0",
+    "pyyaml>=6.0",
+    "pydantic-settings>=2.0",
+    "rich>=13.0",  # §14.3：CLI Rich REPL（提升为核心依赖）
+]
+
+[project.urls]
+Homepage = "https://github.com/automind/automind"
+Repository = "https://github.com/automind/automind"
+Issues = "https://github.com/automind/automind/issues"
+
+[project.optional-dependencies]
+web = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "openai>=1.30.0",
+    "httpx>=0.27.0",
+]
+full = [
+    "fastapi>=0.110.0",
+    "uvicorn>=0.29.0",
+    "httpx>=0.27.0",
+    "tiktoken>=0.7.0",
+    "rich>=13.0",
+    "openai>=1.30.0",
+    "anthropic>=0.30.0",
+    "google-generativeai>=0.7.0",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[project.scripts]
+automind = "automind.main:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["automind*"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "W",     # pycodestyle warnings
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "ARG",   # flake8-unused-arguments
+    "PTH",   # flake8-use-pathlib
+]
+ignore = [
+    "ARG002",  # unused method arguments (common in overrides)
+    "PTH123",  # open() vs Path.open() — both acceptable
+]
+exclude = [
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    ".venv",
+    "venv",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+strict = false
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["build/", "dist/", ".venv/", "venv/"]

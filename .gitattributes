@@ -1,0 +1,16 @@
+# 统一为 LF，消除 Windows 上 "LF will be replaced by CRLF" 警告
+* text=auto eol=lf
+
+# 二进制文件不做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.whl binary
+*.tar.gz binary
+
+# Windows 脚本保留 CRLF
+*.bat text eol=crlf

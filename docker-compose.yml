@@ -1,0 +1,39 @@
+# AutoMind — docker compose 部署
+# 启动: docker compose up --build
+# 访问: http://localhost:8765
+
+name: automind
+
+services:
+  automind:
+    build: .
+    image: automind:latest
+    container_name: automind
+    ports:
+      - "8765:8765"
+    volumes:
+      # 工作数据（配置 / 记忆 / 检查点 / 任务产物）持久化
+      - automind_data:/data
+    environment:
+      # ── 生产加固（按需取消注释）──
+      # AUTOMIND_AUTH_TOKEN: "change-me"        # 开启 Bearer 鉴权
+      # AUTOMIND_CORS_ORIGINS: "https://your.app"
+      # AUTOMIND_RATE_LIMIT: "30"               # /api/run 每分钟每客户端
+      # AUTOMIND_REDACT_SECRETS: "1"            # 输出密钥脱敏
+      # AUTOMIND_ALLOWED_ORIGINS: "https://your.app"  # WS Origin 白名单
+      AUTOMIND_MAX_CONCURRENT: "8"
+      # ── 模型 Key（或经 Web 界面配置，持久化于卷内）──
+      # OPENAI_API_KEY: ""
+      # DEEPSEEK_API_KEY: ""
+      # MOONSHOT_API_KEY: ""
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c",
+             "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=4).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  automind_data:

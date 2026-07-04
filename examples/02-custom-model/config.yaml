@@ -1,0 +1,23 @@
+# AutoMind 自定义模型配置示例
+# 用法: automind --config examples/02-custom-model/config.yaml "你的任务"
+
+llm:
+  # 方案 1：DeepSeek
+  provider: deepseek
+  model: deepseek-chat
+  # api_key: sk-xxxx          # 建议用环境变量 DEEPSEEK_API_KEY 代替明文
+
+  # 方案 2：本地 Ollama（取消注释以启用）
+  # provider: ollama
+  # model: llama3.2
+  # api_base: http://localhost:11434
+
+  # 方案 3：OpenAI 兼容中转代理（取消注释以启用）
+  # provider: custom
+  # model: gpt-4o-mini
+  # api_base: https://api.your-proxy.com/v1
+  # api_key: sk-xxxx
+
+execution:
+  mode: plan_and_execute      # 或 react
+  max_retries: 3
