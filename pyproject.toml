@@ -68,6 +68,14 @@ where = ["."]
 # 显式排除商业包（automind_pro 位于 pro/ 目录，另行打包分发）
 include = ["automind", "automind.*"]
 
+# Web 工作台静态资源必须随包分发，否则 pip 安装后界面退化为兜底页
+[tool.setuptools.package-data]
+automind = [
+    "static/*.html",
+    "static/css/*.css",
+    "static/js/*.js",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100
