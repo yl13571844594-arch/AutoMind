@@ -121,19 +121,32 @@ class _RootGuard:
 
 
 class FileReadTool(AbstractTool):
-    """文件读取工具。"""
+    """文件读取工具 — 支持按行分段读取，大文件自动截断保护上下文。"""
 
     name = "file_read"
-    description = "Read the contents of a file."
+    description = (
+        "Read the contents of a file. For large files, pass offset/limit "
+        "(1-based line number + line count) to read a specific range; "
+        "oversized reads are truncated with a note."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path to the file to read."},
             "encoding": {"type": "string", "description": "File encoding (default: utf-8)."},
+            "offset": {"type": "integer",
+                       "description": "Start line (1-based). Use with limit for large files."},
+            "limit": {"type": "integer",
+                      "description": "Max number of lines to return from offset."},
         },
         "required": ["path"],
     }
     permission_tier = PermissionTier.SAFE
+
+    #: 无显式范围时的自动截断阈值 —— 整读超大文件会撑爆模型上下文，
+    #: 反而降低后续编辑的准确度；截断并提示用 offset/limit 分段读。
+    MAX_CHARS = 120_000
+    TRUNC_LINES = 1500
 
     def __init__(self, project_root: str | Path | None = None) -> None:
         self._guard = _RootGuard(project_root)
@@ -146,13 +159,35 @@ class FileReadTool(AbstractTool):
             return ToolResult(tool_name=self.name, success=False, error=str(e))
         try:
             content = path.read_text(encoding=encoding)
-            return ToolResult(
-                tool_name=self.name,
-                success=True,
-                output={"content": content, "path": str(path), "size": len(content)},
-            )
         except Exception as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
+
+        total_size = len(content)
+        lines = content.splitlines(keepends=True)
+        total_lines = len(lines)
+        out: dict[str, Any] = {"path": str(path), "size": total_size,
+                               "total_lines": total_lines}
+
+        offset = kwargs.get("offset")
+        limit = kwargs.get("limit")
+        if offset or limit:
+            start = max(int(offset or 1) - 1, 0)
+            count = int(limit) if limit else self.TRUNC_LINES
+            picked = lines[start:start + max(count, 1)]
+            out["content"] = "".join(picked)
+            out["range"] = f"lines {start + 1}-{start + len(picked)} of {total_lines}"
+        elif total_size > self.MAX_CHARS:
+            picked = lines[:self.TRUNC_LINES]
+            out["content"] = "".join(picked)
+            out["truncated"] = True
+            out["note"] = (
+                f"File is large ({total_size} chars, {total_lines} lines); "
+                f"showing first {len(picked)} lines. Use offset/limit to read "
+                f"the rest in ranges."
+            )
+        else:
+            out["content"] = content
+        return ToolResult(tool_name=self.name, success=True, output=out)
 
 
 class FileWriteTool(AbstractTool):
@@ -247,6 +282,12 @@ class FileEditTool(AbstractTool):
         old = kwargs["old_string"]
         new = kwargs["new_string"]
         replace_all = kwargs.get("replace_all", False)
+        if old == new:
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error="old_string and new_string are identical — no-op edit. "
+                      "Provide the changed text as new_string.",
+            )
         try:
             path = self._guard.resolve(kwargs["path"])
         except PermissionError as e:

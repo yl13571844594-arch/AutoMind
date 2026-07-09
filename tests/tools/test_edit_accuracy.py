@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from automind.core.types import ToolCall, ToolResult
 from automind.planning.react_executor import ReActExecutor
 from automind.tools.base import ToolRegistry
@@ -101,3 +103,67 @@ class TestAutoValidateEnhanced:
         })
         out = ex._auto_validate_result(tc, r)
         assert "auto_validation" not in (out.output or {})
+
+    def test_yaml_validation(self, tmp_path):
+        pytest.importorskip("yaml")
+        f = tmp_path / "cfg.yaml"
+        f.write_text("key: [unclosed\n", encoding="utf-8")
+        ex = _executor()
+        tc = ToolCall(id="1", name="file_write", arguments={"path": str(f)})
+        r = ToolResult(tool_name="file_write", success=True, output={"path": str(f)})
+        out = ex._auto_validate_result(tc, r)
+        assert "FAILED" in out.output["auto_validation"]
+
+    def test_toml_validation(self, tmp_path):
+        good = tmp_path / "ok.toml"
+        good.write_text('[tool]\nname = "x"\n', encoding="utf-8")
+        bad = tmp_path / "bad.toml"
+        bad.write_text("[tool\n", encoding="utf-8")
+        ex = _executor()
+        for f, expect in ((good, "OK"), (bad, "FAILED")):
+            tc = ToolCall(id="1", name="file_write", arguments={"path": str(f)})
+            r = ToolResult(tool_name="file_write", success=True, output={"path": str(f)})
+            out = ex._auto_validate_result(tc, r)
+            assert expect in out.output["auto_validation"]
+
+
+class TestFileReadRanges:
+    """file_read 分段读取与大文件截断（保护上下文 → 提升编码准确度）。"""
+
+    def test_offset_limit(self, tmp_path):
+        from automind.tools.file_editor import FileReadTool
+        f = tmp_path / "big.txt"
+        f.write_text("".join(f"line{i}\n" for i in range(1, 101)), encoding="utf-8")
+        tool = FileReadTool()
+        r = asyncio.run(tool.execute(path=str(f), offset=10, limit=5))
+        assert r.success
+        assert r.output["content"] == "line10\nline11\nline12\nline13\nline14\n"
+        assert r.output["range"] == "lines 10-14 of 100"
+        assert r.output["total_lines"] == 100
+
+    def test_large_file_truncated_with_note(self, tmp_path):
+        from automind.tools.file_editor import FileReadTool
+        f = tmp_path / "huge.txt"
+        f.write_text("x" * 200 + "\n" * 1 + ("y" * 100 + "\n") * 2000, encoding="utf-8")
+        tool = FileReadTool()
+        r = asyncio.run(tool.execute(path=str(f)))
+        assert r.success and r.output.get("truncated") is True
+        assert "offset/limit" in r.output["note"]
+        assert len(r.output["content"]) < len(f.read_text(encoding="utf-8"))
+
+    def test_small_file_unchanged(self, tmp_path):
+        from automind.tools.file_editor import FileReadTool
+        f = tmp_path / "s.txt"
+        f.write_text("hello", encoding="utf-8")
+        r = asyncio.run(FileReadTool().execute(path=str(f)))
+        assert r.success and r.output["content"] == "hello"
+        assert "truncated" not in r.output
+
+
+class TestNoOpEditGuard:
+    def test_identical_strings_rejected(self, tmp_path):
+        f = tmp_path / "n.py"
+        f.write_text("a = 1\n", encoding="utf-8")
+        r = asyncio.run(FileEditTool().execute(
+            path=str(f), old_string="a = 1", new_string="a = 1"))
+        assert not r.success and "identical" in r.error

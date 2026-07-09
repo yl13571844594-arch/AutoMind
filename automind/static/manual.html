@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v0.7.0</title>
+<title>AutoMind 使用手册 — v0.7.1</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v0.7.0</div>
+  <div class="ver">使用手册 · v0.7.1</div>
   <a href="#intro">1 · 产品简介</a>
   <a href="#quick">2 · 快速上手</a>
   <a href="#ui">3 · 界面总览</a>
@@ -199,7 +199,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v0.7.0</b></span>
+    <span class="chip">版本 <b>v0.7.1</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -257,14 +257,24 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h2><span class="num">02</span>快速上手（零基础五分钟）</h2>
 
   <div class="steps">
-    <div class="step"><div class="dot">1</div><b>安装</b><p>软件目录打开命令行执行<br><code>pip install -e ".[web]"</code></p></div>
-    <div class="step"><div class="dot">2</div><b>启动</b><p>双击 <code>launch.bat</code> 选 [2]，<br>或 <code>python -m automind.server</code></p></div>
+    <div class="step"><div class="dot">1</div><b>安装</b><p>命令行执行<br><code>pip install "automind-agent[web]"</code></p></div>
+    <div class="step"><div class="dot">2</div><b>启动</b><p><code>python -m automind.server</code><br>浏览器打开 <code>localhost:8765</code></p></div>
     <div class="step"><div class="dot">3</div><b>配置模型</b><p>右上角「🔑 API Keys」填 Key，<br>点「🔌 测试连接」变绿即成功</p></div>
     <div class="step"><div class="dot">4</div><b>第一个任务</b><p>切「⚙️ 工作」模式，输入任务，<br>看它实时规划并执行</p></div>
   </div>
 
   <div class="note"><b>前提：</b>电脑已安装 Python 3.11+（命令行输入 <code>python --version</code> 查看）。
   服务器部署可直接 <code>docker compose up --build</code>。</div>
+
+  <h3>三种安装方式</h3>
+  <div class="tbl-wrap"><table>
+    <tr><th>方式</th><th>命令</th><th>适合</th></tr>
+    <tr><td><b>PyPI（推荐）</b></td><td><code>pip install "automind-agent[web]"</code>；升级：<code>pip install -U "automind-agent[web]"</code></td><td>直接使用</td></tr>
+    <tr><td><b>GitHub 源码</b></td><td><code>git clone https://github.com/yl13571844594-arch/AutoMind.git</code> → <code>cd AutoMind</code> → <code>pip install -e ".[web]"</code></td><td>改代码 / 参与贡献</td></tr>
+    <tr><td><b>本地源码目录</b></td><td>在软件目录执行 <code>pip install -e ".[web]"</code></td><td>压缩包 / 网盘分发</td></tr>
+  </table></div>
+  <div class="note"><code>[web]</code> 含 Web 工作台依赖；想用 Claude / Gemini 官方 SDK 等全部后端换成 <code>[full]</code>。
+  国内提速：命令末尾加 <code>-i https://pypi.tuna.tsinghua.edu.cn/simple</code>。</div>
 
   <h3>三种启动方式</h3>
   <div class="tbl-wrap"><table>
@@ -812,7 +822,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.7.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.7.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -913,7 +923,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v0.7.0 同步 ·
+  AutoMind 使用手册 · 与软件 v0.7.1 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

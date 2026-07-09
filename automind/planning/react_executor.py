@@ -111,7 +111,10 @@ class ReActExecutor:
 
     @staticmethod
     def _check_syntax(path: str) -> str | None:
-        """校验单个文件；返回 "OK" / 错误说明，非目标类型或读不到返回 None。"""
+        """校验单个文件；返回 "OK" / 错误说明，非目标类型或读不到返回 None。
+
+        覆盖 Python / JSON / YAML / TOML —— Agent 产出最多的四类结构化文件。
+        """
         from pathlib import Path as _P
         try:
             if path.endswith(".py"):
@@ -122,12 +125,26 @@ class ReActExecutor:
                 import json as _json
                 _json.loads(_P(path).read_text(encoding="utf-8"))
                 return "OK"
+            if path.endswith((".yaml", ".yml")):
+                import yaml as _yaml
+                _yaml.safe_load(_P(path).read_text(encoding="utf-8"))
+                return "OK"
+            if path.endswith(".toml"):
+                import tomllib as _toml
+                _toml.loads(_P(path).read_text(encoding="utf-8"))
+                return "OK"
         except SyntaxError as e:
             return (f"FAILED — {e.msg} (line {e.lineno}). "
                     f"Fix this syntax error before proceeding.")
-        except ValueError as e:  # json.JSONDecodeError
-            return f"FAILED — invalid JSON: {e}. Fix this before proceeding."
-        except Exception:
+        except ValueError as e:  # json.JSONDecodeError / tomllib.TOMLDecodeError
+            kind = "JSON" if path.endswith(".json") else "TOML"
+            return f"FAILED — invalid {kind}: {e}. Fix this before proceeding."
+        except ImportError:
+            return None  # 校验器依赖缺失（如无 pyyaml）→ 跳过不阻塞
+        except Exception as e:
+            # yaml.YAMLError 等解析错误也应反馈给模型
+            if type(e).__module__.startswith("yaml"):
+                return f"FAILED — invalid YAML: {e}. Fix this before proceeding."
             return None  # 文件读不到等情况不干扰主流程
         return None
 

@@ -220,3 +220,23 @@ button.locked .lock-ico{font-size:.72em;margin-left:3px;opacity:.9}
 .tpl-chips{display:flex;flex-wrap:wrap;gap:6px}
 .tpl-chip{padding:5px 12px;border:1px solid var(--border);border-radius:999px;background:var(--bg2);color:var(--text2);font-size:.8em;cursor:pointer;transition:var(--transition)}
 .tpl-chip:hover{border-color:var(--accent);color:var(--accent);background:var(--bg1)}
+
+/* ── 对话气泡内 Markdown 块渲染（标题/列表/表格/引用/分隔线）── */
+.bubble .md-h{font-weight:700;line-height:1.4;margin:10px 0 6px}
+.bubble .md-h1{font-size:1.25em;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.bubble .md-h2{font-size:1.15em}
+.bubble .md-h3{font-size:1.06em}
+.bubble .md-h4{font-size:1em;color:var(--text2)}
+.bubble .md-list{margin:6px 0 8px;padding-left:22px}
+.bubble .md-list li{margin:3px 0;line-height:1.6}
+.bubble .md-list li::marker{color:var(--accent)}
+.bubble .md-quote{margin:8px 0;padding:8px 12px;border-left:3px solid var(--accent);background:var(--bg2);border-radius:0 8px 8px 0;color:var(--text2);font-size:.95em}
+.bubble .md-hr{margin:12px 0;border-top:1px dashed var(--border)}
+.bubble .md-tbl-wrap{margin:8px 0;overflow-x:auto;border:1px solid var(--border);border-radius:10px}
+.bubble .md-table{border-collapse:collapse;width:100%;font-size:.92em}
+.bubble .md-table th{background:var(--bg2);color:var(--text);font-weight:600;text-align:left;padding:7px 12px;border-bottom:1px solid var(--border);white-space:nowrap}
+.bubble .md-table td{padding:6px 12px;border-bottom:1px solid var(--border);color:var(--text2);vertical-align:top}
+.bubble .md-table tbody tr:last-child td{border-bottom:none}
+.bubble .md-table tbody tr:hover td{background:var(--bg1)}
+.bubble del{color:var(--text3)}
+.bubble i{color:var(--text2)}

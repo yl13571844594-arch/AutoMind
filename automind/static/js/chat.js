@@ -294,7 +294,10 @@ function formatContent(text, resetArrays) {
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, txt, url) =>
       isSafeHref(url) ? `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer" style="color:var(--accent)">${txt}</a>` : m)
     .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    .replace(/\n/g, '<br>');
+    .replace(/~~(.+?)~~/g, '<del>$1</del>')
+    .replace(/(^|[^*<\w])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
+  // 2.5) 行级结构渲染：标题 / 列表 / 引用 / 表格 / 分隔线（美化问答展示）
+  t = renderMdBlocks(t);
   // 3) 还原代码块（原始未转义内容）
   t = t.replace(/@@CBLK(\d+)@@/g, (_, i) => {
     const b = window._codeBlocks[i] || {};
@@ -317,6 +320,68 @@ function formatContent(text, resetArrays) {
   window._htmlBlocks.length = 0;
   window._codeBlocks.length = 0;
   return t;
+}
+
+// ── 行级 Markdown 块渲染（标题/列表/表格/引用/分隔线）──
+// 输入为已 esc() 转义、已做行内替换的文本；本函数只做结构化包装，
+// 不引入任何未转义的用户内容，XSS 防线不变。普通行仍以 <br> 连接。
+const _MD_TBL_SEP = /^\s*\|?[\s:|-]+\|?\s*$/;
+function _mdCells(line) {
+  return line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+}
+function renderMdBlocks(text) {
+  const lines = String(text).split('\n');
+  const out = [];
+  let lastWasBlock = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    // 表格：|…| 行 + 紧随的分隔行
+    if (/^\s*\|.+\|\s*$/.test(line) && i + 1 < lines.length && _MD_TBL_SEP.test(lines[i + 1]) && lines[i + 1].includes('-')) {
+      const head = _mdCells(line);
+      let j = i + 2;
+      const rows = [];
+      while (j < lines.length && /^\s*\|.+\|\s*$/.test(lines[j])) { rows.push(_mdCells(lines[j])); j++; }
+      out.push('<div class="md-tbl-wrap"><table class="md-table"><thead><tr>'
+        + head.map(c => `<th>${c}</th>`).join('') + '</tr></thead><tbody>'
+        + rows.map(r => '<tr>' + head.map((_, k) => `<td>${r[k] != null ? r[k] : ''}</td>`).join('') + '</tr>').join('')
+        + '</tbody></table></div>');
+      i = j - 1; lastWasBlock = true; continue;
+    }
+    // 分隔线（先于无序列表判断，--- 不是列表）
+    if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { out.push('<div class="md-hr"></div>'); lastWasBlock = true; continue; }
+    // 标题 # ~ ####
+    const h = line.match(/^(#{1,4})\s+(.+)$/);
+    if (h) { out.push(`<div class="md-h md-h${h[1].length}">${h[2]}</div>`); lastWasBlock = true; continue; }
+    // 引用 >（esc 后为 &gt;）
+    if (/^&gt;\s?/.test(line)) {
+      const q = [];
+      while (i < lines.length && /^&gt;\s?/.test(lines[i])) { q.push(lines[i].replace(/^&gt;\s?/, '')); i++; }
+      i--;
+      out.push(`<div class="md-quote">${q.join('<br>')}</div>`); lastWasBlock = true; continue;
+    }
+    // 无序列表 - / •
+    if (/^\s*[-•]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-•]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*[-•]\s+/, '')); i++; }
+      i--;
+      out.push(`<ul class="md-list">${items.map(x => `<li>${x}</li>`).join('')}</ul>`); lastWasBlock = true; continue;
+    }
+    // 有序列表 1. / 1、 / 1)
+    if (/^\s*\d+[.、)]\s+/.test(line)) {
+      const items = [];
+      let start = parseInt(line.match(/^\s*(\d+)/)[1], 10) || 1;
+      while (i < lines.length && /^\s*\d+[.、)]\s+/.test(lines[i])) { items.push(lines[i].replace(/^\s*\d+[.、)]\s+/, '')); i++; }
+      i--;
+      out.push(`<ol class="md-list" start="${start}">${items.map(x => `<li>${x}</li>`).join('')}</ol>`); lastWasBlock = true; continue;
+    }
+    // 普通行：块元素自带间距，其后的单个空行不再额外 <br>
+    if (line === '' && lastWasBlock) { lastWasBlock = false; continue; }
+    out.push(line + '<br>');
+    lastWasBlock = false;
+  }
+  // 去掉结尾多余 <br>
+  let s = out.join('');
+  return s.replace(/(<br>)+$/, '');
 }
 
 // ═══════ Settings Modal ═══════
