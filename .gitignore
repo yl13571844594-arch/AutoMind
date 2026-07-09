@@ -52,3 +52,6 @@ analytics-service/
 GITHUB.md
 AUTOMIND_REFACTOR_PLAN.md
 BUGS_21_TO_FIX.md
+
+# 本地开发工具配置（不进公开仓库）
+.claude/
