@@ -83,16 +83,40 @@ def _auth_token() -> str:
     return _AUTH_TOKEN or _read_config().get("auth_token", "")
 
 
+# 扩展令牌校验器（扩展契约 v1）：企业版 SSO 等通过 register_token_validator
+# 注册回调，静态令牌不匹配时逐个询问 —— 会话令牌等动态凭据由此通行。
+_token_validators: list = []
+
+
+def _register_token_validator(fn) -> None:
+    if callable(fn) and fn not in _token_validators:
+        _token_validators.append(fn)
+
+
+def _token_ok(provided: str, static_token: str) -> bool:
+    if provided and provided == static_token:
+        return True
+    for v in _token_validators:
+        try:
+            if v(provided):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 @app.middleware("http")
 async def _auth_middleware(request, call_next):
     token = _auth_token()
     path = request.url.path
     # 仅保护 /api/*；放开首页、文档、健康检查
-    if token and path.startswith("/api/") and not path.startswith("/api/health"):
+    # /api/auth/login 放行：SSO 登录本身不能要求已持有令牌
+    if (token and path.startswith("/api/") and not path.startswith("/api/health")
+            and path != "/api/auth/login"):
         sent = request.headers.get("authorization", "")
         provided = sent[7:] if sent.lower().startswith("bearer ") else \
             request.query_params.get("token", "")
-        if provided != token:
+        if not _token_ok(provided, token):
             logger.warning("auth_denied", path=path,
                            client=request.client.host if request.client else "?")
             return JSONResponse({"error": "未授权：请提供有效的访问令牌"}, status_code=401)
@@ -1818,9 +1842,9 @@ async def ws_endpoint(ws: WebSocket):
         if origin not in _WS_ALLOWED_ORIGINS:
             await ws.close(code=4403)
             return
-    # 商用鉴权：配置令牌后，WS 需带 ?token=
+    # 商用鉴权：配置令牌后，WS 需带 ?token=（静态令牌或 SSO 会话令牌均可）
     token = _auth_token()
-    if token and ws.query_params.get("token", "") != token:
+    if token and not _token_ok(ws.query_params.get("token", ""), token):
         await ws.close(code=4401)
         return
     await ws.accept()
@@ -2101,6 +2125,9 @@ def _build_server_ctx() -> dict:
         "session_agent_factory": _session_agent_factory,
         "max_concurrent": _MAX_CONCURRENT,
         "version": __version__,
+        # 契约 v1 追加键（对既有扩展向后兼容）：
+        "register_token_validator": _register_token_validator,  # SSO 会话令牌
+        "rebuild_agent": _rebuild_agent,                        # 网关切换即时生效
     }
 
 
@@ -2112,7 +2139,9 @@ def _attach_extensions() -> None:
     """
     _edition.load_extensions()
     ctx = _build_server_ctx()
-    for name in ("scheduler", "advanced_stats", "session_pool"):
+    for name in ("scheduler", "advanced_stats", "session_pool",
+                 "custom_templates", "audit_export",
+                 "sso_ldap", "rbac", "model_gateway"):
         feature = _edition.get_feature(name)
         if feature is not None and hasattr(feature, "attach"):
             try:
@@ -2137,6 +2166,26 @@ def _attach_extensions() -> None:
     # 高级统计（专业版）
     for path in ("/api/stats/detail", "/api/stats/context", "/api/stats/history"):
         app.add_api_route(path, _locked("advanced_stats"), methods=["GET"])
+    # 自定义模板（专业版）
+    for method, path in (("GET", "/api/templates/custom"),
+                         ("POST", "/api/templates/custom"),
+                         ("DELETE", "/api/templates/custom/{sid}")):
+        app.add_api_route(path, _locked("custom_templates"), methods=[method])
+    # 审计报告导出（专业版）
+    app.add_api_route("/api/audit/export", _locked("audit_export"), methods=["GET"])
+    # SSO / LDAP（企业版）
+    for method, path in (("POST", "/api/auth/login"), ("GET", "/api/auth/session"),
+                         ("POST", "/api/auth/logout")):
+        app.add_api_route(path, _locked("sso_ldap"), methods=[method])
+    # 细粒度权限 RBAC（企业版）
+    for method, path in (("GET", "/api/rbac"), ("POST", "/api/rbac/role"),
+                         ("DELETE", "/api/rbac/role/{sid}"),
+                         ("GET", "/api/rbac/check")):
+        app.add_api_route(path, _locked("rbac"), methods=[method])
+    # 私有模型网关（企业版）
+    for method, path in (("GET", "/api/gateway"), ("POST", "/api/gateway"),
+                         ("GET", "/api/gateway/check")):
+        app.add_api_route(path, _locked("model_gateway"), methods=[method])
 
     logger.info("edition_ready", edition=_edition.get_edition(),
                 features=[k for k, v in _edition.feature_flags().items() if v])

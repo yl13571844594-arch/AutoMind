@@ -32,6 +32,13 @@
     advanced_stats pro      ``attach(server_ctx)`` 注册路由
     session_pool   ent      ``attach(server_ctx)``；``enabled() -> bool``、
                             ``acquire(sid)``、``release(sid)``、``aclose_all()``
+    custom_templates pro    ``attach(server_ctx)`` 注册 /api/templates/custom 路由
+    audit_export   pro      ``attach(server_ctx)`` 注册 /api/audit/export 路由
+    sso_ldap       ent      ``attach(server_ctx)`` 注册 /api/auth/* 路由；
+                            通过 ``register_token_validator`` 接入鉴权中间件
+    rbac           ent      ``attach(server_ctx)`` 注册 /api/rbac 路由；
+                            ``check(role, action) -> bool``
+    model_gateway  ent      ``attach(server_ctx)`` 注册 /api/gateway 路由
     ============= ======== ==============================================
 
 ``server_ctx``（服务端传给 attach 的上下文字典，稳定契约 v1）：
@@ -59,7 +66,12 @@ COMMERCIAL_FEATURES: dict[str, tuple[str, str]] = {
     "loop_engine": (EDITION_PRO, "循环模式（Loop Engineering）"),
     "scheduler": (EDITION_PRO, "定时任务"),
     "advanced_stats": (EDITION_PRO, "高级统计仪表盘"),
+    "custom_templates": (EDITION_PRO, "自定义模板"),
+    "audit_export": (EDITION_PRO, "审计报告导出（PDF）"),
     "session_pool": (EDITION_ENTERPRISE, "多用户会话池（执行态隔离）"),
+    "sso_ldap": (EDITION_ENTERPRISE, "SSO / LDAP 单点登录集成"),
+    "rbac": (EDITION_ENTERPRISE, "细粒度权限（RBAC）"),
+    "model_gateway": (EDITION_ENTERPRISE, "私有模型网关"),
 }
 
 _EDITION_LABELS = {

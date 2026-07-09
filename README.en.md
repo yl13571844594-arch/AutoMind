@@ -25,7 +25,12 @@ activates at runtime once a license is configured — see
 | 🔁 Loop Engineering mode | — | ✅ | ✅ |
 | ⏰ Scheduled tasks | — | ✅ | ✅ |
 | 📊 Advanced statistics dashboard | — | ✅ | ✅ |
+| ⭐ Custom task templates | — | ✅ | ✅ |
+| 📄 Audit report export (PDF) | — | ✅ | ✅ |
 | 👥 Session agent pool (multi-user execution isolation) | — | — | ✅ |
+| 🔐 SSO / LDAP integration | — | — | ✅ |
+| 🧩 Fine-grained permissions (RBAC) | — | — | ✅ |
+| 🚪 Private model gateway (egress control, model allowlist) | — | — | ✅ |
 
 > Security features are **never** paywalled — they all stay in Community.
 

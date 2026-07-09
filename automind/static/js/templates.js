@@ -35,7 +35,7 @@ const TEMPLATES = [
 ];
 window.TEMPLATES = TEMPLATES;  // 供 core.js renderWelcome 的快速开始区引用
 
-function showTemplates() {
+async function showTemplates() {
   const overlay = document.getElementById('settings-modal');
   const content = document.getElementById('settings-content');
   overlay.classList.add('show');
@@ -52,7 +52,87 @@ function showTemplates() {
       <div style="font-size:.78em;color:var(--text3);margin-top:3px">${esc(t.desc)}</div>
     </div>
   </div>`).join('')}
-</div>`;
+</div>
+<div id="custom-tpl-box" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px"></div>`;
+  renderCustomTemplates();
+}
+
+// ── 自定义模板（专业版特性 custom_templates）──
+let _customTpls = [];
+async function renderCustomTemplates() {
+  const box = document.getElementById('custom-tpl-box');
+  if (!box) return;
+  if (!featureOn('custom_templates')) {
+    box.innerHTML = `<b style="font-size:.92em">⭐ 我的模板 <span style="font-size:.8em;color:var(--text3)">🔒 专业版</span></b>
+      <div class="hint" style="margin-top:6px">专业版可把常用任务保存为自定义模板（最多 100 个），团队沉淀提示词资产。
+      <a href="javascript:void(0)" onclick="upgradeToast('自定义模板')" style="color:var(--accent)">了解升级 →</a></div>`;
+    return;
+  }
+  try { _customTpls = (await (await fetch(`${API}/templates/custom`)).json()).templates || []; }
+  catch (e) { _customTpls = []; }
+  box.innerHTML = `
+<b style="font-size:.92em">⭐ 我的模板（${_customTpls.length}）</b>
+${_customTpls.length ? `<div class="tpl-grid" style="margin-top:10px">
+  ${_customTpls.map((t, i) => `
+  <div class="tpl-card" onclick="useCustomTemplate(${i})">
+    <div class="tpl-icon">${esc(t.icon || '⭐')}</div>
+    <div style="flex:1;min-width:0">
+      <b>${esc(t.title)}</b>
+      <span class="tag" style="margin-left:6px;font-size:.68em">${({chat:'💬对话',work:'⚙️工作',coding:'💻编程',multi:'🤝协同',loop:'🔁循环'})[t.mode]||t.mode}</span>
+      <div style="font-size:.78em;color:var(--text3);margin-top:3px">${esc(t.desc || '')}</div>
+    </div>
+    <button class="icon-del" title="删除模板" onclick="event.stopPropagation();deleteCustomTemplate('${jsq(t.id)}')">✕</button>
+  </div>`).join('')}
+</div>` : '<div class="hint" style="margin-top:6px">还没有自定义模板 — 在下方创建第一个。</div>'}
+<div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+  <input type="text" id="ctpl-icon" placeholder="图标" style="width:56px" maxlength="4" value="⭐">
+  <input type="text" id="ctpl-title" placeholder="模板名称" style="width:150px" maxlength="40">
+  <select id="ctpl-mode" style="padding:6px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg0);color:var(--text)">
+    <option value="work">⚙️ 工作</option><option value="coding">💻 编程</option><option value="chat">💬 对话</option>
+  </select>
+  <button class="btn-secondary" style="padding:0 12px;white-space:nowrap" onclick="fillCustomTplFromInput()" title="把当前输入框内容作为模板提示词">📥 取输入框</button>
+  <button class="btn-primary" style="padding:0 16px;white-space:nowrap" onclick="saveCustomTemplate()">保存模板</button>
+</div>
+<textarea id="ctpl-prompt" placeholder="模板提示词（任务描述，可含「（把 XX 粘贴到这里）」占位）" rows="3"
+  style="width:100%;margin-top:8px;resize:vertical"></textarea>`;
+}
+function fillCustomTplFromInput() {
+  const v = document.getElementById('user-input').value.trim();
+  if (!v) return toast('输入框是空的', 'error');
+  document.getElementById('ctpl-prompt').value = v;
+}
+async function saveCustomTemplate() {
+  const body = {
+    icon: document.getElementById('ctpl-icon').value.trim() || '⭐',
+    title: document.getElementById('ctpl-title').value.trim(),
+    mode: document.getElementById('ctpl-mode').value,
+    prompt: document.getElementById('ctpl-prompt').value.trim(),
+  };
+  if (!body.title || !body.prompt) return toast('模板名称与提示词必填', 'error');
+  const r = await (await fetch(`${API}/templates/custom`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })).json();
+  if (r.error) return toast(r.error, 'error');
+  toast(`模板「${body.title}」已保存`, 'success');
+  renderCustomTemplates();
+}
+async function deleteCustomTemplate(id) {
+  if (!confirm('删除该自定义模板？')) return;
+  await fetch(`${API}/templates/custom/${encodeURIComponent(id)}`, { method: 'DELETE' });
+  toast('已删除', 'info');
+  renderCustomTemplates();
+}
+async function useCustomTemplate(i) {
+  const t = _customTpls[i];
+  if (!t) return;
+  closeModal();
+  if (t.mode !== currentMode && featureOn(MODE_FEATURE[t.mode])) await setMode(t.mode);
+  const input = document.getElementById('user-input');
+  input.value = t.prompt;
+  input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+  input.focus();
+  toast('模板已填入，补充细节后按 Enter 发送', 'info');
 }
 
 async function useTemplate(i) {

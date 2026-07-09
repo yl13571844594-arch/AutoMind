@@ -5,7 +5,11 @@ async function loadAuditView() {
   document.getElementById('messages').innerHTML = `
 <div class="msg agent"><div class="avatar">AM</div><div class="col" style="max-width:100%"><div class="bubble" style="max-width:100%">
   <b>🛡️ 安全审计日志</b>
-  <button onclick="clearAudit()" class="btn-danger" style="float:right;padding:4px 10px;border-radius:6px;font-size:.78em">清空</button>
+  <span style="float:right;display:flex;gap:6px">
+    <button onclick="exportAudit()" class="btn-secondary" style="padding:4px 10px;border-radius:6px;font-size:.78em"
+      title="${featureOn('audit_export')?'导出 PDF 审计报告':'专业版功能'}">📄 导出报告${featureOn('audit_export')?'':' 🔒'}</button>
+    <button onclick="clearAudit()" class="btn-danger" style="padding:4px 10px;border-radius:6px;font-size:.78em">清空</button>
+  </span>
   <div class="stat-grid" style="margin:12px 0">
     <div class="stat-item"><div class="label">总调用</div><div class="value">${s.total}</div></div>
     <div class="stat-item"><div class="label">放行</div><div class="value ok">${s.allow}</div></div>
@@ -39,6 +43,11 @@ async function refreshAuditMini() {
   } catch(e) {}
 }
 async function clearAudit() { await fetch(`${API}/audit`, {method:'DELETE'}); loadAuditView(); refreshAuditMini(); toast('审计日志已清空','info'); }
+function exportAudit() {
+  // 专业版：新标签页拿 PDF（无 reportlab 时服务端回退为可打印 HTML）
+  if (!featureOn('audit_export')) return upgradeToast('审计报告导出（PDF）');
+  window.open(`${API}/audit/export?format=pdf`, '_blank');
+}
 
 // ── Clear / History ──
 async function handleClear() {

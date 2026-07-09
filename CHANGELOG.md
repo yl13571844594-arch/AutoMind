@@ -2,6 +2,26 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [0.8.0] - 2026-07-09
+
+**商业功能扩容（社区核心仅新增特性注册表与两个稳定契约键，功能不减）**
+
+- 专业版 ⭐ **自定义模板**：把常用任务保存为模板（名称/图标/模式/提示词，
+  上限 100 个），模板库弹窗管理并一键填入；持久化于
+  `.automind/custom_templates.json`（`/api/templates/custom`）。
+- 专业版 📄 **审计报告导出（PDF）**：安全审计日志一键导出正式报告——装有
+  reportlab 时输出真 PDF（内置中文 CID 字体），否则输出可打印保存为 PDF 的
+  自包含 HTML（`/api/audit/export`）。
+- 企业版 🔐 **SSO / LDAP 单点登录**：LDAP bind（ldap3）或内置用户目录校验，
+  签发短期会话令牌并经新扩展点 `register_token_validator` 接入既有鉴权中间件，
+  HTTP 与 WebSocket 通用（`/api/auth/login|session|logout`）。
+- 企业版 🧩 **细粒度权限（RBAC）**：角色 × 动作矩阵（`tool:*`/`api:*` 通配），
+  内置 admin/developer/viewer 三角色，可自定义角色（`/api/rbac`）。
+- 企业版 🚪 **私有模型网关**：全部提供商 api_base 一键收敛到企业网关
+  （原地址自动备份、停用即恢复），模型白名单校验（`/api/gateway`）。
+- 社区核心：`edition.py` 特性注册表 +5；server_ctx 追加 `register_token_validator`
+  与 `rebuild_agent` 两个契约键（向后兼容）；社区版访问新端点返回 403 升级提示。
+
 ## [0.7.1] - 2026-07-09
 
 - **文档**：使用手册（md + 内置 HTML 手册）新增三种安装方式说明 —— PyPI
