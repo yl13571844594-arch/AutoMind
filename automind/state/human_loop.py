@@ -126,7 +126,6 @@ class HumanInTheLoop:
     @staticmethod
     async def _cli_ask(request: ApprovalRequest) -> ApprovalResponse:
         """通过 CLI 询问用户。"""
-        import sys
 
         print("\n" + "=" * 60)
         print(f"[APPROVAL REQUIRED] {request.risk_level.upper()}")

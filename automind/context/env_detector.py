@@ -112,7 +112,9 @@ class EnvironmentDetector:
     @staticmethod
     def _run_command(cmd: list[str]) -> str:
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            # Windows 中文环境默认 GBK，必须显式 UTF-8 以免工具输出解码失败
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5,
+                                    encoding="utf-8", errors="replace")
             return result.stdout.strip()
         except Exception:
             return ""

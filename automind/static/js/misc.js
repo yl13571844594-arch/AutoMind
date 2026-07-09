@@ -44,7 +44,7 @@ async function clearAudit() { await fetch(`${API}/audit`, {method:'DELETE'}); lo
 async function handleClear() {
   // 仅清空当前模式的会话；对话模式同时清服务端历史
   if (currentMode === 'chat') {
-    await fetch(`${API}/chat/history?session_id=${encodeURIComponent(SID)}`, {method:'DELETE'}).catch(()=>{});
+    await fetch(`${API}/chat/history?session_id=${encodeURIComponent(chatSid())}`, {method:'DELETE'}).catch(()=>{});
   }
   delete modeTranscripts[currentMode];
   delete _pendingResults[currentMode];  // 清除该模式的缓存结果

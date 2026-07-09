@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +31,7 @@ class CheckpointManager:
         Returns:
             检查点文件路径。
         """
-        state.last_updated = datetime.now(timezone.utc)
+        state.last_updated = datetime.now(UTC)
         checkpoint_id = f"ckpt_{state.session_id}_{int(time.time())}"
         file_path = self.checkpoint_dir / f"{checkpoint_id}.json"
 

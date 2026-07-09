@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 @pytest.fixture
 def sample_goal():
     """构造一棵简单的目标树用于测试。"""
-    from automind.core.types import Goal, Action
+    from automind.core.types import Action, Goal
 
     root = Goal(id="root", description="root task")
     a = Goal(id="a", description="step a",

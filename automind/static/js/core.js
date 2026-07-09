@@ -4,6 +4,17 @@ let ws = null;
 let providerData = null;
 let currentMode = 'chat';
 
+// ── 版本（Edition）状态：社区版隐藏/锁定商业功能 ──
+let EDITION = 'community';
+let FEATURES = {};   // 服务端 /api/status 返回的特性开关
+const EDITION_LABELS = {community:'社区版', pro:'专业版', enterprise:'企业版'};
+// 模式 → 所需特性键（无映射的模式为社区版功能）
+const MODE_FEATURE = {multi:'multi_agent', loop:'loop_engine'};
+function featureOn(key){ return !key || !!FEATURES[key]; }
+function upgradeToast(label){
+  toast(`「${label}」是专业版功能 — 当前为${EDITION_LABELS[EDITION]||EDITION}，请安装 automind-pro 并配置许可证`, 'error');
+}
+
 // 多用户会话隔离：每个浏览器拥有独立的会话 ID（持久化于 localStorage）
 function getSessionId(){
   let s = localStorage.getItem('automind_sid');
@@ -11,13 +22,61 @@ function getSessionId(){
   return s;
 }
 const SID = getSessionId();
+// 对话上下文按工作区隔离：默认工作区后缀为 ''（兼容既有历史）
+function chatSid(){ return SID + (window.WS_SUFFIX || ''); }
+
+// ── 实时 Token 成本估算 ──
+// 默认单价表（¥/百万 token，按公开定价粗估，可点击成本数字自定义覆盖）
+const MODEL_PRICES = [
+  ['deepseek-reasoner', 4, 16], ['deepseek', 2, 8],
+  ['gpt-4o-mini', 1.1, 4.4], ['gpt-4o', 18, 72], ['gpt-4.1-mini', 3, 12], ['gpt-4.1', 14, 57],
+  ['o4-mini', 8, 32], ['o3', 14, 57],
+  ['claude-3-5-haiku', 6, 29], ['claude-haiku', 6, 29], ['claude', 22, 108],
+  ['kimi', 12, 12], ['moonshot', 12, 12],
+  ['glm-4-flash', 0.1, 0.1], ['glm', 5, 5],
+  ['qwen-turbo', 0.3, 0.6], ['qwen-plus', 0.8, 2], ['qwen', 2, 6],
+  ['doubao', 0.8, 2],
+  ['gemini-2.0-flash', 0.8, 3], ['gemini-1.5-flash', 0.6, 2.4], ['gemini', 9, 36],
+  ['grok', 22, 108],
+  ['ollama', 0, 0], ['llama', 0, 0],
+];
+function modelPrice(){
+  try {
+    const ov = JSON.parse(localStorage.getItem('automind_price') || 'null');
+    if (ov && (ov.prompt >= 0) && (ov.completion >= 0)) return [ov.prompt, ov.completion, true];
+  } catch(e){}
+  const m = (window._curModel || '').toLowerCase();
+  for (const [key, p, c] of MODEL_PRICES) { if (m.includes(key)) return [p, c, false]; }
+  return [null, null, false];
+}
+function estCost(promptTk, completionTk){
+  const [p, c] = modelPrice();
+  if (p == null) return null;
+  return (promptTk || 0) / 1e6 * p + (completionTk || 0) / 1e6 * c;
+}
+function fmtCost(v){
+  if (v == null) return null;
+  return '≈¥' + (v < 0.01 ? v.toFixed(4) : v.toFixed(2));
+}
+function configPricing(){
+  const [p, c, custom] = modelPrice();
+  const cur = custom ? '（当前为自定义单价）' : (p != null ? `（当前 ${window._curModel||'模型'} 默认：¥${p}/¥${c}）` : '（当前模型无内置单价）');
+  const inp = prompt(`设置 Token 单价用于成本估算 ${cur}\n格式：输入单价/百万tk,输出单价/百万tk（如 2,8）\n留空并确定 = 恢复内置单价表`, custom ? `${p},${c}` : '');
+  if (inp === null) return;
+  if (!inp.trim()) { localStorage.removeItem('automind_price'); toast('已恢复内置单价表', 'info'); refreshTokens(); return; }
+  const m = inp.split(/[,，]/).map(s => parseFloat(s.trim()));
+  if (m.length !== 2 || m.some(v => isNaN(v) || v < 0)) return toast('格式错误，示例：2,8', 'error');
+  localStorage.setItem('automind_price', JSON.stringify({prompt: m[0], completion: m[1]}));
+  toast(`单价已设置：输入¥${m[0]} / 输出¥${m[1]} 每百万token`, 'success');
+  refreshTokens();
+}
 
 // 每个模式独立的会话内容（切换模式互不影响）
 let currentView = 'chat';           // 'chat'=对话区，否则为面板名
 let modeTranscripts = {};           // mode -> #messages innerHTML
 let _taskMode = null;               // 当前正在执行的任务所属模式
 let _pendingResults = {};           // mode -> [{type, data, ...}] 在面板视图中到达的任务结果缓存
-function _tkey(){ return 'automind_transcripts_' + SID; }
+function _tkey(){ return 'automind_transcripts_' + SID + (window.WS_SUFFIX || ''); }
 // localStorage 上限：单模式 300KB、总量 1.2MB，超限保留尾部（最新内容）并逐模式回收
 const _TX_PER_MODE = 300 * 1024, _TX_TOTAL = 1200 * 1024;
 function loadTranscripts(){ try{ modeTranscripts = JSON.parse(localStorage.getItem(_tkey())||'{}')||{}; }catch(e){ modeTranscripts={}; } }
@@ -128,7 +187,11 @@ function appendResultToDOM(container, data) {
     if (data.steps) meta.push(`${data.steps}步`);
     if (data.backtracks) meta.push(`${data.backtracks}回溯`);
   }
-  if (data.tokens) meta.push(`🪙 ${data.tokens}tk (${data.prompt_tokens||0}↑/${data.completion_tokens||0}↓)`);
+  if (data.tokens) {
+    meta.push(`🪙 ${data.tokens}tk (${data.prompt_tokens||0}↑/${data.completion_tokens||0}↓)`);
+    const cost = fmtCost(estCost(data.prompt_tokens, data.completion_tokens));
+    if (cost) meta.push(cost);
+  }
   if (data.duration_ms) meta.push(`${data.duration_ms}ms`);
   const metaStr = meta.length ? meta.join(' · ') : new Date().toLocaleTimeString();
   const div = document.createElement('div');
@@ -185,6 +248,7 @@ async function init() {
   refreshAuditMini();
   refreshTokens();
   refreshHtmlFiles();
+  refreshChanges();
   loadAppVersion();                // 版本号动态读取（§14.1 单一数据源）
 }
 async function loadAppVersion() {
@@ -198,7 +262,7 @@ document.addEventListener('DOMContentLoaded', init);
 
 async function restoreChat() {
   try {
-    const h = await (await fetch(`${API}/chat/history?session_id=${encodeURIComponent(SID)}`)).json();
+    const h = await (await fetch(`${API}/chat/history?session_id=${encodeURIComponent(chatSid())}`)).json();
     const msgs = (h.messages || []).filter(m => m.role === 'user' || m.role === 'assistant');
     if (!msgs.length) { renderWelcome(); return; }
     document.getElementById('messages').innerHTML = '';
@@ -210,9 +274,11 @@ async function loadStatus(forMode) {
   try {
     const q = forMode ? `?interaction=${encodeURIComponent(forMode)}` : '';
     const s = await (await fetch(`${API}/status${q}`)).json();
+    if (s.edition) { EDITION = s.edition; FEATURES = s.features || {}; applyEditionUI(); }
     if (!forMode) currentMode = s.interaction || 'chat';
     applyModeUI(currentMode);
     const mb = document.getElementById('model-badge');
+    window._curModel = s.model || '';   // 供成本估算取单价
     const modeLabel = (s.mode_specific ? `${MODE_LABELS[currentMode]||currentMode}模式专用 · ` : '默认 · ');
     if (s.llm_ready) {
       mb.textContent = `${s.provider}/${s.model}`;
@@ -253,14 +319,22 @@ function renderWelcome() {
       • 💬 <b>对话</b> — 像聊天一样问答交流（支持图片输入 / 视觉模型）<br>
       • ⚙️ <b>工作</b> — 自主规划并执行任务（建项目、跑命令、改文件）<br>
       • 💻 <b>编程</b> — 聚焦代码：阅读、编写、调试、重构、测试<br>
-      • 🤝 <b>协同</b> — 多智能体分工协作（规划/研究/编程/审阅）并综合<br>
-      • 🔁 <b>循环</b> — 自主"行动-观察-修正"闭环，迭代到达标为止<br><br>
+      • 🤝 <b>协同</b> — 多智能体分工协作（规划/研究/编程/审阅）并综合${featureOn('multi_agent')?'':' <span style="font-size:.82em;color:var(--text3)">🔒专业版</span>'}<br>
+      • 🔁 <b>循环</b> — 自主"行动-观察-修正"闭环，迭代到达标为止${featureOn('loop_engine')?'':' <span style="font-size:.82em;color:var(--text3)">🔒专业版</span>'}<br><br>
       <span style="color:var(--text3);font-size:.88em;">
       顶部可设置 <b>审批模式</b>（🙋询问 / ⚡自动 / ✅全批准）；侧边栏有 📊 统计分析、⏰ 定时任务、🔧 工具/技能/MCP、🛡️ 安全审计。<br>
       ⚙ 首次使用请先点击右上角 <b>🔑 API Keys</b> 配置模型。<br>
       支持 OpenAI / Claude / DeepSeek / Kimi / 百炼 / 智谱 / 豆包 / Gemini / Grok / Ollama，
       以及 <b>自定义 OpenAI 标准接口（中转代理）</b>。
       </span>
+      <div style="margin-top:12px;border-top:1px dashed var(--border);padding-top:10px">
+        <span style="font-size:.85em;color:var(--text2)">🚀 快速开始（点击模板一键填入）：</span>
+        <div class="tpl-chips" style="margin-top:8px">
+          ${(window.TEMPLATES||[]).slice(0,5).map((t,i)=>
+            `<button class="tpl-chip" onclick="useTemplate(${i})">${t.icon} ${esc(t.title)}</button>`).join('')}
+          <button class="tpl-chip" onclick="showTemplates()">📚 全部模板…</button>
+        </div>
+      </div>
     </div>
     <div class="time">现在</div>
   </div>
@@ -269,6 +343,8 @@ function renderWelcome() {
 
 // ── Mode switching ──
 async function setMode(mode) {
+  // 商业功能门控：社区版点击协同/循环给出升级提示，不切换
+  if (!featureOn(MODE_FEATURE[mode])) { upgradeToast(MODE_LABELS[mode]||mode); return; }
   if (mode === currentMode && currentView === 'chat') return;
   captureTranscript();             // 保存当前模式的会话内容
   currentMode = mode;
@@ -297,6 +373,41 @@ function applyModeUI(mode) {
   // 高级模式（协同/循环）激活时自动展开高级组，避免"选中却被折叠"
   if (mode === 'multi' || mode === 'loop') toggleAdvancedModes(true);
 }
+// 按版本锁定商业功能入口：模式按钮（协同/循环）+ 侧边栏（定时任务）加 🔒 标注
+function applyEditionUI() {
+  document.querySelectorAll('#mode-switch button[data-mode]').forEach(b => {
+    const need = MODE_FEATURE[b.dataset.mode];
+    const locked = !featureOn(need);
+    b.classList.toggle('locked', locked);
+    if (locked && !b.querySelector('.lock-ico')) {
+      const s = document.createElement('span'); s.className = 'lock-ico'; s.textContent = '🔒';
+      b.appendChild(s);
+      b.title = (b.title || '') + '（专业版功能）';
+    } else if (!locked) {
+      const ico = b.querySelector('.lock-ico'); if (ico) ico.remove();
+    }
+  });
+  const schBtn = document.querySelector('#sidebar nav button[data-view="schedule"]');
+  if (schBtn) {
+    const locked = !featureOn('scheduler');
+    schBtn.classList.toggle('locked', locked);
+    if (locked && !schBtn.querySelector('.lock-ico')) {
+      const s = document.createElement('span'); s.className = 'lock-ico'; s.textContent = '🔒';
+      schBtn.appendChild(s);
+    } else if (!locked) {
+      const ico = schBtn.querySelector('.lock-ico'); if (ico) ico.remove();
+    }
+  }
+  const eb = document.getElementById('edition-badge');
+  if (eb) {
+    eb.textContent = EDITION_LABELS[EDITION] || EDITION;
+    eb.className = 'edition-badge ' + EDITION;
+    eb.title = EDITION === 'community'
+      ? '社区版（开源免费）— 协同/循环/定时任务/高级统计为专业版功能'
+      : `已激活 AutoMind ${EDITION_LABELS[EDITION]}`;
+  }
+}
+
 // 折叠/展开高级模式组：3 主模式常驻，协同/循环收进"⋯ 高级"以免新用户被 5 个按钮吓到
 function toggleAdvancedModes(force) {
   const adv = document.getElementById('mode-advanced');

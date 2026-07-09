@@ -201,3 +201,22 @@
 .icon-del { flex-shrink:0; width:30px; height:30px; border:1px solid var(--border); background:var(--bg0); color:var(--text3); border-radius:8px; cursor:pointer; font-size:.95em; transition:var(--transition); }
 .icon-del:hover { color:#fff; background:var(--red); border-color:var(--red); }
 
+
+/* ── 版本（Edition）标识与商业功能锁定 ── */
+.edition-badge{margin-left:6px;padding:1px 7px;border-radius:9px;font-size:.68em;font-weight:600;border:1px solid var(--border);color:var(--text3);background:var(--bg2)}
+.edition-badge.pro{color:#c9a227;border-color:#c9a22755;background:#c9a22712}
+.edition-badge.enterprise{color:#7c5cff;border-color:#7c5cff55;background:#7c5cff12}
+button.locked{opacity:.55}
+button.locked .lock-ico{font-size:.72em;margin-left:3px;opacity:.9}
+.upgrade-card{border:1px dashed var(--border);border-radius:10px;padding:18px;text-align:center;color:var(--text2);background:var(--bg1)}
+.upgrade-card b{color:var(--text)}
+.upgrade-card .hint{display:block;margin-top:8px;font-size:.82em;color:var(--text3)}
+
+/* ── 模板库（社区版内置 10 个基础模板）── */
+.tpl-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:14px;max-height:52vh;overflow-y:auto;padding-right:4px}
+.tpl-card{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg1);cursor:pointer;transition:var(--transition)}
+.tpl-card:hover{border-color:var(--accent);background:var(--bg2);transform:translateY(-1px);box-shadow:var(--shadow-sm)}
+.tpl-icon{font-size:1.5em;line-height:1.2}
+.tpl-chips{display:flex;flex-wrap:wrap;gap:6px}
+.tpl-chip{padding:5px 12px;border:1px solid var(--border);border-radius:999px;background:var(--bg2);color:var(--text2);font-size:.8em;cursor:pointer;transition:var(--transition)}
+.tpl-chip:hover{border-color:var(--accent);color:var(--accent);background:var(--bg1)}

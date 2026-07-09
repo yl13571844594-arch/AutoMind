@@ -33,14 +33,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from automind.core.config import AgentConfig
 from automind.core.types import (
-    Action,
     Goal,
     GoalStatus,
-    HierarchicalPlan,
-    PlanStatus,
-    Predicate,
-    Role,
-    ToolResult,
 )
 from automind.planning.dependency_graph import TaskDependencyGraph
 from automind.planning.hierarchical_planner import HierarchicalPlanner
@@ -50,10 +44,9 @@ from automind.reflection.consistency_checker import ConsistencyChecker
 from automind.reflection.quality_assessor import QualityAssessor
 from automind.reflection.reflexion import ReflexionEngine
 from automind.tools.base import ToolRegistry
-from automind.tools.file_editor import FileReadTool, FileWriteTool, FileEditTool
+from automind.tools.file_editor import FileEditTool, FileReadTool, FileWriteTool
 from automind.tools.permissions import PermissionEngine
 from automind.tools.terminal import TerminalTool
-
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 模拟 LLM (无 API Key 时使用)
@@ -353,7 +346,7 @@ async def demo():
     if write_main_goal:
         # 模拟回溯
         print("  [BACKTRACK 触发]")
-        print(f"    冲突: 测试期望 GET /health → 200, 实际返回 404")
+        print("    冲突: 测试期望 GET /health → 200, 实际返回 404")
         print(f"    根因: {write_main_goal.description} 未包含 @app.get('/health')")
 
         plan = nonmonotonic.backtrack_plan(
@@ -380,7 +373,7 @@ async def demo():
         if retry_result.success:
             write_main_goal.status = GoalStatus.COMPLETED
             planner.update_goal_status(plan, write_main_goal.id, GoalStatus.COMPLETED)
-            print(f"    ✓ main.py 已修正 (添加了 @app.get('/health'))")
+            print("    ✓ main.py 已修正 (添加了 @app.get('/health'))")
 
         # 重新执行测试
         if test_goal and test_goal.assigned_action:
@@ -392,7 +385,7 @@ async def demo():
             if test_result.success and test_result.exit_code == 0:
                 test_goal.status = GoalStatus.COMPLETED
                 planner.update_goal_status(plan, test_goal.id, GoalStatus.COMPLETED)
-                print(f"    ✓ 测试通过!")
+                print("    ✓ 测试通过!")
             else:
                 print(f"    ✗ 测试仍然失败: {test_result.error}")
 
@@ -426,7 +419,7 @@ async def demo():
     engine = extractor.to_engine()
 
     print(f"  提取事实: {facts_count} 条")
-    print(f"  示例事实:")
+    print("  示例事实:")
     for fact in engine.list_facts()[:5]:
         print(f"    {fact}")
 
@@ -455,7 +448,7 @@ async def demo():
     )
     print(f"  自我批评: {reflection.self_criticism[:200]}...")
     if reflection.lessons:
-        print(f"  经验教训:")
+        print("  经验教训:")
         for lesson in reflection.lessons:
             print(f"    - {lesson}")
 

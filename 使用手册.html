@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v0.5.0</title>
+<title>AutoMind 使用手册 — v0.7.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v0.5.0</div>
+  <div class="ver">使用手册 · v0.7.0</div>
   <a href="#intro">1 · 产品简介</a>
   <a href="#quick">2 · 快速上手</a>
   <a href="#ui">3 · 界面总览</a>
@@ -199,10 +199,28 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v0.5.0</b></span>
+    <span class="chip">版本 <b>v0.7.0</b></span>
+    <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
     <span class="chip">🧠 10+ 模型提供商</span>
+  </div>
+  <div style="margin-top:14px;padding:12px 16px;border:1px dashed #c9a22755;border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
+    <b style="color:#c9a227">🏷 v0.6 版本体系</b> — 开源部分为<b>社区版</b>（MIT 免费）：对话/工作/编程三模式与全部工具、技能、MCP、记忆、安全能力。
+    <b>🤝 协同、🔁 循环、⏰ 定时任务、📊 高级统计</b>为<b>专业版</b>；<b>👥 多用户会话池（执行态隔离）</b>为<b>企业版</b> —
+    由商业扩展包 <code>automind-pro</code> 提供，配置许可证（<code>AUTOMIND_LICENSE</code>）后自动激活；
+    社区版对应入口显示 🔒。安全能力（鉴权/限流/脱敏/审计）不设付费墙。详见 <code>docs/EDITIONS.md</code>。
+  </div>
+  <div style="margin-top:10px;padding:12px 16px;border:1px dashed rgba(108,140,255,.35);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
+    <b style="color:#7b9fff">✨ v0.7 体验升级</b> —
+    <b>🌓 浅色模式</b>（右上角随时切换）·
+    <b>🗂 工作区</b>（多目录多上下文，任务互不污染）·
+    <b>📚 模板库</b>（内置 10 个基础模板一键开跑）·
+    <b>🧭 新手引导</b>（首次自动弹出，❓ 重看）·
+    <b>💰 实时成本</b>（Token 花费估算，可自定义单价）·
+    <b>📜 历史回溯</b>（持久化 + 查看/复制/重跑）·
+    <b>▶ 中断续跑</b>（从断点继续省 Token）·
+    <b>↩️ 撤销回滚</b>（Agent 改过的文件一键恢复）。
   </div>
 </div>
 
@@ -312,7 +330,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <text x="572" y="43" text-anchor="middle" fill="#3ce68a" font-size="10">deepseek/chat ●</text>
     <!-- 顶栏按钮 -->
     <g fill="#a7b0c8" font-size="10.5">
-      <text x="644" y="43">🖥模型 🔑Keys ⚙设置 🔄新会话</text>
+      <text x="644" y="43">📖手册 🖥模型 🔑Keys ⚙设置</text>
     </g>
     <!-- 聊天区 -->
     <rect x="170" y="66" width="460" height="290" rx="12" fill="#0a0f20"/>
@@ -470,7 +488,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   </div>
 
   <div class="mode-card mc-multi" id="m-multi">
-    <h4>🤝 协同模式 <span class="sub">—— "多角色专家组"（多智能体编排）</span></h4>
+    <h4>🤝 协同模式 <span class="sub">—— "多角色专家组"（多智能体编排）</span> <span style="color:#c9a227;font-size:.72em">🔒 专业版</span></h4>
     <p><b>原理：</b>任务分派给多个角色（规划者 / 研究员 / 编程者 / 审阅者），
     各自基于<strong>共享白板</strong>完成子任务并互相看得到彼此成果，最后综合产出。</p>
     <div class="row"><span class="pill">「调研三个向量数据库优劣并给选型建议」</span>
@@ -478,7 +496,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   </div>
 
   <div class="mode-card mc-loop" id="m-loop">
-    <h4>🔁 循环模式 <span class="sub">—— "不达目标不罢休"（Loop Engineering）</span></h4>
+    <h4>🔁 循环模式 <span class="sub">—— "不达目标不罢休"（Loop Engineering）</span> <span style="color:#c9a227;font-size:.72em">🔒 专业版</span></h4>
     <p><b>原理：</b>执行 → 判定"目标达成了吗" → 未达成则带着反馈继续下一轮。内置<strong>四重停止条件</strong>防死循环：</p>
     <div class="fig">
     <svg viewBox="0 0 780 96" xmlns="http://www.w3.org/2000/svg" font-family="system-ui,'Microsoft YaHei'" font-size="12">
@@ -509,8 +527,8 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     只是想问 / 写点东西？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 💬 对话<br>
     让它替我做一件多步骤的事？&nbsp;&nbsp;→ ⚙️ 工作<br>
     围绕代码读改测？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 💻 编程<br>
-    复杂问题要多角度方案？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 🤝 协同<br>
-    有明确标准要迭代到达标？&nbsp;&nbsp;&nbsp;&nbsp;→ 🔁 循环
+    复杂问题要多角度方案？&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;→ 🤝 协同（专业版）<br>
+    有明确标准要迭代到达标？&nbsp;&nbsp;&nbsp;&nbsp;→ 🔁 循环（专业版）
   </div>
 </section>
 
@@ -756,11 +774,11 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   （写文件、执行命令永远真实执行）；审阅者只能调用只读工具。</div>
 
   <div class="grid g2">
-    <div class="tile"><div class="ic">⏰</div><b>定时任务</b>
+    <div class="tile"><div class="ic">⏰</div><b>定时任务 <span style="color:#c9a227;font-size:.78em">🔒 专业版</span></b>
       <p>任务内容 + 模式（五种均可）+ 间隔（每5分钟 / 每小时 / 每6小时 / 每天）。
       后台调度、结果入历史、重启自动恢复。<br><br>
       <b>场景：</b>每天汇总日志错误、每小时抓数据追加 CSV、每 6 小时跑测试。</p></div>
-    <div class="tile"><div class="ic">📊</div><b>统计分析仪表盘</b>
+    <div class="tile"><div class="ic">📊</div><b>统计分析仪表盘 <span style="color:#c9a227;font-size:.78em">🔒 高级部分为专业版</span></b>
       <p>四个命中率圆环（工具/计划/任务/自我修正 + 综合平均）、上下文使用率发光条、
       最近 50 次趋势折线、Token 效率、记忆系统指标。<br><br>
       <b>用途：</b>评估模型效果、监控 Token 花销、发现异常任务。</p></div>
@@ -794,7 +812,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.5.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.7.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -895,7 +913,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v0.5.0 同步 ·
+  AutoMind 使用手册 · 与软件 v0.7.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

@@ -12,12 +12,13 @@ async function sendMessage() {
   appendMessage('user', text, images);
   clearAttachments();
   _taskMode = currentMode;  // 记录任务所属模式
+  window._lastTask = { text, mode: currentMode };  // 供「任务中断继续」使用
   setRunning(true);
 
   // 优先走 WebSocket（流式 + 可中断），否则回退到 REST
   if (ws && ws.readyState === WebSocket.OPEN) {
     appendTyping();
-    ws.send(JSON.stringify({ action: 'run', task: text, interaction: currentMode, images, session_id: SID }));
+    ws.send(JSON.stringify({ action: 'run', task: text, interaction: currentMode, images, session_id: chatSid() }));
     return;
   }
   await sendViaRest(text, images);
@@ -29,17 +30,19 @@ async function sendViaRest(text, images) {
   try {
     const r = await fetch(`${API}/run`, {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ task: text, interaction: taskMode, images, session_id: SID }),
+      body: JSON.stringify({ task: text, interaction: taskMode, images, session_id: chatSid() }),
     });
     const data = await r.json();
     removeTyping(); setRunning(false);
     if (data.error) {
       routeResultToMode(taskMode, 'message', { role: 'agent', text: `❌ **错误**: ${data.error}` });
+      offerResume(taskMode, '出错');
     } else {
       routeResultToMode(taskMode, 'result', data);
       updateStats(data);
       if (data.plan) updatePlanView(data.plan);
-      refreshAuditMini(); refreshHtmlFiles(); loadStatus();
+      refreshAuditMini(); refreshHtmlFiles(); refreshChanges(); loadStatus();
+      window._lastTask = null;
     }
   } catch(e) {
     removeTyping(); setRunning(false);
@@ -160,6 +163,13 @@ async function refreshTokens() {
     document.getElementById('tok-completion').textContent = (t.completion||0).toLocaleString();
     document.getElementById('tok-total').textContent = (t.total||0).toLocaleString();
     document.getElementById('tok-tasks').textContent = t.tasks||0;
+    // 实时成本估算（按当前模型单价，可点击自定义）
+    const costEl = document.getElementById('tok-cost');
+    if (costEl) {
+      const cost = fmtCost(estCost(t.prompt, t.completion));
+      costEl.textContent = cost || '设置单价';
+      costEl.style.color = cost ? 'var(--yellow)' : 'var(--text3)';
+    }
   } catch(e) {}
 }
 async function resetTokens() { await fetch(`${API}/tokens`, {method:'DELETE'}); refreshTokens(); toast('Token 统计已重置', 'info'); }

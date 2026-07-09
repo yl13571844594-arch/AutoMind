@@ -175,7 +175,7 @@ class ReasoningEngine:
         while len(thoughts) < n:
             thoughts.append(ThoughtNode(
                 id=uuid.uuid4().hex[:8],
-                content=f"Alternative approach: consider the problem from a different angle",
+                content="Alternative approach: consider the problem from a different angle",
                 parent_id=node.id,
             ))
         return thoughts[:n]

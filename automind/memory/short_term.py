@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from typing import Any
 
-from automind.core.types import Message, MemoryChunk, Role
+from automind.core.types import MemoryChunk, Message, Role
 
 
 class ShortTermMemory:

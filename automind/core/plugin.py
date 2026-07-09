@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from automind.core.hooks import AgentHooks, merge_hooks

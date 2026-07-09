@@ -1,4 +1,4 @@
-# AutoMind — General-Purpose Automation Agent Framework
+# AutoMind — General-Purpose Automation Agent Framework (Community Edition)
 
 > [中文文档 / Chinese README](README.md)
 
@@ -7,6 +7,28 @@ MCP protocol support, a Skill system, hierarchical planning, symbolic reasoning,
 and self-correction — with a built-in **Web workbench** that works out of the box
 for chatting, working, and coding.
 
+## Editions: Community / Pro / Enterprise
+
+This repository is the **Community Edition** (MIT, free forever). Commercial
+capabilities ship as a separate closed-source `automind-pro` package that
+activates at runtime once a license is configured — see
+[docs/EDITIONS.md](docs/EDITIONS.md).
+
+| Capability | Community | Pro | Enterprise |
+|------------|:---:|:---:|:---:|
+| Chat / Work / Coding modes, tools, skills, MCP, plugins | ✅ | ✅ | ✅ |
+| Planning, symbolic reasoning, self-correction, memory | ✅ | ✅ | ✅ |
+| Web workbench + CLI, approval gating, security audit | ✅ | ✅ | ✅ |
+| Auth token / rate limiting / secret redaction | ✅ | ✅ | ✅ |
+| Basic statistics | ✅ | ✅ | ✅ |
+| 🤝 Multi-Agent mode | — | ✅ | ✅ |
+| 🔁 Loop Engineering mode | — | ✅ | ✅ |
+| ⏰ Scheduled tasks | — | ✅ | ✅ |
+| 📊 Advanced statistics dashboard | — | ✅ | ✅ |
+| 👥 Session agent pool (multi-user execution isolation) | — | — | ✅ |
+
+> Security features are **never** paywalled — they all stay in Community.
+
 ## Five Interaction Modes
 
 | Mode | Description | Best For |
@@ -14,8 +36,8 @@ for chatting, working, and coding.
 | 💬 **Chat** | Pure multi-turn conversation, no tools, fastest (supports image input / vision models) | Q&A, consulting, brainstorming |
 | ⚙️ **Work** | Hierarchical planning + tool execution + symbolic verification | Scaffolding projects, running commands, editing files |
 | 💻 **Coding** | ReAct think-act loop focused on code | Reading / writing / debugging / refactoring / testing |
-| 🤝 **Multi-Agent** | Multiple role agents collaborate and synthesize | Complex, cross-role long tasks |
-| 🔁 **Loop** | Loop Engineering: autonomous act-observe-correct cycle | Tasks that need iteration until a target is met |
+| 🤝 **Multi-Agent** (Pro) | Multiple role agents collaborate and synthesize | Complex, cross-role long tasks |
+| 🔁 **Loop** (Pro) | Loop Engineering: autonomous act-observe-correct cycle | Tasks that need iteration until a target is met |
 
 ## Tool Approval Modes
 
@@ -90,7 +112,7 @@ automind/
 ├── tools/        # terminal, file editing, sandbox, permissions, MCP
 ├── skills/       # skill system (built-ins + SKILL.md + entry points)
 ├── context/      # context window management, project indexing
-├── multiagent/   # multi-agent orchestrator
+├── core/edition.py  # edition gating + stable extension protocol (v1)
 ├── state/        # checkpoints, human-in-the-loop, resource budgets
 ├── server.py     # FastAPI Web layer (REST + WebSocket)
 ├── cli/          # CLI + Rich REPL
@@ -146,4 +168,13 @@ ruff check .             # lint
 
 ## License
 
-MIT
+Community Edition (this repository's `automind/` package): MIT.
+The `automind-pro` extension package is commercial, closed-source software
+(see `pro/LICENSE-COMMERCIAL.md`, not included in open-source releases).
+
+## Open Source
+
+- Install from PyPI: `pip install automind-agent` (extras: `[web]`, `[full]`).
+- Contributions welcome — see [CONTRIBUTING.md](CONTRIBUTING.md); release history in [CHANGELOG.md](CHANGELOG.md).
+- AutoMind runs entirely locally: API keys and chat history stay on your machine; no telemetry.
+- Please report security vulnerabilities privately via GitHub Security Advisories.

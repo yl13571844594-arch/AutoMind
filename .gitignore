@@ -1,5 +1,6 @@
 # 机密与运行时数据（切勿提交！）
 .automind_config.json
+.automind_license
 .automind/
 .reasonix/
 *.pem
@@ -37,6 +38,17 @@ ENV/
 .DS_Store
 Thumbs.db
 
-# 项目杂项
+# 商业闭源部分（另存私有仓库，切勿推送到公开仓库！）
+pro/
 analytics-service/
+
+# 项目杂项
 *.log
+*.rar
+*.zip
+*.7z
+
+# 内部操作文档（不进公开仓库）
+GITHUB.md
+AUTOMIND_REFACTOR_PLAN.md
+BUGS_21_TO_FIX.md

@@ -15,11 +15,10 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 from abc import ABC, abstractmethod
-from typing import Any, AsyncIterator
+from collections.abc import AsyncIterator
+from typing import Any
 
 from automind.core.config import LLMProviderConfig
 from automind.core.exceptions import (
@@ -30,7 +29,6 @@ from automind.core.exceptions import (
     LLMTimeoutError,
 )
 from automind.core.types import LLMResponse, ToolCall
-
 
 # ═══════════════════════════════════════════════════════════════
 # 抽象基类

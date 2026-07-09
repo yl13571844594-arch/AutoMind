@@ -113,10 +113,10 @@ class TestFileToolGuard:
 
 class TestVersionUnified:
     def test_single_source_of_truth(self):
-        import automind
-        import automind.server as srv
-
         # 单一数据源：server 版本必须来自包版本（不锁定具体号，避免每次升版改测试）
         import re
+
+        import automind
+        import automind.server as srv
         assert re.fullmatch(r"\d+\.\d+\.\d+", automind.__version__)
         assert srv.app.version == automind.__version__

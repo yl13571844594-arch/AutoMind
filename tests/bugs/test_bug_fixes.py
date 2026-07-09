@@ -5,7 +5,7 @@ from datetime import datetime
 
 import pytest
 
-from automind.core.types import Goal, GoalStatus, Predicate
+from automind.core.types import Goal, Predicate
 
 
 # ── B-02: 资源依赖边方向 ────────────────────────────────

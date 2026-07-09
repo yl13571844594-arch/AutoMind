@@ -1,6 +1,6 @@
 """MarkdownSkill / SKILL.md 加载测试。"""
 
-from automind.skills.markdown_skill import MarkdownSkill, _parse_frontmatter, _extract_emoji
+from automind.skills.markdown_skill import MarkdownSkill, _extract_emoji, _parse_frontmatter
 from automind.skills.skill_registry import SkillRegistry
 
 SKILL_MD = """---

@@ -25,6 +25,8 @@ async function loadStatsView() {
       (await fetch(`${API}/stats/detail`)).json(),
       (await fetch(`${API}/stats/history`)).json(),
     ]);
+    // 社区版：高级统计未授权（403 携带 feature 字段）→ 展示基础统计 + 升级卡片
+    if (d && d.feature === 'advanced_stats') { renderBasicStatsView(base); return; }
   } catch(e) {
     document.getElementById('messages').innerHTML = `<div class="msg agent"><div class="avatar">AM</div><div class="col" style="max-width:100%"><div class="bubble" style="max-width:100%"><div class="panel-head"><b>📊 高级统计仪表盘</b><button onclick="loadStatsView()" class="btn-secondary" style="margin-left:auto;padding:4px 12px;border-radius:8px;font-size:.76em">🔄 刷新</button></div><div class="dash-section"><div class="dash-card" style="text-align:center;color:var(--red)">❌ 统计加载失败: ${esc(e.message||'')}<br><span style="font-size:.8em;color:var(--text3)">请确认 Agent 已初始化并有任务记录</span></div></div></div></div></div>`;
     return;
@@ -89,9 +91,50 @@ async function loadStatsView() {
 </div></div></div>`;
 }
 
+// 社区版统计视图：基础聚合（/api/stats）+ 专业版升级卡片
+function renderBasicStatsView(base) {
+  const b = base || {};
+  const byMode = b.by_mode || {};
+  const modeRows = Object.keys(byMode).length ? Object.entries(byMode).map(([m, v]) => `
+    <div class="metric-row"><span>${MODE_LABELS[m]||m}</span><span class="mv">${v.count} 次 · 成功 ${v.success} · ${v.tokens.toLocaleString()} tk · 平均 ${v.avg_ms}ms</span></div>`).join('')
+    : '<em style="color:var(--text3)">暂无任务记录</em>';
+  const tools = Object.entries(b.tool_usage||{}).slice(0,8).map(([t,n])=>`
+    <span class="tag safe" style="margin:3px;display:inline-block">${esc(t)} ×${n}</span>`).join('') || '<em style="color:var(--text3)">暂无工具调用</em>';
+  const tk = b.tokens || {};
+  document.getElementById('messages').innerHTML = `
+<div class="msg agent"><div class="avatar">AM</div><div class="col" style="max-width:100%"><div class="bubble" style="max-width:100%">
+  <div class="panel-head"><b>📊 统计分析（社区版）</b>
+    <button onclick="loadStatsView()" class="btn-secondary" style="margin-left:auto;padding:4px 12px;border-radius:8px;font-size:.76em">🔄 刷新</button></div>
+  <div class="dash-section"><h4>总览</h4>
+    <div class="dash-card">
+      <div class="metric-row"><span>任务总数 / 成功</span><span class="mv">${b.tasks_total||0} / ${b.success_total||0}（${b.success_rate||0}%）</span></div>
+      <div class="metric-row"><span>平均耗时</span><span class="mv">${b.avg_duration_ms||0} ms</span></div>
+      <div class="metric-row"><span>累计 Token（输入/输出）</span><span class="mv">${(tk.prompt||0).toLocaleString()} / ${(tk.completion||0).toLocaleString()}</span></div>
+    </div>
+  </div>
+  <div class="dash-section"><h4>按模式聚合</h4><div class="dash-card">${modeRows}</div></div>
+  <div class="dash-section"><h4>工具使用 Top</h4><div>${tools}</div></div>
+  <div class="dash-section">
+    <div class="upgrade-card">🔒 <b>高级统计仪表盘</b>（命中率环图 · 上下文使用率 · Token 效率 · 记忆指标 · 趋势折线）为<b>专业版</b>功能
+      <span class="hint">安装 automind-pro 并配置许可证后即可解锁</span></div>
+  </div>
+</div></div></div>`;
+}
+
 // ── 定时任务 ──
 async function loadScheduleView() {
-  const list = await (await fetch(`${API}/schedule`)).json();
+  const resp = await fetch(`${API}/schedule`);
+  const list = await resp.json();
+  // 社区版：定时任务未授权 → 升级卡片
+  if (!resp.ok || (list && list.feature === 'scheduler')) {
+    document.getElementById('messages').innerHTML = `
+<div class="msg agent"><div class="avatar">AM</div><div class="col" style="max-width:100%"><div class="bubble" style="max-width:100%">
+  <b>⏰ 定时任务</b>
+  <div class="upgrade-card" style="margin-top:12px">🔒 <b>定时任务</b>（按固定间隔自动执行任意模式的任务、后台调度与结果记录）为<b>专业版</b>功能
+    <span class="hint">安装 automind-pro 并配置许可证（AUTOMIND_LICENSE）后重启服务即可解锁</span></div>
+</div></div></div>`;
+    return;
+  }
   const rows = list.length ? list.map(s=>`
     <div class="card ${s.enabled?'lt-green':''}">
       <b>${esc(s.name)}</b>
@@ -419,20 +462,105 @@ async function loadHistoryView() {
   document.getElementById('messages').innerHTML = `
 <div class="msg agent"><div class="avatar">AM</div><div class="col" style="max-width:100%"><div class="bubble" style="max-width:100%">
   <b>📜 任务历史 (${history.length})</b>
+  <span style="font-size:.74em;color:var(--text3);margin-left:8px">已持久化 — 关浏览器/重启服务都不会丢，随时回溯产出</span>
   <button onclick="clearHistory()" class="btn-danger" style="float:right;padding:4px 10px;border-radius:6px;font-size:.78em">清空</button>
   <br>
   ${history.length === 0 ? '<em style="color:var(--text3)">暂无历史记录</em>' :
     history.slice().reverse().map(h => `
     <div class="card ${h.success?'lt-green':'lt-red'}">
-      <button class="btn-danger" style="float:right;padding:2px 9px;font-size:.74em;border-radius:6px" onclick="delHistory('${jsq(h.session_id)}')">删除</button>
-      <div style="font-weight:500;padding-right:50px">${esc((h.task||'').slice(0,120))}</div>
+      <div style="float:right;display:flex;gap:4px">
+        <button class="btn-secondary" style="padding:2px 9px;font-size:.74em;border-radius:6px" onclick="viewHistory('${jsq(h.session_id)}')">🔍 查看</button>
+        <button class="btn-secondary" style="padding:2px 9px;font-size:.74em;border-radius:6px" onclick="rerunHistory('${jsq(h.session_id)}')">↻ 重跑</button>
+        <button class="btn-danger" style="padding:2px 9px;font-size:.74em;border-radius:6px" onclick="delHistory('${jsq(h.session_id)}')">删除</button>
+      </div>
+      <div style="font-weight:500;padding-right:170px">${esc((h.task||'').slice(0,120))}</div>
       <div style="font-size:.78em;color:var(--text3);margin-top:3px">
         ${({chat:'💬对话',work:'⚙️工作',coding:'💻编程',multi:'🤝协同',loop:'🔁循环'})[h.interaction]||''}${h.scheduled?' ⏰':''}
-        · ${h.steps}步 · ${h.tokens}tk · ${h.duration_ms}ms · ${h.session_id}
+        ${h.time?` · ${esc(h.time)}`:''} · ${h.steps}步 · ${h.tokens}tk · ${h.duration_ms}ms
       </div>
       <div style="font-size:.82em;color:var(--text2);margin-top:4px;max-height:60px;overflow:hidden">${esc((h.output||'').slice(0,200))}</div>
     </div>`).join('')}
 </div></div></div>`;
+}
+
+// ── 任务历史回溯：查看完整产出 / 复制 / 一键重跑 ──
+async function viewHistory(sid) {
+  const h = await (await fetch(`${API}/history/${encodeURIComponent(sid)}`)).json();
+  if (h.error) return toast(h.error, 'error');
+  const overlay = document.getElementById('settings-modal');
+  const content = document.getElementById('settings-content');
+  overlay.classList.add('show');
+  content.innerHTML = `
+<h2>🔍 任务详情</h2>
+<div class="hint">${({chat:'💬对话',work:'⚙️工作',coding:'💻编程',multi:'🤝协同',loop:'🔁循环'})[h.interaction]||''}
+  ${h.time?` · ${esc(h.time)}`:''} · ${h.steps||0}步 · ${h.tokens||0}tk · ${h.duration_ms||0}ms
+  · ${h.success?'<span style="color:var(--green)">成功</span>':'<span style="color:var(--red)">未完成</span>'}</div>
+<label>任务</label>
+<div class="card" style="font-size:.88em;white-space:pre-wrap;max-height:120px;overflow-y:auto">${esc(h.task||'')}</div>
+<label>完整产出（可复制回收好代码）</label>
+<div class="card" style="font-size:.86em;max-height:340px;overflow-y:auto" id="hist-output">${formatContent(h.output||'（无输出）')}</div>
+<div class="btn-row">
+  <button class="btn-secondary" onclick="copyText(document.getElementById('hist-output').innerText, this)">⧉ 复制全部</button>
+  <button class="btn-primary" onclick="closeModal();rerunHistoryData('${jsq(h.interaction||'work')}', '${jsq((h.task||'').slice(0,4000))}')">↻ 重新运行此任务</button>
+</div>`;
+}
+async function rerunHistory(sid) {
+  const h = await (await fetch(`${API}/history/${encodeURIComponent(sid)}`)).json();
+  if (h.error) return toast(h.error, 'error');
+  rerunHistoryData(h.interaction || 'work', h.task || '');
+}
+async function rerunHistoryData(mode, task) {
+  if (!task) return toast('该记录没有任务内容', 'error');
+  if (running) return toast('有任务正在执行，请先停止', 'error');
+  if (['chat','work','coding','multi','loop'].includes(mode) && mode !== currentMode) await setMode(mode);
+  else if (currentView !== 'chat') await showConversation(currentMode);
+  const input = document.getElementById('user-input');
+  input.value = task;
+  input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+  input.focus();
+  toast('任务已填入输入框，确认后按 Enter 发送', 'info');
+}
+
+// ── 文件改动 / 撤销回滚 ──
+async function refreshChanges() {
+  try {
+    const r = await (await fetch(`${API}/changes`)).json();
+    const el = document.getElementById('changes-list');
+    if (!el) return;
+    const ch = r.changes || [];
+    if (!ch.length) { el.innerHTML = '<em style="color:var(--text3)">Agent 改过的文件会列在这里，可一键撤销</em>'; return; }
+    const seen = new Set();
+    const rows = ch.filter(c => !seen.has(c.path) && seen.add(c.path)).slice(0, 8);
+    el.innerHTML = rows.map(c => {
+      const name = c.path.split(/[\\/]/).pop();
+      return `<div style="display:flex;align-items:center;gap:6px;padding:3px 0">
+        <span title="${esc(c.path)}" style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.created?'✨':'✏️'} ${esc(name)}</span>
+        <span style="font-size:.86em;color:var(--text3)">${esc(c.time||'')}</span>
+        <button class="btn-secondary" style="padding:1px 8px;font-size:.78em;border-radius:5px" title="撤销对该文件的全部改动${c.created?'（新建的文件将被删除）':''}" onclick="rollbackFile('${jsq(c.path)}')">↩</button>
+      </div>`;
+    }).join('') + `
+      <div style="text-align:right;margin-top:6px">
+        <button class="btn-danger" style="padding:3px 10px;font-size:.76em;border-radius:6px" onclick="rollbackAll()">↩️ 全部回滚</button>
+      </div>`;
+  } catch(e) {}
+}
+async function rollbackFile(path) {
+  if (!confirm(`撤销对该文件的全部改动？\n${path}\n（新建的文件将被删除，修改的文件恢复为改动前内容）`)) return;
+  const r = await (await fetch(`${API}/changes/rollback`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({path}),
+  })).json();
+  if (r.error) return toast(r.error, 'error');
+  toast('已恢复：' + path.split(/[\\/]/).pop(), 'success');
+  refreshChanges(); refreshHtmlFiles();
+}
+async function rollbackAll() {
+  if (!confirm('回滚 Agent 本次运行以来记录的全部文件改动？\n（新建文件删除、修改文件恢复原内容，此操作不可撤销）')) return;
+  const r = await (await fetch(`${API}/changes/rollback`, {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({all:true}),
+  })).json();
+  if (r.error) return toast(r.error, 'error');
+  toast(`已回滚 ${r.restored} 个文件`, 'success');
+  refreshChanges(); refreshHtmlFiles();
 }
 function loadPlanView() {
   const planEl = document.getElementById('plan-view');

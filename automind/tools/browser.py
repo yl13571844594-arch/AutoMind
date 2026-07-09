@@ -62,10 +62,11 @@ class BrowserTool(AbstractTool):
                 headless=self._headless
             )
             self._page = await self._browser.new_page()
-        except ImportError:
+        except ImportError as e:
             raise ImportError(
-                "playwright is not installed. Install it with: pip install playwright && playwright install"
-            )
+                "playwright is not installed. Install it with: "
+                "pip install playwright && playwright install"
+            ) from e
         except Exception as e:
             await self._cleanup()
             raise e

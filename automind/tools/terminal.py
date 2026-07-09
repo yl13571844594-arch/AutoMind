@@ -135,7 +135,7 @@ class TerminalTool(AbstractTool):
             self._last_result = result
             return result
 
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # B-15 修复：超时后必须杀死子进程并回收，否则残留为僵尸进程。
             try:
                 process.kill()

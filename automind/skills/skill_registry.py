@@ -159,12 +159,12 @@ class SkillRegistry:
 
     def register_builtin_skills(self) -> int:
         """注册所有内置技能。"""
-        from automind.skills.builtin.project_init import ProjectInitSkill
         from automind.skills.builtin.code_generator import CodeGeneratorSkill
-        from automind.skills.builtin.test_runner import TestRunnerSkill
-        from automind.skills.builtin.log_analyzer import LogAnalyzerSkill
-        from automind.skills.builtin.doc_generator import DocGeneratorSkill
         from automind.skills.builtin.dep_audit import DependencyAuditSkill
+        from automind.skills.builtin.doc_generator import DocGeneratorSkill
+        from automind.skills.builtin.log_analyzer import LogAnalyzerSkill
+        from automind.skills.builtin.project_init import ProjectInitSkill
+        from automind.skills.builtin.test_runner import TestRunnerSkill
 
         builtins = [
             ProjectInitSkill(), CodeGeneratorSkill(), TestRunnerSkill(),

@@ -20,8 +20,8 @@ from typing import Any
 
 try:
     from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-    from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
+    from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError:
     print("FastAPI not installed. Install with: pip install fastapi uvicorn")
@@ -119,7 +119,6 @@ _active_sessions: dict[str, dict] = {}
 _ws_clients: dict[str, list[WebSocket]] = {}
 _task_history: list[dict] = []
 _token_totals = {"prompt": 0, "completion": 0, "total": 0, "tasks": 0}
-_scheduled: dict[str, dict] = {}  # 定时任务
 _running_tasks = {"count": 0}  # 并发任务计数（资源保护）
 _MAX_CONCURRENT = int(os.environ.get("AUTOMIND_MAX_CONCURRENT", "8"))
 _START_TIME = time.time()
@@ -132,12 +131,44 @@ def _accumulate_tokens(record: dict) -> None:
     _token_totals["tasks"] += 1
 
 
+_HISTORY_FILE = Path(".automind") / "task_history.json"
+_HISTORY_CAP = 200
+
+
+def _load_task_history() -> None:
+    """启动时恢复任务历史（关浏览器/重启服务后仍可回溯之前的产出）。"""
+    try:
+        if _HISTORY_FILE.exists():
+            data = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                _task_history.extend(data[-_HISTORY_CAP:])
+    except Exception as e:
+        logger.warning("history_load_failed", error=str(e))
+
+
+def _save_task_history() -> None:
+    """持久化任务历史（尽力而为，失败不影响主流程）。"""
+    try:
+        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _HISTORY_FILE.write_text(
+            json.dumps(_task_history[-_HISTORY_CAP:], ensure_ascii=False),
+            encoding="utf-8")
+    except Exception:
+        pass
+
+
 def _push_history(record: dict) -> dict:
     """统一记录入口 — 按开关脱敏 output 后写入历史（§14.11-3）。"""
     if "output" in record:
         record["output"] = _maybe_redact(record["output"])
+    record.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
     _task_history.append(record)
+    del _task_history[:-_HISTORY_CAP]
+    _save_task_history()
     return record
+
+
+_load_task_history()
 
 # 环境变量映射
 _ENV_KEY_MAP = {
@@ -360,18 +391,26 @@ async def _lifespan(_app):
             logger.info("mcp_connected", servers=agent.mcp_registry.list_servers())
     except Exception as e:
         logger.warning("startup_mcp_failed", error=str(e))
-    try:
-        _load_scheduled()
-        asyncio.create_task(_scheduler_loop())
-        logger.info("scheduler_started", tasks=len(_scheduled))
-    except Exception as e:
-        logger.warning("startup_scheduler_failed", error=str(e))
+    # 定时任务调度器（专业版特性 scheduler；社区版无此能力）
+    _sched = _edition.get_feature("scheduler")
+    if _sched is not None:
+        try:
+            _sched.start()
+        except Exception as e:
+            logger.warning("startup_scheduler_failed", error=str(e))
     yield
     logger.info("server_shutdown")
-    try:
-        await _session_pool.aclose_all()  # 释放全部会话 Agent（§7.4）
-    except Exception as e:
-        logger.warning("shutdown_pool_failed", error=str(e))
+    if _sched is not None:
+        try:
+            _sched.stop()
+        except Exception as e:
+            logger.warning("shutdown_scheduler_failed", error=str(e))
+    _pool = _edition.get_feature("session_pool")
+    if _pool is not None:
+        try:
+            await _pool.aclose_all()  # 释放全部会话 Agent（§7.4）
+        except Exception as e:
+            logger.warning("shutdown_pool_failed", error=str(e))
     if _agent is not None:
         try:
             await _agent.close()
@@ -390,9 +429,8 @@ def get_agent():
     return _agent
 
 
-# ── 会话级 Agent 池（§7.4 执行态多用户隔离，默认关闭）──
-from automind.server_pool import SessionAgentPool as _SessionAgentPool  # noqa: E402
-from automind.server_pool import pool_enabled as _pool_enabled  # noqa: E402
+# ── 会话级 Agent 池（§7.4 执行态多用户隔离 — 企业版特性 session_pool）──
+from automind.core import edition as _edition  # noqa: E402
 
 
 def _session_agent_factory():
@@ -406,18 +444,22 @@ def _session_agent_factory():
     return a
 
 
-_session_pool = _SessionAgentPool(_session_agent_factory, max_agents=_MAX_CONCURRENT)
+def _pool_enabled() -> bool:
+    """企业版会话池是否可用且开启（社区/专业版恒为 False）。"""
+    pool = _edition.get_feature("session_pool")
+    return pool is not None and pool.enabled()
 
 
 def _acquire_run_agent(base_agent, sid: str):
     """返回本次任务应使用的 Agent。
 
-    池启用时：返回该会话独立的 Agent（隔离 _current_plan/ReAct 态/审批回调），
-    并同步全局的交互/执行模式与审批回调；池关闭时：原样返回全局 agent（零改动）。
+    企业版会话池启用时：返回该会话独立的 Agent（隔离 _current_plan/ReAct 态/
+    审批回调），并同步全局的交互/执行模式与审批回调；
+    否则：原样返回全局 agent（与历史行为一致，零改动）。
     """
     if not _pool_enabled():
         return base_agent
-    a = _session_pool.acquire(sid)
+    a = _edition.get_feature("session_pool").acquire(sid)
     a._interaction = base_agent._interaction
     a._mode = base_agent._mode
     a.approval_callback = getattr(base_agent, "approval_callback", None)
@@ -435,6 +477,7 @@ async def api_health():
     """健康检查（无需鉴权）— 供部署监控与负载均衡探活。"""
     return {
         "status": "ok", "version": app.version,
+        "edition": _edition.get_edition(),
         "auth_required": bool(_auth_token()),
         "running_tasks": _running_tasks["count"],
         "max_concurrent": _MAX_CONCURRENT,
@@ -461,6 +504,8 @@ async def api_status(interaction: str = ""):
         )
     return {
         "status": "running",
+        "edition": _edition.get_edition(),
+        "features": _edition.feature_flags(),
         "interaction": agent._interaction.value,
         "mode": agent._mode.value,
         "approval_mode": getattr(agent.permissions, "approval_mode", "auto"),
@@ -612,305 +657,16 @@ async def api_stats():
         "by_mode": by_mode,
         "tool_usage": dict(sorted(tool_usage.items(), key=lambda x: -x[1])),
         "audit": audit_summary,
-        "scheduled_tasks": len(_scheduled),
+        "scheduled_tasks": (
+            _edition.get_feature("scheduler").count()
+            if _edition.has_feature("scheduler") else 0),
     }
 
 
-# ── 高级统计辅助 ──────────────────────────────────────────
-
-
-def _count_goals(node: dict) -> int:
-    """递归统计计划树中的叶子目标数。"""
-    if not isinstance(node, dict):
-        return 0
-    children = node.get("children") or []
-    if not children:
-        return 1
-    return sum(_count_goals(c) for c in children)
-
-
-def _count_completed(node: dict) -> int:
-    """递归统计已完成的叶子目标数。"""
-    if not isinstance(node, dict):
-        return 0
-    children = node.get("children") or []
-    if not children:
-        return 1 if node.get("status") == "completed" else 0
-    return sum(_count_completed(c) for c in children)
-
-
-@app.get("/api/stats/detail")
-async def api_stats_detail():
-    """高级统计仪表盘 — 上下文使用率、命中率、效率、记忆指标。"""
-    agent = get_agent()
-    hist = _task_history
-
-    # 上下文使用率（安全获取，避免 context_mgr 未初始化导致 500）
-    try:
-        ctx = agent.context_mgr.get_stats()
-    except Exception:
-        ctx = {"estimated_tokens": 0, "max_tokens": 100000, "has_summary": False, "summary_length": 0, "message_count": 0}
-    context_usage_pct = round(
-        ctx["estimated_tokens"] / max(ctx["max_tokens"], 1) * 100, 1)
-
-    # 聚合工具/计划/自我修正
-    tool_total = tool_success = 0
-    plan_goals_total = plan_goals_completed = 0
-    corr_attempts = corr_success = 0
-    for h in hist:
-        steps = h.get("steps", 0) or 0
-        backtracks = h.get("backtracks", 0) or 0
-        errors = h.get("errors_corrected", 0) or 0
-        tool_total += steps + backtracks
-        tool_success += max(0, steps - backtracks)
-        corr_attempts += backtracks
-        corr_success += errors
-        plan = h.get("plan")
-        if isinstance(plan, dict):
-            root = plan.get("root_goal", {})
-            plan_goals_total += _count_goals(root)
-            plan_goals_completed += _count_completed(root)
-
-    tool_hit_rate = round(tool_success / max(tool_total, 1) * 100, 1) if tool_total else None
-    plan_hit_rate = round(plan_goals_completed / max(plan_goals_total, 1) * 100, 1) if plan_goals_total else None
-    correction_rate = round(corr_success / max(corr_attempts, 1) * 100, 1) if corr_attempts else None
-
-    tasks_total = len(hist)
-    tasks_success = sum(1 for h in hist if h.get("success"))
-    task_success_rate = round(tasks_success / max(tasks_total, 1) * 100, 1) if tasks_total else None
-
-    rates = [r for r in (tool_hit_rate, plan_hit_rate, task_success_rate, correction_rate) if r is not None]
-    avg_hit_rate = round(sum(rates) / len(rates), 1) if rates else None
-
-    total_completion = _token_totals.get("completion", 0)
-    total_output_chars = sum(len(str(h.get("output", ""))) for h in hist)
-    token_efficiency = round(total_output_chars / max(total_completion, 1), 2) if total_completion else None
-
-    mem = agent.memory
-    try:
-        memory = {
-            "long_term_docs": mem.long_term.count(),
-            "short_term_msgs": len(mem.short_term._messages),
-            "kg_entities": mem.knowledge_graph.entity_count,
-            "kg_relations": mem.knowledge_graph.relation_count,
-        }
-    except Exception:
-        memory = {"long_term_docs": 0, "short_term_msgs": 0, "kg_entities": 0, "kg_relations": 0}
-
-    return {
-        "context": {
-            "usage_pct": context_usage_pct,
-            "estimated_tokens": ctx["estimated_tokens"],
-            "max_tokens": ctx["max_tokens"],
-            "compressed": ctx["has_summary"],
-            "summary_length": ctx.get("summary_length", 0),
-            "message_count": ctx.get("message_count", 0),
-        },
-        "hit_rates": {
-            "tool_hit_rate": tool_hit_rate,
-            "plan_hit_rate": plan_hit_rate,
-            "task_success_rate": task_success_rate,
-            "self_correction_rate": correction_rate,
-            "average_hit_rate": avg_hit_rate,
-        },
-        "efficiency": {
-            "token_efficiency_chars_per_token": token_efficiency,
-            "total_prompt_tokens": _token_totals.get("prompt", 0),
-            "total_completion_tokens": total_completion,
-            "total_output_chars": total_output_chars,
-        },
-        "totals": {
-            "tool_calls": tool_total, "tool_successes": tool_success,
-            "plan_goals_total": plan_goals_total,
-            "plan_goals_completed": plan_goals_completed,
-            "tasks_total": tasks_total, "tasks_success": tasks_success,
-        },
-        "memory": memory,
-    }
-
-
-@app.get("/api/stats/context")
-async def api_stats_context():
-    """当前会话上下文的实时快照。"""
-    agent = get_agent()
-    try:
-        ctx = agent.context_mgr.get_stats()
-        res = agent.resources.get_stats()
-    except Exception:
-        ctx = {"estimated_tokens": 0, "max_tokens": 100000, "has_summary": False, "summary_length": 0, "message_count": 0}
-        res = {"token_usage_pct": 0, "tokens_used": 0, "elapsed_seconds": 0}
-    return {
-        "context_tokens": ctx["estimated_tokens"],
-        "context_max": ctx["max_tokens"],
-        "context_pct": round(ctx["estimated_tokens"] / max(ctx["max_tokens"], 1) * 100, 1),
-        "compression_triggered": ctx["has_summary"],
-        "summary_length": ctx.get("summary_length", 0),
-        "message_count": ctx.get("message_count", 0),
-        "token_budget_pct": res.get("token_usage_pct", 0),
-        "token_budget_used": res.get("tokens_used", 0),
-        "elapsed_seconds": res.get("elapsed_seconds", 0),
-    }
-
-
-@app.get("/api/stats/history")
-async def api_stats_history():
-    """最近任务的命中率/效率趋势（供前端折线图）。"""
-    hist = _task_history[-50:]
-    points = []
-    for h in hist:
-        steps = h.get("steps", 0) or 0
-        backtracks = h.get("backtracks", 0) or 0
-        errors = h.get("errors_corrected", 0) or 0
-        total = steps + backtracks
-        points.append({
-            "session_id": h.get("session_id", ""),
-            "task": (h.get("task", "") or "")[:80],
-            "interaction": h.get("interaction", ""),
-            "success": bool(h.get("success", False)),
-            "tool_hit_rate": round(max(0, steps - backtracks) / max(total, 1) * 100, 1) if total else None,
-            "tokens": h.get("tokens", 0),
-            "duration_ms": h.get("duration_ms", 0),
-            "self_corrected": errors > 0,
-        })
-    return {"points": points, "count": len(points)}
-
-
-# ═══════════════════════════════════════════════════════════
-# REST API — 定时任务（Scheduled Tasks）
-# ═══════════════════════════════════════════════════════════
-
-
-def _load_scheduled() -> None:
-    """从配置恢复定时任务。"""
-    for s in _read_config().get("scheduled", []):
-        _scheduled[s["id"]] = {**s, "next_run": time.time() + s.get("interval", 3600),
-                               "last_run": 0, "last_status": "", "runs": 0}
-
-
-def _persist_scheduled() -> None:
-    cfg = _read_config()
-    cfg["scheduled"] = [
-        {"id": s["id"], "name": s["name"], "task": s["task"],
-         "interaction": s["interaction"], "interval": s["interval"],
-         "enabled": s["enabled"]}
-        for s in _scheduled.values()
-    ]
-    _write_config(cfg)
-
-
-@app.get("/api/schedule")
-async def api_schedule_list():
-    now = time.time()
-    return [
-        {"id": s["id"], "name": s["name"], "task": s["task"],
-         "interaction": s["interaction"], "interval": s["interval"],
-         "enabled": s["enabled"], "runs": s.get("runs", 0),
-         "last_status": s.get("last_status", ""),
-         "next_in": max(0, round(s.get("next_run", now) - now)) if s["enabled"] else None}
-        for s in _scheduled.values()
-    ]
-
-
-@app.post("/api/schedule")
-async def api_schedule_add(data: dict):
-    task = (data.get("task") or "").strip()
-    if not task:
-        return JSONResponse({"error": "任务内容为空"}, status_code=400)
-    interval = max(30, int(data.get("interval", 3600)))
-    sid = uuid.uuid4().hex[:10]
-    _scheduled[sid] = {
-        "id": sid, "name": (data.get("name") or task[:30]).strip(),
-        "task": task, "interaction": data.get("interaction", "chat"),
-        "interval": interval, "enabled": bool(data.get("enabled", True)),
-        "next_run": time.time() + interval, "last_run": 0,
-        "last_status": "", "runs": 0,
-    }
-    _persist_scheduled()
-    return {"status": "ok", "id": sid}
-
-
-@app.delete("/api/schedule/{sid}")
-async def api_schedule_delete(sid: str):
-    _scheduled.pop(sid, None)
-    _persist_scheduled()
-    return {"status": "ok"}
-
-
-@app.post("/api/schedule/{sid}/toggle")
-async def api_schedule_toggle(sid: str, data: dict):
-    if sid in _scheduled:
-        _scheduled[sid]["enabled"] = bool(data.get("enabled", True))
-        if _scheduled[sid]["enabled"]:
-            _scheduled[sid]["next_run"] = time.time() + _scheduled[sid]["interval"]
-        _persist_scheduled()
-    return {"status": "ok"}
-
-
-@app.post("/api/schedule/{sid}/run")
-async def api_schedule_run_now(sid: str):
-    if sid not in _scheduled:
-        return JSONResponse({"error": "not found"}, status_code=404)
-    asyncio.create_task(_run_scheduled(_scheduled[sid]))
-    return {"status": "ok"}
-
-
-async def _run_scheduled(s: dict) -> None:
-    """执行一个定时任务并记录结果。"""
-    from automind.core.types import ExecutionMode, InteractionMode
-    s["last_run"] = time.time()
-    s["next_run"] = time.time() + s["interval"]
-    s["runs"] = s.get("runs", 0) + 1
-    logger.info("scheduled_run", id=s.get("id"), name=s.get("name"),
-                interaction=s.get("interaction"), run_no=s["runs"])
-    try:
-        agent = get_agent()
-        interaction = s.get("interaction", "chat")
-        agent._interaction = InteractionMode(interaction)
-        agent._mode = ExecutionMode(_INTERACTION_TO_EXECUTION.get(interaction, "react"))
-        agent.approval_callback = None  # 定时任务无人值守，遵循当前审批策略
-        if agent.llm is None:
-            s["last_status"] = "无可用模型"
-            return
-        if interaction == "chat":
-            out = await agent.chat(s["task"])
-            ok, output = True, out
-        elif interaction == "loop":
-            lp = await agent.run_loop(s["task"])
-            ok, output = lp.get("success", False), lp.get("output", "")
-        elif interaction == "multi":
-            ma = await agent.run_multi(s["task"])
-            ok, output = True, ma.get("output", "")
-        else:
-            res = await agent.run(s["task"])
-            ok, output = res.success, res.output
-        s["last_status"] = "成功" if ok else "部分完成"
-        rec = {
-            "session_id": uuid.uuid4().hex[:12], "task": f"[定时] {s['task']}",
-            "success": ok, "output": (output or "")[:3000], "steps": 0,
-            "backtracks": 0, "errors_corrected": 0, "tokens": 0,
-            "duration_ms": 0, "plan": None, "interaction": interaction,
-            "scheduled": True,
-        }
-        _push_history(rec)
-        await _broadcast({"type": "scheduled_done", "id": s["id"],
-                          "name": s["name"], "success": ok})
-        logger.info("scheduled_done", id=s.get("id"), name=s.get("name"), success=ok)
-    except Exception as e:
-        s["last_status"] = f"失败: {e}"
-        logger.error("scheduled_failed", id=s.get("id"), name=s.get("name"), error=str(e))
-
-
-async def _scheduler_loop() -> None:
-    """后台调度循环 — 每 15 秒检查到期的定时任务。"""
-    while True:
-        try:
-            now = time.time()
-            for s in list(_scheduled.values()):
-                if s.get("enabled") and now >= s.get("next_run", 0):
-                    asyncio.create_task(_run_scheduled(s))
-        except Exception:
-            pass
-        await asyncio.sleep(15)
+# ── 商业功能占位（专业版路由由 automind_pro 在扩展加载阶段注册）──
+# 高级统计（/api/stats/detail|context|history）与定时任务（/api/schedule*）
+# 已迁移至 automind-pro 包；社区版访问这些端点时由文件末尾注册的
+# 降级路由返回 403 + 升级提示（若专业版已激活，其路由先注册故优先匹配）。
 
 
 @app.get("/api/config/full")
@@ -1234,6 +990,102 @@ async def api_set_project(data: dict):
     _save_active(project=str(p.resolve()))
     _rebuild_agent()
     return {"status": "ok", "project": str(p.resolve())}
+
+
+# ═══════════════════════════════════════════════════════════
+# REST API — 工作区管理（每个工作区 = 独立目录 + 独立上下文）
+# ═══════════════════════════════════════════════════════════
+
+
+@app.get("/api/workspaces")
+async def api_workspaces():
+    """列出已保存的工作区与当前激活项。"""
+    cfg = _read_config()
+    active_project = str(Path(_load_active().get("project") or ".").resolve())
+    return {"workspaces": cfg.get("workspaces", []), "active": active_project}
+
+
+@app.post("/api/workspaces")
+async def api_workspace_add(data: dict):
+    """新增/更新一个命名工作区（name + 目录路径）。"""
+    name = (data.get("name") or "").strip()
+    path = (data.get("path") or "").strip()
+    if not name:
+        return JSONResponse({"error": "工作区名称必填"}, status_code=400)
+    p = Path(path).expanduser()
+    if not p.is_dir():
+        return JSONResponse({"error": f"目录不存在: {path}"}, status_code=400)
+    cfg = _read_config()
+    spaces = [w for w in cfg.get("workspaces", []) if w.get("name") != name]
+    spaces.append({"name": name, "path": str(p.resolve())})
+    cfg["workspaces"] = spaces
+    _write_config(cfg)
+    return {"status": "ok", "workspaces": spaces}
+
+
+@app.delete("/api/workspaces/{name}")
+async def api_workspace_delete(name: str):
+    """删除一个命名工作区（不删除磁盘目录）。"""
+    cfg = _read_config()
+    before = cfg.get("workspaces", [])
+    cfg["workspaces"] = [w for w in before if w.get("name") != name]
+    _write_config(cfg)
+    return {"status": "ok", "deleted": len(before) - len(cfg["workspaces"])}
+
+
+@app.post("/api/workspaces/switch")
+async def api_workspace_switch(data: dict):
+    """切换到指定工作区：Agent 在该目录下重建（记忆/索引/权限根随之切换）。
+
+    name 为空 = 回到默认工作区（服务器启动目录）。
+    """
+    name = (data.get("name") or "").strip()
+    if not name:
+        _save_active(project=str(Path.cwd()))
+        _rebuild_agent()
+        logger.info("workspace_switched", name="(default)")
+        return {"status": "ok", "name": "", "project": str(Path.cwd())}
+    for w in _read_config().get("workspaces", []):
+        if w.get("name") == name:
+            p = Path(w.get("path", ""))
+            if not p.is_dir():
+                return JSONResponse(
+                    {"error": f"工作区目录已不存在: {w.get('path')}"}, status_code=400)
+            _save_active(project=str(p.resolve()))
+            _rebuild_agent()
+            logger.info("workspace_switched", name=name, path=str(p))
+            return {"status": "ok", "name": name, "project": str(p.resolve())}
+    return JSONResponse({"error": f"工作区不存在: {name}"}, status_code=404)
+
+
+# ═══════════════════════════════════════════════════════════
+# REST API — 文件改动日志 / 撤销回滚
+# ═══════════════════════════════════════════════════════════
+
+
+@app.get("/api/changes")
+async def api_changes(limit: int = 30):
+    """最近的文件改动记录（新→旧），供「撤销/回滚」面板展示。"""
+    from automind.tools.file_editor import JOURNAL
+    return {"changes": JOURNAL.entries()[:limit]}
+
+
+@app.post("/api/changes/rollback")
+async def api_rollback(data: dict):
+    """撤销文件改动：传 path 恢复单个文件；传 all=true 恢复全部。"""
+    from automind.tools.file_editor import JOURNAL
+    if data.get("all"):
+        n = JOURNAL.rollback_all()
+        logger.info("rollback_all", restored=n)
+        return {"status": "ok", "restored": n}
+    path = (data.get("path") or "").strip()
+    if not path:
+        return JSONResponse({"error": "缺少 path 或 all 参数"}, status_code=400)
+    if JOURNAL.rollback(path):
+        logger.info("rollback_file", path=path)
+        return {"status": "ok", "restored": 1, "path": path}
+    return JSONResponse({"error": f"无该文件的改动记录或恢复失败: {path}"},
+                        status_code=404)
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1890,6 +1742,11 @@ async def api_run(data: dict):
         })
         return record
 
+    except _edition.FeatureNotAvailable as e:
+        _active_sessions[session_id]["status"] = "error"
+        _active_sessions[session_id]["error"] = str(e)
+        return JSONResponse({"error": str(e), "feature": e.feature,
+                             "edition": _edition.get_edition()}, status_code=403)
     except Exception as e:
         import traceback
         logger.error("task_failed", session=session_id,
@@ -1928,10 +1785,10 @@ async def api_chat_reset(session_id: str = "default"):
 @app.delete("/api/history/{session_id}")
 async def api_delete_history(session_id: str):
     """删除单条任务历史记录。"""
-    global _task_history
     before = len(_task_history)
-    _task_history = [h for h in _task_history if h.get("session_id") != session_id]
+    _task_history[:] = [h for h in _task_history if h.get("session_id") != session_id]
     _active_sessions.pop(session_id, None)
+    _save_task_history()
     return {"status": "ok", "deleted": before - len(_task_history)}
 
 
@@ -1939,6 +1796,7 @@ async def api_delete_history(session_id: str):
 async def api_clear_history():
     _task_history.clear()
     _active_sessions.clear()
+    _save_task_history()
     return {"status": "ok"}
 
 
@@ -2050,7 +1908,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                 "reason": reason, "params": {k: str(v)[:200] for k, v in (args or {}).items()},
             })
             return await asyncio.wait_for(fut, timeout=300)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return False
         finally:
             _ws_approvals.pop(approval_id, None)
@@ -2220,6 +2078,80 @@ def _serialize_plan(plan) -> dict | None:
         "root_goal": serialize_goal(plan.root_goal),
         "revision_history": plan.revision_history,
     }
+
+
+# ═══════════════════════════════════════════════════════════
+# 商业扩展装载（专业版/企业版）与社区版降级路由
+# ═══════════════════════════════════════════════════════════
+# server_ctx 是传给商业扩展 attach() 的稳定契约 v1
+# （见 automind/core/edition.py 模块文档），社区版重构时保持这些键可用。
+
+
+def _build_server_ctx() -> dict:
+    return {
+        "app": app,
+        "get_agent": get_agent,
+        "read_config": _read_config,
+        "write_config": _write_config,
+        "push_history": _push_history,
+        "broadcast": _broadcast,
+        "task_history": lambda: _task_history,
+        "token_totals": lambda: _token_totals,
+        "interaction_to_execution": _INTERACTION_TO_EXECUTION,
+        "session_agent_factory": _session_agent_factory,
+        "max_concurrent": _MAX_CONCURRENT,
+        "version": __version__,
+    }
+
+
+def _attach_extensions() -> None:
+    """激活商业扩展并注册其路由；随后注册社区版降级路由。
+
+    路由匹配按注册顺序：专业版真实路由先注册故优先；降级路由仅在
+    对应特性缺失时兜底命中，返回 403 + 升级提示。
+    """
+    _edition.load_extensions()
+    ctx = _build_server_ctx()
+    for name in ("scheduler", "advanced_stats", "session_pool"):
+        feature = _edition.get_feature(name)
+        if feature is not None and hasattr(feature, "attach"):
+            try:
+                feature.attach(ctx)
+            except Exception as e:
+                logger.warning("edition_attach_failed", feature=name, error=str(e))
+
+    def _locked(feature: str):
+        async def _handler(sid: str = "", data: dict | None = None):
+            return JSONResponse(
+                {"error": _edition.upgrade_hint(feature),
+                 "feature": feature, "edition": _edition.get_edition()},
+                status_code=403)
+        return _handler
+
+    # 定时任务（专业版）
+    for method, path in (("GET", "/api/schedule"), ("POST", "/api/schedule"),
+                         ("DELETE", "/api/schedule/{sid}"),
+                         ("POST", "/api/schedule/{sid}/toggle"),
+                         ("POST", "/api/schedule/{sid}/run")):
+        app.add_api_route(path, _locked("scheduler"), methods=[method])
+    # 高级统计（专业版）
+    for path in ("/api/stats/detail", "/api/stats/context", "/api/stats/history"):
+        app.add_api_route(path, _locked("advanced_stats"), methods=["GET"])
+
+    logger.info("edition_ready", edition=_edition.get_edition(),
+                features=[k for k, v in _edition.feature_flags().items() if v])
+
+
+_attach_extensions()
+
+
+@app.get("/manual")
+async def manual_page():
+    """内置使用手册（static/manual.html，界面右上角 📖 入口）。"""
+    html_path = STATIC_DIR / "manual.html"
+    if html_path.exists():
+        return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    return JSONResponse({"error": "手册文件缺失"}, status_code=404)
 
 
 @app.get("/")

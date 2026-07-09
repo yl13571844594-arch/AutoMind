@@ -26,7 +26,6 @@ from automind.core.types import (
     InputMessage,
     InteractionMode,
     Message,
-    PlanStatus,
     Role,
     TokenUsage,
 )
@@ -48,7 +47,8 @@ class _TokenTrackingLLM:
         return resp
 
     async def generate_stream(self, messages, tools=None):
-        import json as _json, re as _re
+        import json as _json
+        import re as _re
         async for chunk in self._backend.generate_stream(messages, tools=tools):
             # 最后一块可能包含 STREAM_USAGE 元数据标记
             m = _re.search(r'\n<!--STREAM_USAGE:(.*?)-->', chunk if isinstance(chunk, str) else '')
@@ -81,9 +81,7 @@ from automind.state.checkpoint import CheckpointManager
 from automind.state.human_loop import (
     ApprovalAction,
     ApprovalRequest,
-    ApprovalResponse,
     HumanInTheLoop,
-    ProgressDisplay,
 )
 from automind.state.resource_manager import ResourceManager
 from automind.tools.base import ToolRegistry
@@ -179,9 +177,8 @@ class AutoMindAgent:
         self.checkpoint_mgr = CheckpointManager(self.config.execution.checkpoint_dir)
         self.human_loop = HumanInTheLoop(auto_approve_safe=self.config.execution.auto_approve_safe)
 
-        # ── 多智能体协同 ─────────────────────────
-        from automind.multiagent.orchestrator import MultiAgentOrchestrator
-        self.orchestrator = MultiAgentOrchestrator(self.llm) if self.llm else None
+        # ── 多智能体协同（专业版特性，运行时按需创建）──
+        self.orchestrator = None
 
         # ── 当前会话状态 ─────────────────────────
         self._current_plan: HierarchicalPlan | None = None
@@ -214,8 +211,11 @@ class AutoMindAgent:
         "6. 若生成 HTML/前端页面，请将完整代码放入 ```html 代码块，便于用户预览。\n"
         "7. 需要从零生成/补全整段代码时优先用 code_generate 工具"
         "（自带语法校验与自动修复；mode='complete' 可补全既有代码）。\n"
-        "8. 每次写入/编辑 .py 文件后，观察结果中会附带 syntax_check 自动验证；"
-        "若 FAILED 必须立即修复该语法错误再继续（TDD 内环）。"
+        "8. 每次写入/编辑 .py/.json 文件后，观察结果中会附带 syntax_check 自动验证；"
+        "若 FAILED 必须立即修复该语法错误再继续（TDD 内环）。\n"
+        "9. file_edit 的 old_string 必须与文件内容逐字符一致（含缩进与空白）；"
+        "若匹配失败，错误信息会附带文件中最接近的片段（带行号），"
+        "请以该片段的原文为准重试，不要凭记忆猜测。"
     )
 
     # ═══════════════════════════════════════════════════════════
@@ -463,13 +463,15 @@ class AutoMindAgent:
         self._chat_history.clear()
 
     async def run_multi(self, task: str, on_event: Any = None) -> dict:
-        """多智能体协同执行。"""
+        """多智能体协同执行（专业版特性 multi_agent，未授权时抛 FeatureNotAvailable）。"""
+        from automind.core.edition import require_feature
+
+        feature = require_feature("multi_agent")
         if self.llm is None:
             raise RuntimeError("LLM 未初始化，请先配置 API Key。")
         self.llm.reset()
         if self.orchestrator is None:
-            from automind.multiagent.orchestrator import MultiAgentOrchestrator
-            self.orchestrator = MultiAgentOrchestrator(self.llm)
+            self.orchestrator = feature.create(self.llm)
         result = await self.orchestrator.run(task, context="", on_event=on_event)
         result["token_usage"] = self.llm.usage
         return result
@@ -478,82 +480,15 @@ class AutoMindAgent:
                        max_iterations: int | None = None) -> dict:
         """循环工程（Loop Engineering）— 自主"行动-观察-修正"闭环。
 
-        每轮：执行任务 → 观察/校验结果 → 若未达成则带着反馈继续修正，
-        直到满足停止条件：任务完成 / 达到最大轮数 / 连续无进展 / 被中断。
+        专业版特性 loop_engine：每轮执行任务 → 观察/校验结果 → 未达成则带
+        反馈继续修正，直到停止条件（完成/最大轮数/无进展/被中断）。
+        未授权时抛 FeatureNotAvailable。
         """
-        import difflib
+        from automind.core.edition import require_feature
 
-        if self.llm is None:
-            raise RuntimeError("LLM 未初始化，请先配置 API Key。")
-        self.llm.reset()
-        max_it = max_iterations or getattr(self.config.execution, "loop_max_iterations", 8)
-        feedback = ""
-        last_output = ""
-        output = ""
-        it = 0
-        idle_rounds = 0  # 连续"未执行任何工具操作"的轮数
-        for it in range(1, max_it + 1):
-            if on_event:
-                await on_event({"type": "loop_iter_start", "iter": it, "max": max_it})
-
-            # ── 行动 ──
-            prompt = task if not feedback else (
-                f"{task}\n\n[上一轮观察到的问题，请据此修正]\n{feedback}")
-            self.react_executor = ReActExecutor(
-                self.llm, self.tool_registry,
-                max_iterations=self.config.execution.max_iterations,
-                permissions=self.permissions,
-                approval_cb=self.approval_callback,
-            )
-            on_thought, on_action = self._react_callbacks(tag=it)
-            output = await self.react_executor.run(
-                prompt, self.CODING_SYSTEM_PROMPT,
-                on_thought=on_thought, on_action=on_action)
-            acted = bool(self.react_executor.actions)
-            if on_event:
-                await on_event({"type": "loop_action", "iter": it, "output": output})
-
-            # ── 观察 / 校验（三级停止条件）──
-            verdict = await self._loop_verify(task, output)
-            if on_event:
-                await on_event({"type": "loop_observation", "iter": it,
-                                "done": verdict["done"], "reason": verdict["reason"]})
-            # 1) 语义判断：任务完成
-            if verdict["done"]:
-                if on_event:
-                    await on_event({"type": "loop_done", "iter": it, "success": True})
-                return {"output": output, "iterations": it, "success": True,
-                        "stop_reason": "completed", "token_usage": self.llm.usage}
-
-            stop_reason = None
-            # 2) 无进展：与上一轮输出完全相同 或 高度相似（收敛）
-            if output.strip() and output.strip() == last_output.strip():
-                stop_reason = "no_progress"
-            elif last_output:
-                sim = difflib.SequenceMatcher(None, output, last_output).ratio()
-                if sim > 0.95:
-                    stop_reason = "converged"
-            # 3) 空转：连续两轮均未执行任何工具操作（只是在"说"而非"做"）
-            if stop_reason is None:
-                idle_rounds = idle_rounds + 1 if not acted else 0
-                if idle_rounds >= 2:
-                    stop_reason = "idle"
-
-            if stop_reason:
-                if on_event:
-                    await on_event({"type": "loop_done", "iter": it, "success": False,
-                                    "stop_reason": stop_reason})
-                return {"output": output, "iterations": it, "success": False,
-                        "stop_reason": stop_reason, "token_usage": self.llm.usage}
-
-            last_output = output
-            feedback = verdict["reason"]
-
-        if on_event:
-            await on_event({"type": "loop_done", "iter": it, "success": False,
-                            "stop_reason": "max_iterations"})
-        return {"output": output, "iterations": it, "success": False,
-                "stop_reason": "max_iterations", "token_usage": self.llm.usage}
+        engine = require_feature("loop_engine")
+        return await engine.run(self, task, on_event=on_event,
+                                max_iterations=max_iterations)
 
     async def _loop_verify(self, task: str, output: str) -> dict:
         """观察阶段 — 让模型判断任务是否真正完成，并给出修正方向。"""
@@ -836,7 +771,7 @@ class AutoMindAgent:
     @classmethod
     async def from_checkpoint(
         cls, checkpoint_id: str, config: AgentConfig | None = None
-    ) -> "AutoMindAgent":
+    ) -> AutoMindAgent:
         """从检查点恢复一个 Agent 实例（上下文消息 / 计划 / 对话历史）。"""
         agent = cls(config or AgentConfig.auto_load())
         state = await agent.checkpoint_mgr.load(checkpoint_id)
@@ -938,7 +873,7 @@ class AutoMindAgent:
     async def _review_result(self, task: str, output: str) -> dict:
         """多 Agent 审查：审阅者角色复核结果，可调用只读工具核实（MCP 工具共享）。"""
         from automind.core.json_utils import extract_json
-        from automind.multiagent.orchestrator import ROLE_PROMPTS
+        from automind.core.prompts import ROLE_PROMPTS
 
         # 共享只读（SAFE 级）工具给审阅者 —— 同一 registry，MCP 注册的只读工具同样可用
         read_only = [t for t in self.tool_registry.list_all()
@@ -1032,7 +967,7 @@ class _CodeGenerateTool:
         "required": ["specification", "output_file"],
     }
 
-    def __init__(self, agent: "AutoMindAgent") -> None:
+    def __init__(self, agent: AutoMindAgent) -> None:
         from automind.core.types import PermissionTier, ToolSource
         self.permission_tier = PermissionTier.SENSITIVE
         self.risk_score = 45

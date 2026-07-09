@@ -6,8 +6,6 @@ from typing import Any
 
 from automind.core.types import (
     LLMResponse,
-    Message,
-    Role,
     ToolCall,
     ToolResult,
 )
@@ -72,33 +70,66 @@ class ReActExecutor:
 
         模型在下一轮 OBSERVE 中即可看到 "syntax_check: ..."，
         有错立即修复 —— 形成 编辑 → 验证 → 修复 的自动闭环。
+        覆盖 file_write / file_edit / file_multi_edit 产出的全部 .py/.json 文件；
+        优先使用工具输出中已解析的绝对路径（参数里的相对路径可能相对项目根）。
         """
         if not (self.auto_validate and result.success and tc.name in self._CODE_TOOLS):
             return result
-        path = str((tc.arguments or {}).get("path", ""))
-        if not path.endswith(".py"):
-            return result
-        verdict: dict = {"tool": tc.name, "path": path}
-        try:
-            import ast as _ast
-            from pathlib import Path as _P
-            _ast.parse(_P(path).read_text(encoding="utf-8"))
-            verdict["ok"] = True
-            note = "syntax_check: OK"
-        except SyntaxError as e:
-            verdict["ok"] = False
-            verdict["error"] = f"{e.msg} (line {e.lineno})"
-            note = (f"syntax_check: FAILED — {e.msg} (line {e.lineno}). "
-                    f"Fix this syntax error before proceeding.")
-        except Exception:
-            return result  # 文件读不到等情况不干扰主流程
-        self.validations.append(verdict)
-        try:
-            if isinstance(result.output, dict):
-                result.output["auto_validation"] = note
-        except Exception:
-            pass
+        checked: list[tuple[str, str]] = []
+        for path in self._touched_paths(tc, result):
+            note = self._check_syntax(path)
+            if note is None:
+                continue
+            ok = note.startswith("OK")
+            self.validations.append({"tool": tc.name, "path": path, "ok": ok,
+                                     **({} if ok else {"error": note})})
+            checked.append((path, note))
+        if checked:
+            # 单文件保持简洁格式（syntax_check: OK），多文件带路径前缀
+            summary = (checked[0][1] if len(checked) == 1
+                       else "; ".join(f"{p}: {n}" for p, n in checked))
+            try:
+                if isinstance(result.output, dict):
+                    result.output["auto_validation"] = f"syntax_check: {summary}"
+            except Exception:
+                pass
         return result
+
+    @staticmethod
+    def _touched_paths(tc: ToolCall, result: ToolResult) -> list[str]:
+        """收集本次调用实际写入的文件路径（优先工具输出的解析后路径）。"""
+        out = result.output if isinstance(result.output, dict) else {}
+        if tc.name == "file_multi_edit":
+            paths = []
+            for r in out.get("results", []):
+                o = r.get("output") if isinstance(r, dict) else None
+                if isinstance(o, dict) and o.get("path") and r.get("success"):
+                    paths.append(str(o["path"]))
+            return paths
+        path = out.get("path") or (tc.arguments or {}).get("path", "")
+        return [str(path)] if path else []
+
+    @staticmethod
+    def _check_syntax(path: str) -> str | None:
+        """校验单个文件；返回 "OK" / 错误说明，非目标类型或读不到返回 None。"""
+        from pathlib import Path as _P
+        try:
+            if path.endswith(".py"):
+                import ast as _ast
+                _ast.parse(_P(path).read_text(encoding="utf-8"))
+                return "OK"
+            if path.endswith(".json"):
+                import json as _json
+                _json.loads(_P(path).read_text(encoding="utf-8"))
+                return "OK"
+        except SyntaxError as e:
+            return (f"FAILED — {e.msg} (line {e.lineno}). "
+                    f"Fix this syntax error before proceeding.")
+        except ValueError as e:  # json.JSONDecodeError
+            return f"FAILED — invalid JSON: {e}. Fix this before proceeding."
+        except Exception:
+            return None  # 文件读不到等情况不干扰主流程
+        return None
 
     async def run(
         self,

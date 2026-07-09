@@ -3,8 +3,6 @@
 import asyncio
 import time
 
-import pytest
-
 from automind.core.config import AgentConfig, ExecutionConfig
 from automind.core.types import (
     Action,
@@ -15,7 +13,6 @@ from automind.core.types import (
 )
 from automind.planning.plan_executor import PlanExecutor
 from automind.tools.base import AbstractTool, ToolRegistry
-
 
 # ── 测试用假工具 ─────────────────────────────────────────
 
@@ -342,6 +339,7 @@ class TestAutonomyClosure:
 class TestAutopilotApi:
     def test_get_and_toggle(self, tmp_path):
         from fastapi.testclient import TestClient
+
         import automind.server as srv
         srv._store.config_file = tmp_path / "cfg.json"
         srv._AUTH_TOKEN = ""

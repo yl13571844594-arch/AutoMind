@@ -14,7 +14,7 @@
 
 <!-- ═══════ Sidebar ═══════ -->
 <aside id="sidebar">
-  <div class="logo"><span class="dot"></span><span>AutoMind</span><small id="app-version">v0.5</small></div>
+  <div class="logo"><span class="dot"></span><span>AutoMind</span><small id="app-version">v0.6</small><small id="edition-badge" class="edition-badge community">社区版</small></div>
   <nav>
     <div class="nav-label">工作区</div>
     <button class="active" data-view="chat"><span class="icon">💬</span><span>对话工作台</span></button>
@@ -54,7 +54,12 @@
     <span class="badge" id="status-badge">○ 连接中</span>
     <span class="badge" id="model-badge">—</span>
     <span class="badge" id="project-badge" title="项目目录" style="cursor:pointer;max-width:200px;overflow:hidden;text-overflow:ellipsis" onclick="showModal('settings','general')">📁 —</span>
+    <span class="badge" id="ws-badge" title="工作区（独立目录 + 独立上下文）" style="cursor:pointer" onclick="showWorkspaces()">🗂 默认</span>
     <span class="spacer"></span>
+    <button class="hbtn" id="theme-btn" onclick="toggleTheme()" title="切换浅色/深色模式">☀️</button>
+    <button class="hbtn" onclick="showTemplates()" title="模板库 — 10 个常用任务模板">📚 模板</button>
+    <button class="hbtn" onclick="showTour()" title="新手引导">❓</button>
+    <button class="hbtn" onclick="window.open('/manual','_blank')" title="使用手册">📖 手册</button>
     <button class="hbtn" onclick="showModal('settings','model')" title="模型配置">🖥 模型</button>
     <button class="hbtn" onclick="showModal('settings','apikeys')" title="API Key 管理">🔑 API Keys</button>
     <button class="hbtn" onclick="showModal('settings','general')">⚙ 设置</button>
@@ -96,9 +101,17 @@
           <div class="stat-item"><div class="label">输出 (completion)</div><div class="value" id="tok-completion" style="font-size:1em">0</div></div>
           <div class="stat-item"><div class="label">累计总量</div><div class="value ok" id="tok-total" style="font-size:1em">0</div></div>
           <div class="stat-item"><div class="label">任务数</div><div class="value" id="tok-tasks" style="font-size:1em">0</div></div>
+          <div class="stat-item" style="grid-column:span 2"><div class="label">💰 预估成本（点击设置单价）</div>
+            <div class="value" id="tok-cost" style="font-size:1em;cursor:pointer" onclick="configPricing()" title="按当前模型单价估算，点击自定义">—</div></div>
         </div>
         <div style="text-align:right;margin-top:8px">
           <button class="hbtn" style="padding:4px 10px;font-size:.76em;border:1px solid var(--border);border-radius:6px;background:var(--bg2);color:var(--text);cursor:pointer" onclick="resetTokens()">重置统计</button>
+        </div>
+      </div>
+      <div class="section">
+        <h3>↩️ 文件改动 <span style="margin-left:auto;cursor:pointer;color:var(--accent)" onclick="refreshChanges()">⟳</span></h3>
+        <div id="changes-list" style="font-size:.82em;color:var(--text2)">
+          <em style="color:var(--text3)">Agent 改过的文件会列在这里，可一键撤销</em>
         </div>
       </div>
       <div class="section">
@@ -155,5 +168,8 @@
 <script src="/static/js/settings.js"></script>
 <script src="/static/js/panels.js"></script>
 <script src="/static/js/misc.js"></script>
+<script src="/static/js/theme.js"></script>
+<script src="/static/js/workspace.js"></script>
+<script src="/static/js/templates.js"></script>
 </body>
 </html>

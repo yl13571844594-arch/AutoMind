@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from automind.core.types import LLMResponse, TokenUsage
 
@@ -86,8 +86,8 @@ class TimeoutGuard:
         try:
             async with asyncio.timeout(seconds):
                 yield
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Operation timed out after {seconds}s")
+        except TimeoutError as e:
+            raise TimeoutError(f"Operation timed out after {seconds}s") from e
 
 
 class ResourceManager:

@@ -103,7 +103,7 @@ class _StdlibStructAdapter:
     def exception(self, event: str, **kw: Any) -> None:
         self._logger.exception(self._fmt(event, kw))
 
-    def bind(self, **kw: Any) -> "_StdlibStructAdapter":
+    def bind(self, **kw: Any) -> _StdlibStructAdapter:
         """structlog 兼容占位 — 标准库模式下忽略绑定上下文。"""
         return self
 

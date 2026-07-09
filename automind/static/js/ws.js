@@ -67,17 +67,22 @@ function handleWS(data) {
       routeResultToMode(taskMode, 'result', data);
       updateStats(data);
       if (data.plan) updatePlanView(data.plan);
-      refreshAuditMini(); refreshHtmlFiles();
+      refreshAuditMini(); refreshHtmlFiles(); refreshChanges();
+      window._lastTask = null;   // 任务正常完成，清除续跑候选
       setRunning(false);
       break;
     case 'task_error':
       removeTyping(); finalizeStream(null); finalizeExec();
       routeResultToMode(taskMode, 'message', { role: 'agent', text: '❌ **错误**: ' + data.error });
+      offerResume(taskMode, '出错');
+      refreshChanges();
       setRunning(false);
       break;
     case 'task_cancelled':
       finalizeStream(null); removeTyping(); finalizeExec();
       routeResultToMode(taskMode, 'message', { role: 'agent', text: '⏹ 任务已中断' });
+      offerResume(taskMode, '中断');
+      refreshChanges();
       setRunning(false);
       break;
   }
@@ -127,7 +132,11 @@ function finalizeStream(data) {
     _streamEl.innerHTML = formatContent(_streamBuf || '(无回复)', true);
     if (_streamTimeEl) {
       let meta = [];
-      if (data.tokens) meta.push(`🪙 ${data.tokens}tk (${data.prompt_tokens||0}↑/${data.completion_tokens||0}↓ · 估算)`);
+      if (data.tokens) {
+        meta.push(`🪙 ${data.tokens}tk (${data.prompt_tokens||0}↑/${data.completion_tokens||0}↓ · 估算)`);
+        const cost = fmtCost(estCost(data.prompt_tokens, data.completion_tokens));
+        if (cost) meta.push(cost);
+      }
       if (data.duration_ms) meta.push(`${data.duration_ms}ms`);
       _streamTimeEl.textContent = meta.join(' · ') || new Date().toLocaleTimeString();
     }
@@ -310,6 +319,38 @@ function finalizeExec() {
   if (_execTypingEl) { _execTypingEl.remove(); _execTypingEl = null; }
   if (_execDiv) { _execDiv.id = ''; _execDiv = null; }
   _execEl = null;
+}
+
+// ── 任务中断继续（避免 Token 浪费在重做上）──
+// 中断/出错后在对话区提供「继续任务」按钮：带着原任务与"从中断处继续"的
+// 指令重新发起，已完成的文件/步骤仍在磁盘与上下文中，模型可接着做。
+function offerResume(taskMode, why) {
+  const last = window._lastTask;
+  if (!last || !last.text) return;
+  // 仅在用户正查看该模式对话区时插入按钮气泡；否则以 toast 提示（避免污染其它模式记录）
+  const msgs = document.getElementById('messages');
+  if (currentView === 'chat' && currentMode === taskMode && msgs) {
+    const div = document.createElement('div');
+    div.className = 'msg agent';
+    div.innerHTML = `<div class="avatar">AM</div><div class="col"><div class="bubble">
+      <button class="btn-primary" style="padding:6px 16px;font-size:.82em;border-radius:8px" onclick="resumeLastTask()">▶ 继续此任务</button>
+      <span style="font-size:.76em;color:var(--text3);margin-left:8px">从${why}处继续，不重做已完成的部分（已产出的文件仍保留）</span>
+    </div><div class="time">${new Date().toLocaleTimeString()}</div></div>`;
+    msgs.appendChild(div); msgs.scrollTop = 1e9;
+    captureTranscript();
+  } else {
+    toast(`任务已${why}。回到${MODE_LABELS[taskMode]||taskMode}模式可点「继续此任务」续跑`, 'info');
+  }
+}
+async function resumeLastTask() {
+  const last = window._lastTask;
+  if (!last || !last.text) return toast('没有可继续的任务', 'error');
+  if (running) return toast('任务正在执行中', 'error');
+  if (last.mode !== currentMode) await setMode(last.mode);
+  const input = document.getElementById('user-input');
+  input.value = `继续完成此前被中断的任务（不要重做已完成的部分，先检查现状再从中断处继续）：\n${last.text}`;
+  input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+  sendMessage();
 }
 
 // ── 审批对话框 ──

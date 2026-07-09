@@ -5,8 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "0.5.0"
-description = "通用自动化 Agent 框架 - 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
+version = "0.7.0"
+description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -15,7 +15,6 @@ keywords = ["agent", "automation", "llm", "mcp", "planning"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
@@ -66,11 +65,24 @@ asyncio_mode = "auto"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["automind*"]
+# 显式排除商业包（automind_pro 位于 pro/ 目录，另行打包分发）
+include = ["automind", "automind.*"]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+exclude = [
+    ".git",
+    "__pycache__",
+    ".mypy_cache",
+    ".ruff_cache",
+    "build",
+    "dist",
+    ".venv",
+    "venv",
+]
+
+[tool.ruff.lint]
 select = [
     "E",     # pycodestyle errors
     "F",     # pyflakes
@@ -86,16 +98,17 @@ select = [
 ignore = [
     "ARG002",  # unused method arguments (common in overrides)
     "PTH123",  # open() vs Path.open() — both acceptable
-]
-exclude = [
-    ".git",
-    "__pycache__",
-    ".mypy_cache",
-    ".ruff_cache",
-    "build",
-    "dist",
-    ".venv",
-    "venv",
+    # ── 存量风格豁免（开源基线；不改变行为，后续版本渐进收紧）──
+    "E501",    # 少量超长行（中文注释/长 URL）
+    "E402",    # agent.py 等处的有意延迟导入布局
+    "SIM105",  # 有意的 try/except-pass（回调/推送兜底）
+    "SIM102", "SIM108", "SIM110", "SIM212",  # if 结构风格
+    "ARG001", "ARG004",  # 回调/协议签名中未使用的参数
+    "UP042",   # str-枚举基类改造涉及序列化行为，暂不动
+    "B905",    # zip(strict=) — 既有调用点行为已验证
+    "B007",    # 未使用的循环变量（计数循环）
+    "F841",    # 局部变量赋值未用（调试/文档性赋值）
+    "N806", "N814", "N818",  # 既有命名（含公开异常名，改名破坏 API）
 ]
 
 [tool.ruff.format]

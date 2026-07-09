@@ -24,7 +24,8 @@ class TestSimpleDiGraph:
 
     def test_no_cycle_on_dag(self):
         g = SimpleDiGraph()
-        g.add_node("a"); g.add_node("b")
+        g.add_node("a")
+        g.add_node("b")
         g.add_edge("a", "b")
         assert g.find_cycles() == []
 
@@ -46,7 +47,8 @@ class TestSimpleDiGraph:
 
     def test_in_out_degree(self):
         g = SimpleDiGraph()
-        g.add_node("a"); g.add_node("b")
+        g.add_node("a")
+        g.add_node("b")
         g.add_edge("a", "b")
         assert g.out_degree("a") == 1
         assert g.in_degree("b") == 1

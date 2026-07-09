@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from automind.core.types import Message, Role
 

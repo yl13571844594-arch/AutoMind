@@ -60,6 +60,7 @@ class TestRunnerSkill(AbstractSkill):
                 proc = subprocess.run(
                     cmd, shell=True, cwd=inp.directory,
                     capture_output=True, text=True, timeout=120,
+                    encoding="utf-8", errors="replace",
                 )
                 return SkillResult(
                     success=proc.returncode == 0,

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
 
-from automind.core.types import Goal, GoalStatus, HierarchicalPlan, Predicate
+from automind.core.types import Goal, GoalStatus, HierarchicalPlan
 
 
 @dataclass

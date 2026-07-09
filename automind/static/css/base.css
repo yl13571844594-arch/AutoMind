@@ -39,3 +39,24 @@ body::before {
 }
 @keyframes ambientShift { 0%{opacity:.7;transform:scale(1)} 100%{opacity:1;transform:scale(1.06)} }
 
+/* ── 浅色模式（body.light，🌓 按钮随时切换，localStorage 持久化）── */
+body.light {
+  --bg0: #f4f6fb; --bg1: #ffffff; --bg2: #eef1f8; --bg3: #e2e7f2;
+  --glass1: rgba(255,255,255,.82); --glass2: rgba(244,246,251,.72);
+  --border: #d5dcea; --border-focus: #9fb0d8;
+  --text: #1d2433; --text2: #56617a; --text3: #8a94ab;
+  --accent: #4a6fe8; --accent2: #8b5fe0; --accent-glow: rgba(74,111,232,.25);
+  --accent-grad: linear-gradient(135deg, #4a6fe8, #8b5fe0);
+  --green: #16a35f; --green-bg: #16a35f1a;
+  --red: #d94848; --red-bg: #d948481a;
+  --yellow: #c78d1b; --yellow-bg: #c78d1b1a;
+  --purple: #8b5fe0; --purple-bg: #8b5fe01a;
+  --shadow: 0 10px 40px rgba(30,45,90,.14);
+  --shadow-sm: 0 2px 12px rgba(30,45,90,.10);
+}
+body.light::before {
+  background:
+    radial-gradient(ellipse 60% 50% at 18% 12%, rgba(74,111,232,.06) 0%, transparent 60%),
+    radial-gradient(ellipse 50% 55% at 85% 25%, rgba(139,95,224,.05) 0%, transparent 62%);
+}
+

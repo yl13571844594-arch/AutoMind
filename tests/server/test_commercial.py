@@ -1,7 +1,5 @@
 """商用能力测试 — 会话隔离 / 鉴权 / 并发上限 / 健康检查。"""
 
-import json
-from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient

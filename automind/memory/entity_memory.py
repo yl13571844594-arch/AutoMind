@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from automind.core.types import Entity, Relation
+from automind.core.types import Entity
 
 
 class EntityMemory:

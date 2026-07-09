@@ -77,7 +77,7 @@ class PythonSandboxTool(AbstractTool):
                 asyncio.to_thread(self._execute_sync, code),
                 timeout=timeout,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolResult(
                 tool_name=self.name,
                 success=False,

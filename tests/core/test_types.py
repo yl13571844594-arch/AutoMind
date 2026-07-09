@@ -1,7 +1,10 @@
 """核心类型测试 — Goal 树操作、Predicate 转换、枚举完整性。"""
 
 from automind.core.types import (
-    Goal, InteractionMode, Predicate, Role,
+    Goal,
+    InteractionMode,
+    Predicate,
+    Role,
 )
 
 

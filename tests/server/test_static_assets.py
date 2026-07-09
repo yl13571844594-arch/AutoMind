@@ -47,9 +47,12 @@ class TestSkeleton:
         css = [a for a in assets if a.endswith(".css")]
         js = [a for a in assets if a.endswith(".js")]
         assert len(css) == 5, css
-        assert len(js) == 6, js
-        # 加载顺序必须保持（core 最先，misc 最后）
-        assert js[0] == "js/core.js" and js[-1] == "js/misc.js"
+        # v0.7：+ theme / workspace / templates 三个特性模块
+        assert len(js) == 9, js
+        # 加载顺序必须保持（core 最先；特性模块在基础六件套之后）
+        assert js[0] == "js/core.js"
+        assert js[:6] == ["js/core.js", "js/ws.js", "js/chat.js",
+                          "js/settings.js", "js/panels.js", "js/misc.js"]
 
     def test_no_inline_blocks_left(self, index_html):
         # 骨架中不应再有大段内联样式/脚本块

@@ -31,7 +31,6 @@ class ProjectInitSkill(AbstractSkill):
         else:
             inp = input_data
 
-        import os
         from pathlib import Path
 
         root = Path(inp.directory) / inp.name

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import fnmatch
-import hashlib
 import json
 import time
 from dataclasses import dataclass, field
