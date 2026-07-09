@@ -55,10 +55,12 @@
 ## 快速开始
 
 ```bash
-# 安装（含 Web UI 依赖）
-pip install -e ".[web]"        # 仅 Web + OpenAI 兼容
-# 或安装全部后端
-pip install -e ".[full]"
+# 安装方式 A：从 PyPI（推荐）
+pip install "automind-agent[web]"     # Web + OpenAI 兼容后端
+# 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
+
+# 安装方式 B：从源码（git clone 本仓库后，在仓库目录执行）
+pip install -e ".[web]"
 
 # 启动 Web 工作台（推荐）
 python -m automind.server --port 8765

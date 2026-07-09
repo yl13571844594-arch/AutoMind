@@ -51,10 +51,12 @@ A dropdown at the top switches the approval policy for tool calls
 ## Quick Start
 
 ```bash
-# Install (with Web UI dependencies)
-pip install -e ".[web]"        # Web + OpenAI-compatible backends
-# Or install every backend
-pip install -e ".[full]"
+# Option A: install from PyPI (recommended)
+pip install "automind-agent[web]"     # Web + OpenAI-compatible backends
+# Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
+
+# Option B: install from source (after git clone, inside the repo)
+pip install -e ".[web]"
 
 # Start the Web workbench (recommended)
 python -m automind.server --port 8765

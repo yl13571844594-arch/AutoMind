@@ -5,8 +5,9 @@
 ## 步骤
 
 ```bash
-# 1. 安装（在仓库根目录）
-pip install -e ".[web]"
+# 1. 安装 —— 二选一：
+pip install "automind-agent[web]"   # 从 PyPI（推荐）
+pip install -e ".[web]"             # 或在仓库根目录源码安装
 
 # 2. 启动 Web 工作台
 python -m automind.server --port 8765
