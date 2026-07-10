@@ -400,12 +400,13 @@ async function showModal(name, tab) {
       content.innerHTML = await renderGeneralTab();
       loadAutopilotToggles();  // 自主闭环开关（异步填充）
     }
+    else if (tab === 'integrations') content.innerHTML = await renderIntegrationsTab();
   }
 }
 function closeModal() { document.getElementById('settings-modal').classList.remove('show'); }
 
 function tabBar(active) {
-  const t = [['model','🖥 模型'],['apikeys','🔑 API Keys'],['general','⚙ 通用']];
+  const t = [['model','🖥 模型'],['apikeys','🔑 API Keys'],['general','⚙ 通用'],['integrations','🔌 集成']];
   return `<div class="tabs">${t.map(([k,l])=>`<button class="${k===active?'active':''}" onclick="showModal('settings','${k}')">${l}</button>`).join('')}</div>`;
 }
 

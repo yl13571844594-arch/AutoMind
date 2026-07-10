@@ -370,6 +370,65 @@ async function setAutopilot(flag, enabled){
   toast(`${AUTOPILOT_LABELS[flag][0]} 已${enabled?'开启':'关闭'}`, enabled?'success':'info');
 }
 
+// ── Integrations Tab（IDE 面板：Continue.dev / 任意 OpenAI 客户端）──
+async function renderIntegrationsTab() {
+  let cfg = { base_url: location.origin + '/v1', model: '—', yaml: '', auth_required: false };
+  try { cfg = await (await fetch(`${API}/integrations/continue`)).json(); } catch(e) {}
+  const curl = `curl ${cfg.base_url}/chat/completions \\
+  -H "Content-Type: application/json"${cfg.auth_required ? ' \\\n  -H "Authorization: Bearer <你的令牌>"' : ''} \\
+  -d '{"model":"${cfg.model}","messages":[{"role":"user","content":"你好"}]}'`;
+  return `
+<h2>🔌 集成</h2>
+<div class="hint">把 AutoMind 接入 IDE 面板或任何 OpenAI 兼容客户端 —— 复用你在这里配好的模型、中转代理与企业网关。</div>
+${tabBar('integrations')}
+
+<div class="card" style="margin-top:6px">
+  <div style="display:flex;align-items:center;gap:10px">
+    <span style="font-size:1.6em">🧩</span>
+    <div style="flex:1">
+      <b>Continue.dev — VS Code / JetBrains 侧边面板</b>
+      <div style="font-size:.8em;color:var(--text3);margin-top:2px">在编辑器里聊代码、改代码，模型走 AutoMind（当前：${esc(cfg.model)}）</div>
+    </div>
+    <a href="https://www.continue.dev" target="_blank" rel="noopener noreferrer" style="font-size:.78em;color:var(--accent)">官网 ↗</a>
+  </div>
+  <ol class="md-list" style="font-size:.86em;margin-top:10px">
+    <li>IDE 扩展市场搜索并安装 <b>Continue</b>（VS Code / JetBrains 均有）。</li>
+    <li>打开 Continue 侧边面板 → 右上 ⚙ → <b>Open Config</b>（config.yaml）。</li>
+    <li>把下面的配置粘贴进 <code>models:</code> 段，保存即用。</li>
+  </ol>
+  <div style="position:relative;margin-top:8px">
+    <pre id="continue-yaml" style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--mono);font-size:.78em;overflow-x:auto;white-space:pre">${esc(cfg.yaml || '加载失败，请刷新重试')}</pre>
+    <button class="btn-primary" style="position:absolute;top:8px;right:8px;padding:4px 12px;font-size:.76em;border-radius:6px"
+      onclick="copyText(document.getElementById('continue-yaml').innerText, this)">⧉ 复制配置</button>
+  </div>
+  ${cfg.auth_required ? '' : `<div style="font-size:.76em;color:var(--text3);margin-top:6px">
+    ⚠ 当前未开启访问鉴权（本机使用无碍）；暴露到局域网/公网前请设置 <code>AUTOMIND_AUTH_TOKEN</code>，配置中的 apiKey 填同一令牌。</div>`}
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+    <span style="font-size:1.6em">🌐</span>
+    <div style="flex:1">
+      <b>通用 OpenAI 兼容 API</b>
+      <div style="font-size:.8em;color:var(--text3);margin-top:2px">Cline / Zed / 脚本 / SDK…… 任何支持自定义 OpenAI 接口的工具都能接</div>
+    </div>
+  </div>
+  <div style="font-size:.84em;margin-top:8px;line-height:2">
+    <b>Base URL：</b><code>${esc(cfg.base_url)}</code>
+    <button class="btn-secondary" style="padding:2px 10px;font-size:.78em;border-radius:6px;margin-left:6px"
+      onclick="copyText('${jsq(cfg.base_url)}', this)">⧉</button><br>
+    <b>端点：</b><code>POST /v1/chat/completions</code>（支持 <code>stream: true</code> SSE 流式）· <code>GET /v1/models</code>
+  </div>
+  <div style="position:relative;margin-top:8px">
+    <pre id="curl-example" style="background:var(--bg0);border:1px solid var(--border);border-radius:8px;padding:12px;font-family:var(--mono);font-size:.78em;overflow-x:auto;white-space:pre">${esc(curl)}</pre>
+    <button class="btn-secondary" style="position:absolute;top:8px;right:8px;padding:4px 12px;font-size:.76em;border-radius:6px"
+      onclick="copyText(document.getElementById('curl-example').innerText, this)">⧉ 复制</button>
+  </div>
+  <div style="font-size:.76em;color:var(--text3);margin-top:6px">
+    说明：IDE 集成为纯对话语义（不调用本机工具）；token 用量计入右栏统计与成本估算。</div>
+</div>`;
+}
+
 // ── Directory picker ──
 let _dirPath = '';
 async function openDirPicker() {

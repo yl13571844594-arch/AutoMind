@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+    from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.staticfiles import StaticFiles
@@ -110,8 +110,10 @@ async def _auth_middleware(request, call_next):
     token = _auth_token()
     path = request.url.path
     # 仅保护 /api/*；放开首页、文档、健康检查
-    # /api/auth/login 放行：SSO 登录本身不能要求已持有令牌
-    if (token and path.startswith("/api/") and not path.startswith("/api/health")
+    # /api/auth/login 放行：SSO 登录本身不能要求已持有令牌；
+    # /v1/*（OpenAI 兼容，IDE 集成）与 /api/* 同等保护。
+    if (token and (path.startswith("/api/") or path.startswith("/v1/"))
+            and not path.startswith("/api/health")
             and path != "/api/auth/login"):
         sent = request.headers.get("authorization", "")
         provided = sent[7:] if sent.lower().startswith("bearer ") else \
@@ -121,8 +123,9 @@ async def _auth_middleware(request, call_next):
                            client=request.client.host if request.client else "?")
             return JSONResponse({"error": "未授权：请提供有效的访问令牌"}, status_code=401)
 
-    # 速率限制（§14.11-4）：仅作用于任务执行入口 /api/run，按客户端 IP 计数
-    if _rate_limiter.enabled and request.method == "POST" and path == "/api/run":
+    # 速率限制（§14.11-4）：任务执行入口 + OpenAI 兼容补全入口，按客户端 IP 计数
+    if (_rate_limiter.enabled and request.method == "POST"
+            and path in ("/api/run", "/v1/chat/completions")):
         client_ip = request.client.host if request.client else "unknown"
         if not _rate_limiter.allow(client_ip):
             retry = _rate_limiter.retry_after(client_ip)
@@ -2192,6 +2195,152 @@ def _attach_extensions() -> None:
 
 
 _attach_extensions()
+
+
+# ═══════════════════════════════════════════════════════════
+# OpenAI 兼容 API — IDE 集成（Continue.dev / Cline / 任意 OpenAI 客户端）
+#   POST /v1/chat/completions（支持 SSE 流式） · GET /v1/models
+#   鉴权与 /api/* 一致（AUTOMIND_AUTH_TOKEN / SSO 会话令牌）。
+# ═══════════════════════════════════════════════════════════
+
+
+def _openai_error(msg: str, status: int = 400,
+                  etype: str = "invalid_request_error") -> JSONResponse:
+    """OpenAI 错误格式（客户端据此展示可读错误）。"""
+    return JSONResponse({"error": {"message": msg, "type": etype, "code": status}},
+                        status_code=status)
+
+
+@app.get("/v1/models")
+async def v1_models():
+    """OpenAI 兼容：模型列表（返回当前配置的模型）。"""
+    agent = get_agent()
+    mid = agent.config.llm.model if agent else "automind"
+    return {"object": "list", "data": [
+        {"id": mid, "object": "model",
+         "created": int(_START_TIME), "owned_by": "automind"},
+    ]}
+
+
+@app.post("/v1/chat/completions")
+async def v1_chat_completions(data: dict):
+    """OpenAI 兼容：对话补全（IDE 面板经由此端点把 AutoMind 当模型用）。
+
+    走当前配置的 LLM（含中转代理 / 企业网关收敛后的地址）；
+    不执行工具（IDE 集成为纯对话语义），token 计入右栏用量统计。
+    """
+    messages = data.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return _openai_error("'messages' is required and must be a non-empty array")
+    agent = get_agent()
+    if agent.llm is None:
+        return _openai_error(
+            "LLM not initialized — open the AutoMind workbench and configure "
+            "an API key first (右上角 🔑 API Keys)", 503, "server_error")
+
+    # 消息清洗：只保留 role/content 文本（忽略客户端附加字段与多模态分片）
+    msgs = []
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content", "")
+        if isinstance(content, list):  # OpenAI 多模态分片 → 拼接文本部分
+            content = "".join(p.get("text", "") for p in content
+                              if isinstance(p, dict) and p.get("type") == "text")
+        msgs.append({"role": m.get("role", "user"), "content": str(content)})
+
+    model_name = agent.config.llm.model
+    rid = "chatcmpl-" + uuid.uuid4().hex[:24]
+    created = int(time.time())
+
+    if bool(data.get("stream")):
+        from fastapi.responses import StreamingResponse
+
+        async def _sse():
+            chunks: list[str] = []
+            head = {"id": rid, "object": "chat.completion.chunk",
+                    "created": created, "model": model_name,
+                    "choices": [{"index": 0, "delta": {"role": "assistant"},
+                                 "finish_reason": None}]}
+            yield f"data: {json.dumps(head, ensure_ascii=False)}\n\n"
+            try:
+                async for delta in agent.llm.generate_stream(msgs):
+                    if not isinstance(delta, str) or not delta:
+                        continue
+                    chunks.append(delta)
+                    body = {"id": rid, "object": "chat.completion.chunk",
+                            "created": created, "model": model_name,
+                            "choices": [{"index": 0, "delta": {"content": delta},
+                                         "finish_reason": None}]}
+                    yield f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+            except Exception as e:  # 流中断：以最后一个块传递错误说明
+                err = {"id": rid, "object": "chat.completion.chunk",
+                       "created": created, "model": model_name,
+                       "choices": [{"index": 0,
+                                    "delta": {"content": f"\n[AutoMind error: {e}]"},
+                                    "finish_reason": None}]}
+                yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n"
+            tail = {"id": rid, "object": "chat.completion.chunk",
+                    "created": created, "model": model_name,
+                    "choices": [{"index": 0, "delta": {},
+                                 "finish_reason": "stop"}]}
+            yield f"data: {json.dumps(tail, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+            # 流式用量估算计入统计（与对话模式一致的估算口径）
+            try:
+                reply = "".join(chunks)
+                prompt_text = "".join(str(m.get("content", "")) for m in msgs)
+                _accumulate_tokens({
+                    "prompt_tokens": agent.llm.token_count(prompt_text),
+                    "completion_tokens": agent.llm.token_count(reply),
+                    "tokens": (agent.llm.token_count(prompt_text)
+                               + agent.llm.token_count(reply)),
+                })
+            except Exception:
+                pass
+
+        return StreamingResponse(_sse(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache",
+                                          "X-Accel-Buffering": "no"})
+
+    try:
+        resp = await agent.llm.generate(msgs)
+    except Exception as e:
+        return _openai_error(f"upstream LLM error: {e}", 502, "server_error")
+    _accumulate_tokens({"prompt_tokens": resp.prompt_tokens,
+                        "completion_tokens": resp.completion_tokens,
+                        "tokens": resp.total_tokens})
+    return {
+        "id": rid, "object": "chat.completion", "created": created,
+        "model": model_name,
+        "choices": [{"index": 0,
+                     "message": {"role": "assistant", "content": resp.text},
+                     "finish_reason": resp.finish_reason or "stop"}],
+        "usage": {"prompt_tokens": resp.prompt_tokens,
+                  "completion_tokens": resp.completion_tokens,
+                  "total_tokens": resp.total_tokens},
+    }
+
+
+@app.get("/api/integrations/continue")
+async def api_integration_continue(request: Request):
+    """生成 Continue.dev（VS Code / JetBrains）即贴即用的接入配置。"""
+    base = str(request.base_url).rstrip("/")
+    agent = get_agent()
+    model = agent.config.llm.model if agent else "automind"
+    token = _auth_token()
+    key_line = f"    apiKey: {token}" if token else "    apiKey: none  # 未开启鉴权可任意填"
+    yaml_cfg = (
+        "models:\n"
+        f"  - name: AutoMind ({model})\n"
+        "    provider: openai\n"
+        f"    model: {model}\n"
+        f"    apiBase: {base}/v1\n"
+        f"{key_line}\n"
+        "    roles:\n      - chat\n      - edit\n      - apply\n"
+    )
+    return {"base_url": f"{base}/v1", "model": model,
+            "auth_required": bool(token), "yaml": yaml_cfg}
 
 
 @app.get("/manual")

@@ -15,7 +15,9 @@ def client(tmp_path, monkeypatch):
     srv._store.session_histories.clear()
     srv._AUTH_TOKEN = ""
     srv._agent = None
-    return TestClient(srv.app), srv
+    yield TestClient(srv.app), srv
+    # 测试内直接赋值的令牌必须复原，否则泄漏到后续测试文件（曾致 401 假失败）
+    srv._AUTH_TOKEN = ""
 
 
 class TestHealth:

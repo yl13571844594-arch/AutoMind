@@ -21,6 +21,11 @@
   （原地址自动备份、停用即恢复），模型白名单校验（`/api/gateway`）。
 - 社区核心：`edition.py` 特性注册表 +5；server_ctx 追加 `register_token_validator`
   与 `rebuild_agent` 两个契约键（向后兼容）；社区版访问新端点返回 403 升级提示。
+- **🔌 IDE 集成（社区版）**：OpenAI 兼容 API —— `POST /v1/chat/completions`
+  （SSE 流式 + 多模态文本分片拍平 + 用量统计）与 `GET /v1/models`；
+  「⚙ 设置 → 🔌 集成」标签页一键生成 **Continue.dev**（VS Code/JetBrains
+  侧边面板）即贴即用配置，任何 OpenAI 客户端（Cline/Zed/脚本）均可接入；
+  `/v1/*` 与 `/api/*` 同等鉴权（静态令牌 / SSO 会话令牌）并纳入限流。
 
 ## [0.7.1] - 2026-07-09
 
