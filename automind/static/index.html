@@ -26,6 +26,26 @@
     <button data-view="history"><span class="icon">📜</span><span>任务历史</span></button>
     <button data-view="audit"><span class="icon">🛡️</span><span>安全审计</span></button>
   </nav>
+  <!-- 设置入口（左下角）：点击弹出功能菜单，每项一个设置功能 -->
+  <div id="settings-area">
+    <div id="settings-menu" role="menu" aria-label="设置菜单">
+      <div class="sm-label">配置</div>
+      <button role="menuitem" onclick="openSettingsItem('model')"><span class="icon">🖥</span><span>模型配置</span></button>
+      <button role="menuitem" onclick="openSettingsItem('apikeys')"><span class="icon">🔑</span><span>API Keys</span></button>
+      <button role="menuitem" onclick="openSettingsItem('general')"><span class="icon">⚙</span><span>通用设置</span></button>
+      <button role="menuitem" onclick="openSettingsItem('integrations')"><span class="icon">🔌</span><span>集成（IDE）</span></button>
+      <div class="sm-div"></div>
+      <div class="sm-label">外观与环境</div>
+      <button role="menuitem" onclick="toggleTheme()"><span class="icon" id="sm-theme-ico">🌓</span><span id="sm-theme-label">切换主题</span></button>
+      <button role="menuitem" onclick="closeSettingsMenu();showWorkspaces()"><span class="icon">🗂</span><span>工作区管理</span></button>
+      <div class="sm-div"></div>
+      <button role="menuitem" onclick="closeSettingsMenu();showTour()"><span class="icon">🧭</span><span>新手引导</span></button>
+      <button role="menuitem" onclick="closeSettingsMenu();window.open('/manual','_blank')"><span class="icon">📖</span><span>使用手册</span></button>
+    </div>
+    <button id="settings-btn" onclick="toggleSettingsMenu(event)" title="设置" aria-haspopup="menu">
+      <span class="icon">⚙️</span><span>设置</span><span class="chev">▴</span>
+    </button>
+  </div>
   <div class="footer">本地运行 · 数据不上传</div>
 </aside>
 
@@ -56,13 +76,8 @@
     <span class="badge" id="project-badge" title="项目目录" style="cursor:pointer;max-width:200px;overflow:hidden;text-overflow:ellipsis" onclick="showModal('settings','general')">📁 —</span>
     <span class="badge" id="ws-badge" title="工作区（独立目录 + 独立上下文）" style="cursor:pointer" onclick="showWorkspaces()">🗂 默认</span>
     <span class="spacer"></span>
-    <button class="hbtn" id="theme-btn" onclick="toggleTheme()" title="切换浅色/深色模式">☀️</button>
     <button class="hbtn" onclick="showTemplates()" title="模板库 — 10 个常用任务模板">📚 模板</button>
-    <button class="hbtn" onclick="showTour()" title="新手引导">❓</button>
-    <button class="hbtn" onclick="window.open('/manual','_blank')" title="使用手册">📖 手册</button>
-    <button class="hbtn" onclick="showModal('settings','model')" title="模型配置">🖥 模型</button>
     <button class="hbtn" onclick="showModal('settings','apikeys')" title="API Key 管理">🔑 API Keys</button>
-    <button class="hbtn" onclick="showModal('settings','general')">⚙ 设置</button>
     <button class="hbtn accent" onclick="handleClear()">🔄 新会话</button>
   </div>
 

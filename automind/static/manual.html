@@ -228,7 +228,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <b>📜 历史回溯</b>（持久化 + 查看/复制/重跑）·
     <b>▶ 中断续跑</b>（从断点继续省 Token）·
     <b>↩️ 撤销回滚</b>（Agent 改过的文件一键恢复）·
-    <b>🔌 IDE 集成</b>（OpenAI 兼容接口 + Continue.dev 一键配置，见「⚙ 设置 → 集成」）。
+    <b>🔌 IDE 集成</b>（OpenAI 兼容接口 + Continue.dev 一键配置，见左下角「⚙ 设置」菜单 → 集成）。
   </div>
 </div>
 
@@ -348,7 +348,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <text x="572" y="43" text-anchor="middle" fill="#3ce68a" font-size="10">deepseek/chat ●</text>
     <!-- 顶栏按钮 -->
     <g fill="#a7b0c8" font-size="10.5">
-      <text x="644" y="43">📖手册 🖥模型 🔑Keys ⚙设置</text>
+      <text x="644" y="43">📚模板 🔑Keys 🔄新会话</text>
     </g>
     <!-- 聊天区 -->
     <rect x="170" y="66" width="460" height="290" rx="12" fill="#0a0f20"/>
@@ -640,11 +640,11 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   （<code>OPENAI_API_KEY</code>、<code>DEEPSEEK_API_KEY</code> 等）。</div>
 
   <h3>省钱与提效：各模式专用模型</h3>
-  <p>「🖥 模型」面板可为五种模式<strong>分别指定不同模型</strong>——
+  <p>设置菜单的「🖥 模型配置」面板可为五种模式<strong>分别指定不同模型</strong>——
   对话用便宜快的 <code>deepseek-chat</code>，编程用强力的 <code>claude-sonnet</code>，
   实现<strong>成本 / 能力的精准分配</strong>。未指定的模式沿用全局默认。</p>
 
-  <h3>通用设置（⚙ 设置）</h3>
+  <h3>通用设置（左下角 ⚙ 设置 → 通用设置）</h3>
   <div class="tbl-wrap"><table>
     <tr><th>设置项</th><th>说明</th><th>建议</th></tr>
     <tr><td><b>项目目录</b></td><td>Agent 一切文件操作的根（带可视化目录浏览器）</td><td>为不同项目切换对应目录，准确又安全</td></tr>
@@ -888,7 +888,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <details><summary>换台电脑打开，聊天记录不见了？</summary>
     <div class="body">正常。会话按浏览器隔离（多用户设计）。记录都在服务器本地 <code>.automind/chats/</code> 下。</div></details>
   <details><summary>Token 花得快怎么办？</summary>
-    <div class="body">① 「🖥 模型」给对话模式配便宜模型；② 「📊 统计分析」看 Token 效率定位大户任务；③ 任务描述精准、避免反复试错。</div></details>
+    <div class="body">① 设置菜单「🖥 模型配置」给对话模式配便宜模型；② 「📊 统计分析」看 Token 效率定位大户任务；③ 任务描述精准、避免反复试错。</div></details>
   <details><summary>想让它用我公司内部的工具？</summary>
     <div class="body">三选一：写 Python 技能（最简单，见 examples/03）；架 MCP 服务器（标准协议，生态互通）；写插件（适合通知 / 审计等旁路逻辑）。</div></details>
 </section>

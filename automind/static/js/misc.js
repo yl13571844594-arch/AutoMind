@@ -99,9 +99,28 @@ document.getElementById('messages').addEventListener('click', function(e){
   if (msgBtn){ const b=msgBtn.closest('.col').querySelector('.bubble'); copyText(b.innerText, msgBtn); return; }
 });
 
-// 键盘快捷键（§9.3 子集）：Esc 关弹窗 / Ctrl+. 中断 / Ctrl+L 新会话
+// ── 设置菜单（左下角 ⚙ 按钮弹出，每项一个设置功能）──
+function toggleSettingsMenu(e) {
+  if (e) e.stopPropagation();
+  const area = document.getElementById('settings-area');
+  area.classList.toggle('open');
+  if (area.classList.contains('open')) updateThemeBtn();  // 同步主题项文案
+}
+function closeSettingsMenu() {
+  document.getElementById('settings-area').classList.remove('open');
+}
+function openSettingsItem(tab) {
+  closeSettingsMenu();
+  showModal('settings', tab);
+}
+// 点击菜单外任意处关闭
+document.addEventListener('click', function(e){
+  if (!e.target.closest('#settings-area')) closeSettingsMenu();
+});
+
+// 键盘快捷键（§9.3 子集）：Esc 关弹窗/菜单 / Ctrl+. 中断 / Ctrl+L 新会话
 document.addEventListener('keydown', function(e){
-  if (e.key === 'Escape') { closeModal(); }
+  if (e.key === 'Escape') { closeModal(); closeSettingsMenu(); }
   else if (e.ctrlKey && e.key === '.') { e.preventDefault(); if (running) stopTask(); }
   else if (e.ctrlKey && (e.key === 'l' || e.key === 'L')) { e.preventDefault(); handleClear(); }
 });

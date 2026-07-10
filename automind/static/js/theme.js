@@ -18,9 +18,16 @@ function toggleTheme() {
 }
 
 function updateThemeBtn() {
-  const btn = document.getElementById('theme-btn');
-  if (!btn) return;
   const light = document.body.classList.contains('light');
-  btn.textContent = light ? '🌙' : '☀️';
-  btn.title = light ? '切换到深色模式' : '切换到浅色模式';
+  // 设置菜单里的主题项（当前入口）
+  const ico = document.getElementById('sm-theme-ico');
+  const label = document.getElementById('sm-theme-label');
+  if (ico) ico.textContent = light ? '🌙' : '☀️';
+  if (label) label.textContent = light ? '切换到深色模式' : '切换到浅色模式';
+  // 兼容旧头部按钮（若存在）
+  const btn = document.getElementById('theme-btn');
+  if (btn) {
+    btn.textContent = light ? '🌙' : '☀️';
+    btn.title = light ? '切换到深色模式' : '切换到浅色模式';
+  }
 }

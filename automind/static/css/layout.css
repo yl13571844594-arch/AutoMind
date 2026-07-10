@@ -44,6 +44,43 @@
 #sidebar nav button .icon { font-size: 1.1em; width: 22px; text-align: center; flex-shrink: 0; }
 #sidebar .footer { padding: 12px 16px; border-top: 1px solid var(--border); font-size: .76em; color: var(--text3); }
 
+/* ── 设置入口（左下角）+ 弹出菜单 ────── */
+#settings-area { position: relative; padding: 8px 10px; border-top: 1px solid var(--border); }
+#settings-btn {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 10px 14px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text2); font-size: .9em;
+  cursor: pointer; transition: var(--transition); text-align: left;
+}
+#settings-btn:hover { background: var(--bg2); color: var(--text); }
+#settings-btn .icon { font-size: 1.1em; width: 22px; text-align: center; flex-shrink: 0; }
+#settings-btn .chev { margin-left: auto; font-size: .72em; color: var(--text3); transition: var(--transition); }
+#settings-area.open #settings-btn { background: var(--bg3); color: var(--text); font-weight: 600; }
+#settings-area.open #settings-btn .chev { transform: rotate(180deg); color: var(--accent); }
+#settings-menu {
+  display: none; position: absolute; left: 10px; width: 218px; bottom: calc(100% - 2px);
+  flex-direction: column; gap: 2px; padding: 8px 6px; z-index: 60;
+  background: var(--glass1); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%);
+}
+#settings-menu button span:not(.icon) { white-space: nowrap; }
+#settings-area.open #settings-menu { display: flex; animation: smUp .18s ease; }
+@keyframes smUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+#settings-menu button {
+  display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 9px 12px; border: none; border-radius: var(--radius-sm);
+  background: transparent; color: var(--text2); font-size: .88em;
+  cursor: pointer; transition: var(--transition); text-align: left;
+}
+#settings-menu button:hover { background: var(--bg2); color: var(--text); }
+#settings-menu button .icon { font-size: 1.05em; width: 22px; text-align: center; flex-shrink: 0; }
+#settings-menu .sm-div { height: 1px; background: var(--border); margin: 5px 8px; }
+#settings-menu .sm-label {
+  font-size: .64em; text-transform: uppercase; letter-spacing: .1em;
+  color: var(--text3); padding: 4px 12px 2px; font-weight: 600;
+}
+
 /* ── Main Area ───────────────────────── */
 #main { flex:1; display:flex; flex-direction: column; min-width: 0; }
 #header {

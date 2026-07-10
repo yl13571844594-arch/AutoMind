@@ -26,10 +26,17 @@ _ASSET_RE = re.compile(r'((?:href|src)="/static/[^"]+\.(?:css|js))"')
 
 
 def apply_security_headers(response, path: str) -> None:
-    """为响应添加安全头（防 MIME 嗅探 / 点击劫持 / Referer 泄漏）；首页附加 CSP。"""
+    """为响应添加安全头（防 MIME 嗅探 / 点击劫持 / Referer 泄漏）；首页附加 CSP。
+
+    首页与静态资源同时下发 ``Cache-Control: no-cache``（协商缓存）：
+    浏览器每次携带 ETag/Last-Modified 重验证，未变走 304，变了立即拿到新版 ——
+    否则同版本内的资源更新会被启发式缓存吞掉（?v= 只在版本号变化时生效）。
+    """
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
+    if path in ("/", "") or path == "/manual" or path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
     if path in ("/", ""):
         response.headers.setdefault("Content-Security-Policy", INDEX_CSP)
 
