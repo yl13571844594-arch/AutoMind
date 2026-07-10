@@ -405,8 +405,5 @@ async function showModal(name, tab) {
 }
 function closeModal() { document.getElementById('settings-modal').classList.remove('show'); }
 
-function tabBar(active) {
-  const t = [['model','🖥 模型'],['apikeys','🔑 API Keys'],['general','⚙ 通用'],['integrations','🔌 集成']];
-  return `<div class="tabs">${t.map(([k,l])=>`<button class="${k===active?'active':''}" onclick="showModal('settings','${k}')">${l}</button>`).join('')}</div>`;
-}
+// （设置弹窗已按功能单一职责化：入口在左下角「⚙ 设置」菜单，不再需要弹窗内标签栏）
 

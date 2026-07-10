@@ -228,7 +228,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <b>📜 历史回溯</b>（持久化 + 查看/复制/重跑）·
     <b>▶ 中断续跑</b>（从断点继续省 Token）·
     <b>↩️ 撤销回滚</b>（Agent 改过的文件一键恢复）·
-    <b>🔌 IDE 集成</b>（OpenAI 兼容接口 + Continue.dev 一键配置，见左下角「⚙ 设置」菜单 → 集成）。
+    <b>🔌 Agent 集成</b>（OpenAI 兼容接口 + Continue.dev 一键配置，见左下角「⚙ 设置」菜单 → 集成）。
   </div>
 </div>
 
@@ -267,7 +267,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <div class="steps">
     <div class="step"><div class="dot">1</div><b>安装</b><p>命令行执行<br><code>pip install "automind-agent[web]"</code></p></div>
     <div class="step"><div class="dot">2</div><b>启动</b><p><code>python -m automind.server</code><br>浏览器打开 <code>localhost:8765</code></p></div>
-    <div class="step"><div class="dot">3</div><b>配置模型</b><p>右上角「🔑 API Keys」填 Key，<br>点「🔌 测试连接」变绿即成功</p></div>
+    <div class="step"><div class="dot">3</div><b>配置模型</b><p>左下角「⚙ 设置 → API Keys」填 Key，<br>点「🔌 测试连接」变绿即成功</p></div>
     <div class="step"><div class="dot">4</div><b>第一个任务</b><p>切「⚙️ 工作」模式，输入任务，<br>看它实时规划并执行</p></div>
   </div>
 
@@ -348,7 +348,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <text x="572" y="43" text-anchor="middle" fill="#3ce68a" font-size="10">deepseek/chat ●</text>
     <!-- 顶栏按钮 -->
     <g fill="#a7b0c8" font-size="10.5">
-      <text x="644" y="43">📚模板 🔑Keys 🔄新会话</text>
+      <text x="644" y="43">📚模板 ❓引导 🔄新会话</text>
     </g>
     <!-- 聊天区 -->
     <rect x="170" y="66" width="460" height="290" rx="12" fill="#0a0f20"/>
@@ -620,7 +620,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <section id="models">
   <h2><span class="num">06</span>模型配置详解</h2>
 
-  <h3>支持的提供商（右上角 🔑 API Keys）</h3>
+  <h3>支持的提供商（左下角 ⚙ 设置 → 🔑 API Keys）</h3>
   <div class="grid g3">
     <div class="tile"><b>OpenAI</b><p>gpt-4o · platform.openai.com</p></div>
     <div class="tile"><b>Anthropic Claude</b><p>claude-sonnet · console.anthropic.com</p></div>
@@ -876,7 +876,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <h2><span class="num">11</span>常见问题 FAQ</h2>
 
   <details><summary>顶部模型徽标一直是红色「未配置」？</summary>
-    <div class="body">还没配 API Key。点「🔑 API Keys」为当前提供商填 Key 并「测试连接」。</div></details>
+    <div class="body">还没配 API Key。左下角「⚙ 设置 → API Keys」为当前提供商填 Key 并「测试连接」。</div></details>
   <details><summary>徽标黄色带 ⚠？</summary>
     <div class="body">有 Key 但初始化失败。常见原因：Key 失效、api_base 写错、网络不通。「测试连接」会告诉你卡在哪个阶段。</div></details>
   <details><summary>任务卡住不动 / 想中断？</summary>

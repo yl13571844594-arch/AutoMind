@@ -323,7 +323,7 @@ function renderWelcome() {
       • 🔁 <b>循环</b> — 自主"行动-观察-修正"闭环，迭代到达标为止${featureOn('loop_engine')?'':' <span style="font-size:.82em;color:var(--text3)">🔒专业版</span>'}<br><br>
       <span style="color:var(--text3);font-size:.88em;">
       顶部可设置 <b>审批模式</b>（🙋询问 / ⚡自动 / ✅全批准）；侧边栏有 📊 统计分析、⏰ 定时任务、🔧 工具/技能/MCP、🛡️ 安全审计。<br>
-      ⚙ 首次使用请先点击右上角 <b>🔑 API Keys</b> 配置模型。<br>
+      ⚙ 首次使用请先点击左下角 <b>「⚙ 设置」→「🔑 API Keys」</b> 配置模型。<br>
       支持 OpenAI / Claude / DeepSeek / Kimi / 百炼 / 智谱 / 豆包 / Gemini / Grok / Ollama，
       以及 <b>自定义 OpenAI 标准接口（中转代理）</b>。
       </span>

@@ -81,7 +81,7 @@ automind "你的任务描述"
 
 ## 模型配置
 
-打开 Web 工作台后，点击右上角 **🔑 API Keys**：
+打开 Web 工作台后，点击左下角 **「⚙ 设置」→「🔑 API Keys」**：
 
 - 支持 OpenAI / Claude / DeepSeek / Kimi / 百炼 / 智谱 / 豆包 / Gemini / Grok / Ollama。
 - **自定义 OpenAI 标准接口（中转代理）**：在底部填写 `api_base`（如 `https://api.your-proxy.com/v1`）、
@@ -105,12 +105,12 @@ automind "你的任务描述"
   独立上下文，切换后 Agent 在新目录下操作，任务之间互不污染。
 - **📚 模板库**：内置 10 个基础模板（建站/脚手架/修 Bug/补测试/数据分析/爬虫等），
   欢迎页与 📚 按钮一键填入即可开跑；首次打开有 4 步**新手引导**（❓ 可重看）。
-- **🌓 浅色模式**：右上角随时切换深/浅主题，跟随系统偏好自动初始化。
+- **🌓 浅色模式**：左下角「⚙ 设置」菜单随时切换深/浅主题，跟随系统偏好自动初始化。
 - **💰 实时成本**：右栏 Token 面板与每条结果显示预估花费（内置主流模型单价，可自定义）。
 - **↩️ 撤销/回滚**：Agent 改过的文件记录在右栏「文件改动」，可单文件撤销或全部回滚。
 - **▶ 中断续跑**：任务中断/出错后点「继续此任务」，从中断处继续不重做，省 Token。
-- **🔌 IDE 集成**：内置 OpenAI 兼容接口（`/v1/chat/completions`，SSE 流式）；
-  「⚙ 设置 → 🔌 集成」一键生成 **Continue.dev**（VS Code/JetBrains 面板）配置，
+- **🔌 Agent 集成**：内置 OpenAI 兼容接口（`/v1/chat/completions`，SSE 流式）；
+  左下角「⚙ 设置」→「🔌 Agent 集成」一键生成 **Continue.dev**（VS Code/JetBrains 面板）与 **Cline** 配置，
   Cline / Zed 等任何 OpenAI 客户端同样可接。
 
 ## 对话历史

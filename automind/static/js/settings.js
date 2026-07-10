@@ -65,7 +65,6 @@ async function renderModelTab() {
   return `
 <h2>🖥 模型配置</h2>
 <div class="hint">选择提供商与模型，配置即时生效（自动重建连接）。</div>
-${tabBar('model')}
 <label>LLM 提供商</label>
 <select id="cfg-provider" onchange="onProviderChange()">${opt}</select>
 
@@ -260,7 +259,6 @@ async function renderApiKeyTab() {
 <h2>🔑 API Key 管理</h2>
 <div class="hint">Key 仅保存在本地 <code>.automind_config.json</code>，不会上传。当前使用：
   <b>${status.provider}/${status.model}</b> ${status.llm_ready?'✓ 已就绪':'⚠ 未就绪'}</div>
-${tabBar('apikeys')}
 <div style="max-height:300px;overflow-y:auto">${rows}</div>
 ${customBlock}
 <div class="btn-row"><button class="btn-secondary" onclick="closeModal()">关闭</button></div>`;
@@ -313,7 +311,6 @@ async function renderGeneralTab() {
   return `
 <h2>⚙ 通用设置</h2>
 <div class="hint">项目目录、采样参数与执行偏好。</div>
-${tabBar('general')}
 <label>项目目录（Agent 文件操作的根目录）</label>
 <div style="display:flex;gap:8px">
   <input type="text" id="cfg-project" value="${esc(f.project||'.')}" style="flex:1">
@@ -377,17 +374,18 @@ async function renderIntegrationsTab() {
   const curl = `curl ${cfg.base_url}/chat/completions \\
   -H "Content-Type: application/json"${cfg.auth_required ? ' \\\n  -H "Authorization: Bearer <你的令牌>"' : ''} \\
   -d '{"model":"${cfg.model}","messages":[{"role":"user","content":"你好"}]}'`;
+  const keyHint = cfg.auth_required ? '你的 AUTOMIND_AUTH_TOKEN 令牌' : '任意填（未开鉴权）';
   return `
-<h2>🔌 集成</h2>
-<div class="hint">把 AutoMind 接入 IDE 面板或任何 OpenAI 兼容客户端 —— 复用你在这里配好的模型、中转代理与企业网关。</div>
-${tabBar('integrations')}
+<h2>🔌 Agent 集成</h2>
+<div class="hint">把 AutoMind 作为「模型提供方」接入 IDE 里的 AI Agent（Continue / Cline 等）或任何
+OpenAI 兼容客户端 —— 复用你在这里配好的模型、中转代理与企业网关，Key 只留在本机。</div>
 
 <div class="card" style="margin-top:6px">
   <div style="display:flex;align-items:center;gap:10px">
     <span style="font-size:1.6em">🧩</span>
     <div style="flex:1">
       <b>Continue.dev — VS Code / JetBrains 侧边面板</b>
-      <div style="font-size:.8em;color:var(--text3);margin-top:2px">在编辑器里聊代码、改代码，模型走 AutoMind（当前：${esc(cfg.model)}）</div>
+      <div style="font-size:.8em;color:var(--text3);margin-top:2px">编辑器里聊代码、改代码（chat / edit / apply），模型走 AutoMind（当前：${esc(cfg.model)}）</div>
     </div>
     <a href="https://www.continue.dev" target="_blank" rel="noopener noreferrer" style="font-size:.78em;color:var(--accent)">官网 ↗</a>
   </div>
@@ -401,8 +399,27 @@ ${tabBar('integrations')}
     <button class="btn-primary" style="position:absolute;top:8px;right:8px;padding:4px 12px;font-size:.76em;border-radius:6px"
       onclick="copyText(document.getElementById('continue-yaml').innerText, this)">⧉ 复制配置</button>
   </div>
-  ${cfg.auth_required ? '' : `<div style="font-size:.76em;color:var(--text3);margin-top:6px">
-    ⚠ 当前未开启访问鉴权（本机使用无碍）；暴露到局域网/公网前请设置 <code>AUTOMIND_AUTH_TOKEN</code>，配置中的 apiKey 填同一令牌。</div>`}
+</div>
+
+<div class="card" style="margin-top:12px">
+  <div style="display:flex;align-items:center;gap:10px">
+    <span style="font-size:1.6em">🤖</span>
+    <div style="flex:1">
+      <b>Cline — VS Code 自主编码 Agent</b>
+      <div style="font-size:.8em;color:var(--text3);margin-top:2px">能读写文件、跑命令的编辑器内 Agent，用 AutoMind 当它的"大脑"</div>
+    </div>
+    <a href="https://cline.bot" target="_blank" rel="noopener noreferrer" style="font-size:.78em;color:var(--accent)">官网 ↗</a>
+  </div>
+  <div style="font-size:.86em;margin-top:10px;line-height:2">
+    VS Code 安装 <b>Cline</b> 扩展 → 打开其设置（⚙）依次填入：<br>
+    <b>API Provider：</b><code>OpenAI Compatible</code><br>
+    <b>Base URL：</b><code>${esc(cfg.base_url)}</code>
+    <button class="btn-secondary" style="padding:2px 10px;font-size:.78em;border-radius:6px;margin-left:6px"
+      onclick="copyText('${jsq(cfg.base_url)}', this)">⧉</button><br>
+    <b>API Key：</b>${esc(keyHint)}　<b>Model ID：</b><code>${esc(cfg.model)}</code>
+    <button class="btn-secondary" style="padding:2px 10px;font-size:.78em;border-radius:6px;margin-left:6px"
+      onclick="copyText('${jsq(cfg.model)}', this)">⧉</button>
+  </div>
 </div>
 
 <div class="card" style="margin-top:12px">
@@ -410,7 +427,7 @@ ${tabBar('integrations')}
     <span style="font-size:1.6em">🌐</span>
     <div style="flex:1">
       <b>通用 OpenAI 兼容 API</b>
-      <div style="font-size:.8em;color:var(--text3);margin-top:2px">Cline / Zed / 脚本 / SDK…… 任何支持自定义 OpenAI 接口的工具都能接</div>
+      <div style="font-size:.8em;color:var(--text3);margin-top:2px">Zed / Open WebUI / 脚本 / SDK…… 任何支持自定义 OpenAI 接口的工具都能接</div>
     </div>
   </div>
   <div style="font-size:.84em;margin-top:8px;line-height:2">
@@ -425,7 +442,8 @@ ${tabBar('integrations')}
       onclick="copyText(document.getElementById('curl-example').innerText, this)">⧉ 复制</button>
   </div>
   <div style="font-size:.76em;color:var(--text3);margin-top:6px">
-    说明：IDE 集成为纯对话语义（不调用本机工具）；token 用量计入右栏统计与成本估算。</div>
+    说明：经 /v1 接入的外部 Agent 走纯对话语义（不会调用 AutoMind 的本机工具）；token 用量计入右栏统计与成本估算。
+    ${cfg.auth_required ? '' : '⚠ 当前未开启访问鉴权（本机使用无碍）；暴露到局域网/公网前请设置 <code>AUTOMIND_AUTH_TOKEN</code>，各客户端的 apiKey 填同一令牌。'}</div>
 </div>`;
 }
 

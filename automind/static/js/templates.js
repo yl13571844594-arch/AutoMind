@@ -150,7 +150,7 @@ async function useTemplate(i) {
 // ── 新手引导（首次打开自动显示；❓ 按钮可随时重看）──
 const TOUR_STEPS = [
   { icon: '🔑', title: '第 1 步 · 配置模型',
-    body: '点击右上角 <b>「🔑 API Keys」</b>，为你使用的模型提供商填入 API Key 并「测试连接」。<br><br>支持 OpenAI / Claude / DeepSeek / Kimi / 智谱 / 豆包 / Gemini / 本地 Ollama，以及任意 OpenAI 兼容中转代理。' },
+    body: '点击左下角 <b>「⚙ 设置」→「🔑 API Keys」</b>，为你使用的模型提供商填入 API Key 并「测试连接」。<br><br>支持 OpenAI / Claude / DeepSeek / Kimi / 智谱 / 豆包 / Gemini / 本地 Ollama，以及任意 OpenAI 兼容中转代理。' },
   { icon: '🧭', title: '第 2 步 · 选择模式',
     body: '顶部三个主模式：<br>• 💬 <b>对话</b> — 问答聊天，不动你的文件<br>• ⚙️ <b>工作</b> — 自动规划并执行任务（建项目、跑命令）<br>• 💻 <b>编程</b> — 读代码 → 改代码 → 跑测试闭环<br><br>不确定选哪个？从 💬 对话开始最安全。<br><br><span style="color:var(--text3);font-size:.92em">模型配置、主题、工作区、IDE 集成等都在<b>左下角「⚙ 设置」</b>菜单里。</span>' },
   { icon: '📚', title: '第 3 步 · 从模板开始',
