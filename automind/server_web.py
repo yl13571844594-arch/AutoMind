@@ -10,13 +10,15 @@ import re
 
 # 首页 CSP：前端使用内联脚本/样式与内联事件处理器，故允许 'unsafe-inline'；
 # 关键防线是 default-src 'self' + frame-ancestors 'self'，杜绝外部资源注入与被外站嵌套。
+# jsdelivr 仅用于按需加载 Monaco Editor（📄 代码标签页）；worker 走 blob 代理。
 INDEX_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline'; "
-    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-    "font-src 'self' https://fonts.gstatic.com data:; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
+    "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net data:; "
     "img-src 'self' data: blob: https:; "
-    "connect-src 'self' ws: wss:; "
+    "connect-src 'self' ws: wss: https://cdn.jsdelivr.net; "
+    "worker-src 'self' blob:; "
     "frame-src 'self' blob:; "
     "frame-ancestors 'self'; "
     "base-uri 'self'; form-action 'self'"

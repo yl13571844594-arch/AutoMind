@@ -55,6 +55,13 @@ class FileChangeJournal:
         except Exception:
             return False
 
+    def pre_image(self, path: str) -> dict | None:
+        """该文件最早的前像（Diff 预览用）：{'before': str|None, 'created': bool}。"""
+        for e in self._entries:
+            if e["path"] == path:
+                return {"before": e["before"], "created": e["created"]}
+        return None
+
     def rollback(self, path: str) -> bool:
         """恢复单个文件到本日志中最早的前像（即撤销全部已记录改动）。"""
         matches = [e for e in self._entries if e["path"] == path]

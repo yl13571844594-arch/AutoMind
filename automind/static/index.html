@@ -20,6 +20,8 @@
     <button class="active" data-view="chat"><span class="icon">💬</span><span>对话工作台</span></button>
     <button data-view="plan"><span class="icon">📋</span><span>计划视图</span></button>
     <button data-view="tools"><span class="icon">🔧</span><span>工具面板</span></button>
+    <button data-view="experts"><span class="icon">🎓</span><span>专家市场</span></button>
+    <button data-view="team"><span class="icon">👥</span><span>团队</span></button>
     <div class="nav-label">系统</div>
     <button data-view="stats"><span class="icon">📊</span><span>统计分析</span></button>
     <button data-view="schedule"><span class="icon">⏰</span><span>定时任务</span></button>
@@ -100,6 +102,32 @@
 
     <!-- Right Panel -->
     <div id="right-panel">
+      <!-- 右栏标签：📊 面板（观测） / 📄 代码（Web IDE） -->
+      <div id="rp-tabs">
+        <button id="rp-tab-panel" class="active" onclick="switchRightTab('panel')">📊 面板</button>
+        <button id="rp-tab-code" onclick="switchRightTab('code')">📄 代码</button>
+      </div>
+      <div id="rp-code-view" style="display:none">
+        <div id="code-toolbar">
+          <button class="ct-btn" onclick="refreshFileTree()" title="刷新文件树">⟳</button>
+          <span id="code-path" title="">未打开文件</span>
+          <button class="ct-btn" id="code-diff-btn" onclick="toggleCodeDiff()" title="查看该文件的改动 Diff（改动前 vs 当前）" style="display:none">± Diff</button>
+          <button class="ct-btn primary" id="code-save-btn" onclick="saveCodeFile()" title="保存 (Ctrl+S)" style="display:none">💾 保存</button>
+        </div>
+        <div id="code-body">
+          <div id="file-tree"><em style="color:var(--text3);font-size:.82em;padding:8px">加载中…</em></div>
+          <div id="code-editor-wrap">
+            <div id="code-editor-empty">
+              <div style="font-size:2em">📄</div>
+              <div>从左侧文件树选择文件开始编辑</div>
+              <div style="font-size:.78em;color:var(--text3);margin-top:6px">
+                Monaco Editor 按需加载（首次需联网）；保存的改动可在「文件改动」中撤销</div>
+            </div>
+            <div id="code-editor"></div>
+          </div>
+        </div>
+      </div>
+      <div id="rp-panel-view">
       <div class="section">
         <h3>📊 实时状态</h3>
         <div class="stat-grid">
@@ -147,6 +175,7 @@
           <em style="color:var(--text3)">暂无工具调用记录</em>
         </div>
       </div>
+      </div><!-- /rp-panel-view -->
     </div>
   </div>
 </div>
@@ -186,5 +215,8 @@
 <script src="/static/js/theme.js"></script>
 <script src="/static/js/workspace.js"></script>
 <script src="/static/js/templates.js"></script>
+<script src="/static/js/editor.js"></script>
+<script src="/static/js/experts.js"></script>
+<script src="/static/js/team.js"></script>
 </body>
 </html>

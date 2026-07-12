@@ -44,6 +44,7 @@ function handleWS(data) {
     case 'loop_observation': loopObservation(data); break;
     case 'loop_done': break;
     case 'approval_request': showApprovalDialog(data); break;
+    case 'team_activity': onTeamActivity(data); break;
     // ── 执行过程实时展示 ──
     case 'plan_created': execPlanCreated(data); break;
     case 'plan_step_start': execPlanStepStart(data); break;

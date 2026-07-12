@@ -240,3 +240,14 @@ button.locked .lock-ico{font-size:.72em;margin-left:3px;opacity:.9}
 .bubble .md-table tbody tr:hover td{background:var(--bg1)}
 .bubble del{color:var(--text3)}
 .bubble i{color:var(--text2)}
+
+/* ── 🎓 专家市场卡片 ── */
+.expert-card{display:flex;align-items:center;gap:12px;padding:11px 13px;margin-top:8px;
+  border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg1);transition:var(--transition)}
+.expert-card:hover{border-color:var(--border-focus)}
+.expert-card.active{border-color:var(--green);background:var(--green-bg)}
+.expert-card .ec-icon{font-size:1.5em;flex-shrink:0}
+.expert-card .ec-body{flex:1;min-width:0}
+.expert-card .ec-desc{font-size:.76em;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.expert-card .ec-actions{display:flex;gap:6px;flex-shrink:0;align-items:center}
+.ec-btn{padding:4px 12px;font-size:.76em;border-radius:6px}

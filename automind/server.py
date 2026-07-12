@@ -1007,6 +1007,315 @@ async def api_list_html(limit: int = 30):
     return [{"path": rel, "mtime": mt} for mt, rel in files[:limit]]
 
 
+# ═══════════════════════════════════════════════════════════
+# REST API — 专家系统（官方精选 / 自建 / 激活；进阶能力按版本门控）
+# ═══════════════════════════════════════════════════════════
+
+from automind.core.experts import COMMUNITY_MAX_CUSTOM as _EXPERT_LIMIT  # noqa: E402
+from automind.core.experts import STORE as _experts  # noqa: E402, N811
+
+
+def _expert_visible(e: dict, sid: str) -> bool:
+    """企业审批流开启时：他人分享的专家须已审批才可见。"""
+    if e.get("owner") in ("official", sid) or not _edition.has_feature("expert_approval"):
+        return True
+    return bool(e.get("shared")) and bool(e.get("approved"))
+
+
+@app.get("/api/experts")
+async def api_experts(session_id: str = "default"):
+    """已安装专家 + 官方目录 + 当前激活项与版本能力开关。"""
+    installed = [e for e in _experts.installed() if _expert_visible(e, session_id)]
+    return {
+        "installed": installed,
+        "official": _experts.official_catalog(),
+        "active": _read_config().get("active_expert", ""),
+        "custom_count": _experts.custom_count(),
+        "custom_limit": (None if _edition.has_feature("experts_pro")
+                         else _EXPERT_LIMIT),
+        "pro": _edition.has_feature("experts_pro"),
+        "approval": _edition.has_feature("expert_approval"),
+    }
+
+
+@app.post("/api/experts/install")
+async def api_experts_install(data: dict):
+    """一键安装官方精选专家。"""
+    expert, err = _experts.install_official((data.get("id") or "").strip())
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    return {"status": "ok", "expert": expert}
+
+
+@app.post("/api/experts")
+async def api_experts_create(data: dict):
+    """创建自己的专家（社区版最多 3 个；experts_pro 无限）。"""
+    sid = data.get("session_id") or "default"
+    if data.get("shared") and not _edition.has_feature("experts_pro"):
+        return JSONResponse({"error": _edition.upgrade_hint("experts_pro"),
+                             "feature": "experts_pro"}, status_code=403)
+    expert, err = _experts.create(
+        data, owner=sid,
+        unlimited=_edition.has_feature("experts_pro"),
+        needs_approval=_edition.has_feature("expert_approval") and bool(data.get("shared")))
+    if err:
+        return JSONResponse({"error": err}, status_code=400)
+    return {"status": "ok", "expert": expert}
+
+
+@app.delete("/api/experts/{eid}")
+async def api_experts_delete(eid: str):
+    cfg = _read_config()
+    if cfg.get("active_expert") == eid:
+        cfg["active_expert"] = ""
+        _write_config(cfg)
+    if _experts.delete(eid):
+        return {"status": "ok"}
+    return JSONResponse({"error": f"专家不存在: {eid}"}, status_code=404)
+
+
+@app.post("/api/experts/activate")
+async def api_experts_activate(data: dict):
+    """激活/取消激活专家（激活后所有任务带该角色设定执行）。"""
+    eid = (data.get("id") or "").strip()
+    if eid and _experts.get(eid) is None:
+        return JSONResponse({"error": f"专家不存在: {eid}"}, status_code=404)
+    cfg = _read_config()
+    cfg["active_expert"] = eid
+    _write_config(cfg)
+    return {"status": "ok", "active": eid}
+
+
+def _apply_expert(task: str) -> str:
+    """任务执行前注入当前激活专家的角色设定（所有交互模式生效）。"""
+    eid = _read_config().get("active_expert", "")
+    if not eid:
+        return task
+    expert = _experts.get(eid)
+    if expert is None:
+        return task
+    _experts.bump_usage(eid)
+    return (f"【专家模式 · {expert['icon']} {expert['name']}】\n"
+            f"{expert['prompt']}\n---\n{task}")
+
+
+# ═══════════════════════════════════════════════════════════
+# REST API — 团队协作（任务分配 / 活动通知；共享语义见手册 8.14）
+# ═══════════════════════════════════════════════════════════
+
+_TEAM_FILE = Path(".automind") / "team_tasks.json"
+
+
+def _team_load() -> list[dict]:
+    try:
+        if _TEAM_FILE.exists():
+            data = json.loads(_TEAM_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return data
+    except Exception:
+        pass
+    return []
+
+
+def _team_save(items: list[dict]) -> None:
+    try:
+        _TEAM_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _TEAM_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2),
+                              encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _team_event(sid: str, task: str, record: dict) -> dict:
+    """构造任务完成的团队活动事件（含本次改动的文件数）。"""
+    from automind.tools.file_editor import JOURNAL
+    return {"type": "team_activity", "kind": "task_done", "sid": sid,
+            "task": (task or "")[:80], "success": bool(record.get("success")),
+            "interaction": record.get("interaction", ""),
+            "changed_files": len({c["path"] for c in JOURNAL.entries()[:20]}),
+            "time": time.strftime("%H:%M:%S")}
+
+
+@app.get("/api/team/tasks")
+async def api_team_tasks():
+    return {"tasks": _team_load()}
+
+
+@app.post("/api/team/tasks")
+async def api_team_task_add(data: dict):
+    """分配一个团队任务（title 必填；assignee 为成员名/会话名）。"""
+    title = (data.get("title") or "").strip()[:120]
+    if not title:
+        return JSONResponse({"error": "title 必填"}, status_code=400)
+    items = _team_load()
+    task = {"id": uuid.uuid4().hex[:8], "title": title,
+            "assignee": (data.get("assignee") or "").strip()[:40],
+            "desc": (data.get("desc") or "").strip()[:500],
+            "status": "todo", "creator": (data.get("creator") or "").strip()[:40],
+            "created": time.strftime("%Y-%m-%d %H:%M")}
+    items.append(task)
+    _team_save(items)
+    await _broadcast({"type": "team_activity", "kind": "task_assigned",
+                      "title": title, "assignee": task["assignee"],
+                      "sid": data.get("session_id") or ""})
+    return {"status": "ok", "task": task}
+
+
+@app.post("/api/team/tasks/{tid}")
+async def api_team_task_update(tid: str, data: dict):
+    """更新团队任务状态：todo / doing / done。"""
+    status = (data.get("status") or "").strip()
+    if status not in ("todo", "doing", "done"):
+        return JSONResponse({"error": "status 必须是 todo/doing/done"}, status_code=400)
+    items = _team_load()
+    for t in items:
+        if t["id"] == tid:
+            t["status"] = status
+            _team_save(items)
+            return {"status": "ok", "task": t}
+    return JSONResponse({"error": f"任务不存在: {tid}"}, status_code=404)
+
+
+@app.delete("/api/team/tasks/{tid}")
+async def api_team_task_delete(tid: str):
+    items = _team_load()
+    kept = [t for t in items if t["id"] != tid]
+    if len(kept) == len(items):
+        return JSONResponse({"error": f"任务不存在: {tid}"}, status_code=404)
+    _team_save(kept)
+    return {"status": "ok"}
+
+
+# ═══════════════════════════════════════════════════════════
+# REST API — 代码编辑器（Web IDE：文件树 / 读写 / Diff 预览）
+# ═══════════════════════════════════════════════════════════
+
+_TREE_EXCLUDE = {".git", "__pycache__", "node_modules", ".automind", ".reasonix",
+                 ".venv", "venv", "dist", "build", ".idea", ".vscode",
+                 ".pytest_cache", ".ruff_cache", ".mypy_cache", ".claude"}
+_EDITOR_MAX_BYTES = 1_500_000  # 编辑器单文件上限（约 1.5MB 文本）
+
+
+def _editor_root() -> Path:
+    return Path(get_agent().config.project_root).resolve()
+
+
+def _editor_target(path: str) -> tuple[Path | None, str]:
+    """把（相对/绝对）路径解析到项目根内；越界返回错误。"""
+    root = _editor_root()
+    try:
+        p = Path(path)
+        target = (root / p).resolve() if not p.is_absolute() else p.resolve()
+    except Exception:
+        return None, "非法路径"
+    if root not in target.parents and target != root:
+        return None, "路径超出项目目录范围"
+    return target, ""
+
+
+@app.get("/api/files/tree")
+async def api_files_tree(limit: int = 800, depth: int = 6):
+    """项目文件树（扁平列表，前端折叠渲染）；排除依赖/缓存目录。"""
+    root = _editor_root()
+    entries: list[dict] = []
+
+    def _walk(base: Path, level: int) -> None:
+        if level > depth or len(entries) >= limit:
+            return
+        try:
+            children = sorted(base.iterdir(),
+                              key=lambda p: (not p.is_dir(), p.name.lower()))
+        except Exception:
+            return
+        for p in children:
+            if len(entries) >= limit:
+                return
+            if p.name in _TREE_EXCLUDE or p.name.startswith("."):
+                continue
+            rel = str(p.relative_to(root)).replace("\\", "/")
+            if p.is_dir():
+                entries.append({"path": rel, "dir": True, "level": level})
+                _walk(p, level + 1)
+            else:
+                entries.append({"path": rel, "dir": False, "level": level,
+                                "size": p.stat().st_size})
+
+    _walk(root, 0)
+    return {"root": str(root), "entries": entries,
+            "truncated": len(entries) >= limit}
+
+
+@app.get("/api/files/read")
+async def api_files_read(path: str):
+    """读取项目内文本文件（供编辑器打开）。"""
+    target, err = _editor_target(path)
+    if target is None:
+        return JSONResponse({"error": err}, status_code=403)
+    if not target.is_file():
+        return JSONResponse({"error": f"文件不存在: {path}"}, status_code=404)
+    if target.stat().st_size > _EDITOR_MAX_BYTES:
+        return JSONResponse({"error": "文件过大，编辑器仅支持 1.5MB 以内的文本文件"},
+                            status_code=413)
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"path": path, "content": content,
+            "size": target.stat().st_size, "mtime": target.stat().st_mtime}
+
+
+@app.post("/api/files/write")
+async def api_files_write(data: dict):
+    """保存编辑器内容（前像记入改动日志 → 右栏「文件改动」可撤销）。"""
+    from automind.tools.file_editor import JOURNAL
+    path = (data.get("path") or "").strip()
+    content = data.get("content")
+    if not path or not isinstance(content, str):
+        return JSONResponse({"error": "path 与 content 必填"}, status_code=400)
+    if len(content.encode("utf-8", errors="ignore")) > _EDITOR_MAX_BYTES:
+        return JSONResponse({"error": "内容过大（上限 1.5MB）"}, status_code=413)
+    target, err = _editor_target(path)
+    if target is None:
+        return JSONResponse({"error": err}, status_code=403)
+    try:
+        existed = target.exists()
+        if existed:
+            try:
+                JOURNAL.record(str(target),
+                               target.read_text(encoding="utf-8"), "editor")
+            except Exception:
+                pass  # 前像读不出（二进制等）则不记录，仍允许保存
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            JOURNAL.record(str(target), None, "editor")
+        target.write_text(content, encoding="utf-8")
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    logger.info("editor_saved", path=path, size=len(content))
+    return {"status": "ok", "path": path, "size": len(content),
+            "created": not existed}
+
+
+@app.get("/api/changes/diff")
+async def api_changes_diff(path: str):
+    """Diff 预览数据：该文件的最早前像（改动前）与当前内容。"""
+    from automind.tools.file_editor import JOURNAL
+    target, err = _editor_target(path)
+    if target is None:
+        return JSONResponse({"error": err}, status_code=403)
+    pre = JOURNAL.pre_image(str(target))
+    if pre is None:
+        return JSONResponse({"error": "该文件没有记录在案的改动"}, status_code=404)
+    current = ""
+    if target.is_file():
+        try:
+            current = target.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            current = ""
+    return {"path": path, "before": pre["before"] or "",
+            "after": current, "created": pre["created"]}
+
+
 @app.post("/api/config/project")
 async def api_set_project(data: dict):
     """设置 Agent 工作的本地项目目录。"""
@@ -1614,6 +1923,7 @@ async def api_run(data: dict):
 
     if not task and not images:
         return JSONResponse({"error": "任务内容为空"}, status_code=400)
+    task = _apply_expert(task)  # 激活的专家角色设定注入（全部模式）
 
     agent = get_agent()
 
@@ -1767,6 +2077,7 @@ async def api_run(data: dict):
             "duration_ms": round(result.duration_ms, 1),
             "plan": record["plan"],
         })
+        await _broadcast(_team_event(chat_sid, task, record))
         return record
 
     except _edition.FeatureNotAvailable as e:
@@ -1895,6 +2206,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     chat_sid = data.get("session_id") or "default"  # 多用户会话隔离
     if not task and not images:
         return
+    task = _apply_expert(task)  # 激活的专家角色设定注入（全部模式）
 
     agent = get_agent()
     if interaction:
@@ -2048,6 +2360,8 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         _push_history(record)
         _accumulate_tokens(record)
         await ws.send_json({"type": "task_complete", **record})
+        # 团队协作：向所有在线成员广播活动（同事的 Agent 改了文件 → 通知你）
+        await _broadcast(_team_event(chat_sid, task, record))
 
     except asyncio.CancelledError:
         try:
@@ -2144,7 +2458,8 @@ def _attach_extensions() -> None:
     ctx = _build_server_ctx()
     for name in ("scheduler", "advanced_stats", "session_pool",
                  "custom_templates", "audit_export",
-                 "sso_ldap", "rbac", "model_gateway"):
+                 "sso_ldap", "rbac", "model_gateway",
+                 "experts_pro", "expert_approval"):
         feature = _edition.get_feature(name)
         if feature is not None and hasattr(feature, "attach"):
             try:
@@ -2189,6 +2504,16 @@ def _attach_extensions() -> None:
     for method, path in (("GET", "/api/gateway"), ("POST", "/api/gateway"),
                          ("GET", "/api/gateway/check")):
         app.add_api_route(path, _locked("model_gateway"), methods=[method])
+    # 专家进阶（专业版）
+    for method, path in (("GET", "/api/experts/export"),
+                         ("POST", "/api/experts/import"),
+                         ("GET", "/api/experts/stats"),
+                         ("POST", "/api/experts/{sid}/share")):
+        app.add_api_route(path, _locked("experts_pro"), methods=[method])
+    # 企业专家市场审批（企业版）
+    for method, path in (("GET", "/api/experts/pending"),
+                         ("POST", "/api/experts/{sid}/approve")):
+        app.add_api_route(path, _locked("expert_approval"), methods=[method])
 
     logger.info("edition_ready", edition=_edition.get_edition(),
                 features=[k for k, v in _edition.feature_flags().items() if v])

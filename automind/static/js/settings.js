@@ -522,6 +522,8 @@ document.querySelectorAll('#sidebar nav button').forEach(btn => {
     else if (view === 'audit') loadAuditView();
     else if (view === 'stats') loadStatsView();
     else if (view === 'schedule') loadScheduleView();
+    else if (view === 'experts') loadExpertsView();
+    else if (view === 'team') loadTeamView();
   });
 });
 

@@ -47,8 +47,8 @@ class TestSkeleton:
         css = [a for a in assets if a.endswith(".css")]
         js = [a for a in assets if a.endswith(".js")]
         assert len(css) == 5, css
-        # v0.7：+ theme / workspace / templates 三个特性模块
-        assert len(js) == 9, js
+        # v0.7 + theme/workspace/templates；v0.9 + editor/experts/team
+        assert len(js) == 12, js
         # 加载顺序必须保持（core 最先；特性模块在基础六件套之后）
         assert js[0] == "js/core.js"
         assert js[:6] == ["js/core.js", "js/ws.js", "js/chat.js",

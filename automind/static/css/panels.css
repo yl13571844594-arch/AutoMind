@@ -4,7 +4,47 @@
   backdrop-filter: blur(24px) saturate(140%); -webkit-backdrop-filter: blur(24px) saturate(140%);
   border-left: 1px solid rgba(123,159,255,.1);
   display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
+  transition: width .22s ease;
 }
+/* 📄 代码标签激活时右栏加宽（不遮挡聊天区，仅压缩其宽度） */
+#right-panel.code-wide { width: min(54vw, 780px); overflow: hidden; }
+
+/* 右栏标签（📊 面板 / 📄 代码） */
+#rp-tabs { display: flex; gap: 4px; padding: 8px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+#rp-tabs button {
+  flex: 1; padding: 7px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--bg0); color: var(--text2); font-size: .8em; cursor: pointer; transition: var(--transition);
+}
+#rp-tabs button:hover { color: var(--text); background: var(--bg2); }
+#rp-tabs button.active { background: var(--accent-grad); border-color: transparent; color: #fff; font-weight: 600; }
+
+/* 代码视图：工具条 + 文件树 + 编辑器 */
+#rp-code-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#code-toolbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+#code-path { flex: 1; font-family: var(--mono); font-size: .74em; color: var(--text2);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ct-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg2); color: var(--text); font-size: .76em; cursor: pointer; transition: var(--transition); }
+.ct-btn:hover { border-color: var(--border-focus); }
+.ct-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ct-btn.on { color: var(--accent); border-color: var(--accent); }
+#code-body { flex: 1; display: flex; min-height: 0; }
+#file-tree { width: 190px; flex-shrink: 0; overflow-y: auto; border-right: 1px solid var(--border); padding: 6px 4px; }
+.ft-item { padding: 3px 6px; font-size: .78em; color: var(--text2); cursor: pointer;
+  border-radius: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ft-item:hover { background: var(--bg2); color: var(--text); }
+.ft-file.active { background: var(--bg3); color: var(--text); font-weight: 600; }
+.ft-dir { color: var(--text); font-weight: 500; }
+.ft-caret { display: inline-block; width: 10px; font-size: .8em; color: var(--text3); }
+#code-editor-wrap { flex: 1; position: relative; min-width: 0; display: flex; flex-direction: column; }
+#code-editor { flex: 1; min-height: 0; display: none; }
+#code-editor-empty { flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; gap: 8px; color: var(--text2); font-size: .86em; text-align: center; padding: 20px; }
+#code-fallback { width: 100%; height: calc(100% - 26px); resize: none; border: none; outline: none;
+  background: var(--bg0); color: var(--text); font-family: var(--mono); font-size: 13px; padding: 10px; }
 #right-panel .section { padding: 16px; border-bottom: 1px solid var(--border); }
 #right-panel h3 {
   font-size: .76em; text-transform: uppercase; letter-spacing: .06em;

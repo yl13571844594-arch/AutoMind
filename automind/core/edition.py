@@ -69,9 +69,11 @@ COMMERCIAL_FEATURES: dict[str, tuple[str, str]] = {
     "custom_templates": (EDITION_PRO, "自定义模板"),
     "audit_export": (EDITION_PRO, "审计报告导出（PDF）"),
     "session_pool": (EDITION_ENTERPRISE, "多用户会话池（执行态隔离）"),
+    "experts_pro": (EDITION_PRO, "专家进阶（无限创建/分享/导入导出/统计）"),
     "sso_ldap": (EDITION_ENTERPRISE, "SSO / LDAP 单点登录集成"),
     "rbac": (EDITION_ENTERPRISE, "细粒度权限（RBAC）"),
     "model_gateway": (EDITION_ENTERPRISE, "私有模型网关"),
+    "expert_approval": (EDITION_ENTERPRISE, "企业专家市场（审批发布）"),
 }
 
 _EDITION_LABELS = {
