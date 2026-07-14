@@ -74,6 +74,11 @@ COMMERCIAL_FEATURES: dict[str, tuple[str, str]] = {
     "rbac": (EDITION_ENTERPRISE, "细粒度权限（RBAC）"),
     "model_gateway": (EDITION_ENTERPRISE, "私有模型网关"),
     "expert_approval": (EDITION_ENTERPRISE, "企业专家市场（审批发布）"),
+    "rag_pro": (EDITION_PRO, "知识库进阶（无限文档/多库/Reranker/引用溯源）"),
+    "kb_enterprise": (EDITION_ENTERPRISE, "知识库企业版（混合检索/热度统计/检索审计/批量导入）"),
+    "semantic_cache": (EDITION_PRO, "语义缓存（相似问题秒回，省 Token）"),
+    "model_router": (EDITION_PRO, "模型智能路由（按任务复杂度分级选模型）"),
+    "cost_dashboard": (EDITION_ENTERPRISE, "成本仪表盘（模型成本/缓存节省分析）"),
 }
 
 _EDITION_LABELS = {

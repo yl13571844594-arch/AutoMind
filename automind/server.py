@@ -549,7 +549,15 @@ async def api_status(interaction: str = ""):
         "sessions": len(_active_sessions),
         "history": len(_task_history),
         "token_totals": _token_totals,
+        "quota": _quota_status(),
     }
+
+
+def _quota_status() -> dict:
+    """限额摘要（内嵌于 /api/status，避免前端额外请求）。"""
+    from automind.core import quota as q
+    return {"daily_used": q.tasks_used_today(), "daily_limit": q.daily_limit(),
+            "workspace_limit": q.workspace_limit()}
 
 
 @app.get("/api/config/mode-models")
@@ -1100,6 +1108,218 @@ def _apply_expert(task: str) -> str:
 
 
 # ═══════════════════════════════════════════════════════════
+# REST API — RAG 知识库（社区版基础；进阶路由由 rag_pro 扩展注册）
+# ═══════════════════════════════════════════════════════════
+
+from automind.core import quota as _quota  # noqa: E402
+from automind.rag import get_store as _kb_store  # noqa: E402
+
+# 社区版限额：5 个文档 / 10MB 总量 / 仅默认知识库
+_KB_FREE_DOCS = 5
+_KB_FREE_SIZE = 10 * 1024 * 1024
+
+
+def _kb_limits() -> dict:
+    """当前版本的知识库限额（None=不限）。"""
+    rag_pro = _edition.get_feature("rag_pro")
+    if rag_pro is not None:
+        return {"docs": None, "size": rag_pro.size_limit(), "multi_kb": True}
+    return {"docs": _KB_FREE_DOCS, "size": _KB_FREE_SIZE, "multi_kb": False}
+
+
+@app.get("/api/kb")
+async def api_kb_list():
+    """知识库总览：库列表 + 文档 + 限额 + 设置。"""
+    store = _kb_store()
+    limits = _kb_limits()
+    return {
+        "kbs": store.list_kbs(),
+        "docs": store.list_docs(),
+        "total_size": store.total_size(),
+        "limits": limits,
+        "pro": limits["multi_kb"],
+        "enterprise": _edition.has_feature("kb_enterprise"),
+        "auto_retrieve": bool(_read_config().get("kb_auto", True)),
+        "settings": store.get_settings(),
+    }
+
+
+@app.post("/api/kb/upload")
+async def api_kb_upload(data: dict):
+    """上传文档（JSON：{name, content_b64, kb?}），解析 → 分段 → embedding。"""
+    import base64
+
+    name = (data.get("name") or "").strip()
+    b64 = data.get("content_b64") or ""
+    kb_id = (data.get("kb") or "default").strip() or "default"
+    if not name or not b64:
+        return JSONResponse({"error": "name 与 content_b64 必填"}, status_code=400)
+    try:
+        raw = base64.b64decode(b64.split(",", 1)[-1])
+    except Exception:
+        return JSONResponse({"error": "content_b64 解码失败"}, status_code=400)
+
+    store = _kb_store()
+    limits = _kb_limits()
+    if not limits["multi_kb"] and kb_id != "default":
+        return JSONResponse({"error": _edition.upgrade_hint("rag_pro"),
+                             "feature": "rag_pro"}, status_code=403)
+    if limits["docs"] is not None and store.doc_count() >= limits["docs"]:
+        return JSONResponse(
+            {"error": f"社区版知识库最多 {limits['docs']} 个文档。"
+                      "升级专业版可解锁无限文档 / 200MB / 多知识库。"},
+            status_code=403)
+    if limits["size"] is not None and store.total_size() + len(raw) > limits["size"]:
+        mb = limits["size"] // (1024 * 1024)
+        return JSONResponse(
+            {"error": f"知识库总量将超过 {mb}MB 上限，请删除部分文档或升级版本。"},
+            status_code=403)
+    try:
+        meta = store.add_document(name, raw, kb_id)
+    except ValueError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+    return {"status": "ok", "doc": meta}
+
+
+@app.delete("/api/kb/doc/{doc_id}")
+async def api_kb_doc_delete(doc_id: str):
+    if _kb_store().delete_document(doc_id):
+        return {"status": "ok"}
+    return JSONResponse({"error": f"文档不存在: {doc_id}"}, status_code=404)
+
+
+@app.post("/api/kb/search")
+async def api_kb_search(data: dict):
+    """检索知识库（专业版启用 Reranker；企业版再叠加混合检索 + 审计日志）。"""
+    query = (data.get("query") or "").strip()
+    if not query:
+        return JSONResponse({"error": "query 必填"}, status_code=400)
+    rerank = _edition.has_feature("rag_pro")
+    hybrid = _edition.has_feature("kb_enterprise")
+    store = _kb_store()
+    results = store.search(query, top_k=int(data.get("top_k", 5)),
+                           kb_id=data.get("kb") or None,
+                           rerank=rerank, hybrid=hybrid)
+    if hybrid:
+        store.log_search(query, results, source="api")
+    return {"results": results, "reranked": rerank, "hybrid": hybrid}
+
+
+@app.post("/api/kb/auto")
+async def api_kb_auto(data: dict):
+    """开关：对话中自动检索知识库。"""
+    cfg = _read_config()
+    cfg["kb_auto"] = bool(data.get("enabled", True))
+    _write_config(cfg)
+    return {"status": "ok", "auto_retrieve": cfg["kb_auto"]}
+
+
+def _apply_kb(task: str) -> str:
+    """对话前自动检索知识库，把相关片段注入任务上下文。
+
+    专业版（rag_pro）：启用 Reranker，注入内容带编号引用（引用溯源），
+    并要求模型回答时标注来源；社区版注入纯参考片段。
+    """
+    try:
+        if not _read_config().get("kb_auto", True):
+            return task
+        store = _kb_store()
+        if store.doc_count() == 0:
+            return task
+        pro = _edition.has_feature("rag_pro")
+        ent = _edition.has_feature("kb_enterprise")
+        hits = store.search(task, top_k=3, rerank=pro, hybrid=ent, min_score=0.18)
+        if not hits:
+            return task
+        if ent:
+            store.log_search(task, hits, source="chat")
+        if pro:
+            refs = "\n".join(
+                f"[{i+1}]（{h['doc_name']} · 第{h['seq']+1}段）{h['text'][:600]}"
+                for i, h in enumerate(hits))
+            return (f"【知识库参考】以下片段检索自用户知识库，回答时优先依据这些内容，"
+                    f"引用处请标注编号（如 [1]）与来源：\n{refs}\n---\n{task}")
+        refs = "\n".join(f"-（{h['doc_name']}）{h['text'][:600]}" for h in hits)
+        return (f"【知识库参考】以下片段检索自用户知识库，回答时优先参考：\n"
+                f"{refs}\n---\n{task}")
+    except Exception as e:
+        logger.warning("kb_apply_failed", error=str(e))
+        return task
+
+
+def _restore_kb_history(hist: list, task: str, injected: str,
+                        images: list | None) -> None:
+    """知识库注入只用于本轮生成，回写历史时还原为用户原话（避免上下文膨胀）。"""
+    if injected == task or images:
+        return
+    for m in reversed(hist):
+        if m.get("role") == "user":
+            m["content"] = task
+            break
+
+
+def _apply_router(agent, raw_task: str, images: list | None):
+    """模型智能路由（专业版特性 model_router）：按复杂度切换本次任务的模型。"""
+    router = _edition.get_feature("model_router")
+    if router is None:
+        return agent
+    try:
+        sel = router.select(raw_task, interaction=agent._interaction.value,
+                            has_images=bool(images))
+    except Exception as e:
+        logger.warning("router_select_failed", error=str(e))
+        return agent
+    if not sel:
+        return agent
+    if (sel["provider"], sel["model"]) != (agent.config.llm.provider,
+                                           agent.config.llm.model):
+        _rebuild_agent(provider=sel["provider"], model=sel["model"])
+        logger.info("router_switched", tier=sel.get("tier"), score=sel.get("score"),
+                    provider=sel["provider"], model=sel["model"])
+        return _agent
+    return agent
+
+
+def _cache_lookup(raw_task: str, images: list | None) -> dict | None:
+    """语义缓存查询（专业版特性 semantic_cache；多模态输入不缓存）。"""
+    if images:
+        return None
+    cache = _edition.get_feature("semantic_cache")
+    if cache is None:
+        return None
+    try:
+        return cache.lookup(raw_task)
+    except Exception as e:
+        logger.warning("cache_lookup_failed", error=str(e))
+        return None
+
+
+def _cache_store(raw_task: str, images: list | None, reply: str,
+                 tokens: int) -> None:
+    if images:
+        return
+    cache = _edition.get_feature("semantic_cache")
+    if cache is None:
+        return
+    try:
+        cache.store(raw_task, reply, tokens)
+    except Exception as e:
+        logger.warning("cache_store_failed", error=str(e))
+
+
+@app.get("/api/quota")
+async def api_quota():
+    """版本限额快照：每日任务用量 / 工作区上限 / 知识库限额。"""
+    snap = _quota.snapshot()
+    snap["workspaces"]["used"] = len(_read_config().get("workspaces", []))
+    limits = _kb_limits()
+    store = _kb_store()
+    snap["kb"] = {"docs_used": store.doc_count(), "docs_limit": limits["docs"],
+                  "size_used": store.total_size(), "size_limit": limits["size"]}
+    return snap
+
+
+# ═══════════════════════════════════════════════════════════
 # REST API — 团队协作（任务分配 / 活动通知；共享语义见手册 8.14）
 # ═══════════════════════════════════════════════════════════
 
@@ -1353,6 +1573,11 @@ async def api_workspace_add(data: dict):
         return JSONResponse({"error": f"目录不存在: {path}"}, status_code=400)
     cfg = _read_config()
     spaces = [w for w in cfg.get("workspaces", []) if w.get("name") != name]
+    # 版本限额：工作区数量（社区 3 / 专业 30 / 企业不限）；同名更新不占新额度
+    ok, reason = _quota.check_workspace(len(spaces))
+    if not ok:
+        return JSONResponse({"error": reason, "quota": _quota.snapshot()},
+                            status_code=403)
     spaces.append({"name": name, "path": str(p.resolve())})
     cfg["workspaces"] = spaces
     _write_config(cfg)
@@ -1923,6 +2148,7 @@ async def api_run(data: dict):
 
     if not task and not images:
         return JSONResponse({"error": "任务内容为空"}, status_code=400)
+    raw_task = task                 # 语义缓存以用户原文为键（不含注入前缀）
     task = _apply_expert(task)  # 激活的专家角色设定注入（全部模式）
 
     agent = get_agent()
@@ -1956,6 +2182,9 @@ async def api_run(data: dict):
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
+    # 模型智能路由（专业版 2 级 / 企业版 N 级）：按复杂度切换本次任务的模型
+    agent = _apply_router(agent, raw_task, images)
+
     if agent.llm is None:
         err_detail = getattr(agent, "_llm_init_error", "")
         hint = (
@@ -1969,6 +2198,12 @@ async def api_run(data: dict):
         return JSONResponse(
             {"error": f"当前并发任务已达上限（{_MAX_CONCURRENT}），请稍后再试。"},
             status_code=429)
+
+    # 版本限额：每日任务次数（社区版 100 次/天；专业/企业不限）
+    allowed, deny_reason = _quota.try_consume_task()
+    if not allowed:
+        return JSONResponse({"error": deny_reason, "quota": _quota.snapshot()},
+                            status_code=429)
 
     session_id = uuid.uuid4().hex[:12]
     _active_sessions[session_id] = {
@@ -1989,9 +2224,30 @@ async def api_run(data: dict):
         if agent._interaction == InteractionMode.CHAT:
             t0 = time.perf_counter()
             hist = _get_session_history(chat_sid)
-            reply = await agent.chat(task, images=images, history=hist)
+            # 语义缓存（专业版）：相似问题直接秒回，省一次 LLM 调用
+            cached = _cache_lookup(raw_task, images)
+            if cached is not None:
+                hist.append({"role": "user", "content": raw_task})
+                hist.append({"role": "assistant", "content": cached["reply"]})
+                _save_session_history(chat_sid)
+                _active_sessions[session_id]["status"] = "success"
+                record = {
+                    "session_id": session_id, "task": raw_task, "success": True,
+                    "output": cached["reply"], "steps": 0, "backtracks": 0,
+                    "errors_corrected": 0, "tokens": 0, "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "plan": None, "interaction": "chat",
+                    "cached": True, "cache_score": cached["score"],
+                }
+                _push_history(record)
+                return record
+            task_with_kb = _apply_kb(task)   # 知识库自动检索注入
+            reply = await agent.chat(task_with_kb, images=images, history=hist)
+            _restore_kb_history(hist, task, task_with_kb, images)
             _save_session_history(chat_sid)
             usage = agent.llm.usage
+            _cache_store(raw_task, images, reply, usage.total)
             _active_sessions[session_id]["status"] = "success"
             record = {
                 "session_id": session_id, "task": task, "success": True,
@@ -2002,6 +2258,7 @@ async def api_run(data: dict):
                 "completion_tokens": usage.completion_tokens,
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "plan": None, "interaction": "chat",
+                "model": agent.config.llm.model,
             }
             _push_history(record)
             _accumulate_tokens(record)
@@ -2206,6 +2463,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     chat_sid = data.get("session_id") or "default"  # 多用户会话隔离
     if not task and not images:
         return
+    raw_task = task                 # 语义缓存/路由以用户原文为准
     task = _apply_expert(task)  # 激活的专家角色设定注入（全部模式）
 
     agent = get_agent()
@@ -2221,6 +2479,9 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
+    # 模型智能路由（专业版）：按任务复杂度切换模型
+    agent = _apply_router(agent, raw_task, images)
+
     if agent.llm is None:
         await ws.send_json({"type": "task_error",
                             "error": "LLM 未初始化，请先为该模式配置可用模型的 API Key。"})
@@ -2230,6 +2491,12 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     if _running_tasks["count"] >= _MAX_CONCURRENT:
         await ws.send_json({"type": "task_error",
                             "error": f"当前并发任务已达上限（{_MAX_CONCURRENT}），请稍后再试。"})
+        return
+
+    # 版本限额：每日任务次数（社区版 100 次/天）
+    allowed, deny_reason = _quota.try_consume_task()
+    if not allowed:
+        await ws.send_json({"type": "task_error", "error": deny_reason})
         return
 
     session_id = uuid.uuid4().hex[:12]
@@ -2268,13 +2535,42 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     try:
         # ── 对话模式：流式 ──
         if agent._interaction == InteractionMode.CHAT:
-            chunks: list[str] = []
             hist = _get_session_history(chat_sid)
-            async for delta in agent.chat_stream(task, images=images, history=hist):
+            # 语义缓存（专业版）：命中则整段回放，零 Token
+            cached = _cache_lookup(raw_task, images)
+            if cached is not None:
+                await ws.send_json({"type": "chat_chunk", "session_id": session_id,
+                                    "delta": cached["reply"]})
+                hist.append({"role": "user", "content": raw_task})
+                hist.append({"role": "assistant", "content": cached["reply"]})
+                _save_session_history(chat_sid)
+                record = {
+                    "session_id": session_id, "task": raw_task, "success": True,
+                    "output": cached["reply"], "steps": 0, "backtracks": 0,
+                    "errors_corrected": 0, "tokens": 0, "prompt_tokens": 0,
+                    "completion_tokens": 0,
+                    "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+                    "plan": None, "interaction": "chat",
+                    "cached": True, "cache_score": cached["score"],
+                }
+                _push_history(record)
+                await ws.send_json({"type": "chat_done", "session_id": session_id,
+                                    "tokens": 0, "prompt_tokens": 0,
+                                    "completion_tokens": 0, "cached": True,
+                                    "duration_ms": record["duration_ms"]})
+                return
+            chunks: list[str] = []
+            task_with_kb = _apply_kb(task)   # 知识库自动检索注入
+            async for delta in agent.chat_stream(task_with_kb, images=images,
+                                                 history=hist):
                 chunks.append(delta)
                 await ws.send_json({"type": "chat_chunk", "session_id": session_id,
                                     "delta": delta})
+            _restore_kb_history(hist, task, task_with_kb, images)
             _save_session_history(chat_sid)
+            _cache_store(raw_task, images, "".join(chunks),
+                         getattr(getattr(agent, "_last_stream_usage", None),
+                                 "total", 0) or 0)
             usage = getattr(agent, "_last_stream_usage", None) or TokenUsage()
             record = {
                 "session_id": session_id, "task": task, "success": True,
@@ -2514,6 +2810,27 @@ def _attach_extensions() -> None:
     for method, path in (("GET", "/api/experts/pending"),
                          ("POST", "/api/experts/{sid}/approve")):
         app.add_api_route(path, _locked("expert_approval"), methods=[method])
+    # 知识库进阶（专业版）：多库管理 / 手动重嵌入 / 后端与定时设置
+    for method, path in (("POST", "/api/kb/kbs"),
+                         ("DELETE", "/api/kb/kbs/{sid}"),
+                         ("POST", "/api/kb/reembed"),
+                         ("POST", "/api/kb/settings")):
+        app.add_api_route(path, _locked("rag_pro"), methods=[method])
+    # 语义缓存（专业版）
+    for method, path in (("GET", "/api/cache"), ("POST", "/api/cache/config"),
+                         ("DELETE", "/api/cache")):
+        app.add_api_route(path, _locked("semantic_cache"), methods=[method])
+    # 模型智能路由（专业版）
+    for method, path in (("GET", "/api/router"), ("POST", "/api/router"),
+                         ("POST", "/api/router/preview")):
+        app.add_api_route(path, _locked("model_router"), methods=[method])
+    # 成本仪表盘（企业版）
+    app.add_api_route("/api/costs", _locked("cost_dashboard"), methods=["GET"])
+    # 知识库企业版：热度统计 / 检索审计 / 目录批量导入
+    for method, path in (("GET", "/api/kb/stats"),
+                         ("GET", "/api/kb/search-log"),
+                         ("POST", "/api/kb/import-dir")):
+        app.add_api_route(path, _locked("kb_enterprise"), methods=[method])
 
     logger.info("edition_ready", edition=_edition.get_edition(),
                 features=[k for k, v in _edition.feature_flags().items() if v])
@@ -2679,6 +2996,11 @@ async def manual_page():
 
 @app.get("/")
 async def index():
+    # v1.0 React 前端（Vite 构建产物，资源带内容哈希无需手动 cache-bust）；
+    # 未构建时回退到经典原生 JS 界面，功能一致。
+    dist_index = STATIC_DIR / "dist" / "index.html"
+    if dist_index.exists():
+        return HTMLResponse(dist_index.read_text(encoding="utf-8"))
     html_path = STATIC_DIR / "index.html"
     if html_path.exists():
         html = html_path.read_text(encoding="utf-8")
@@ -2703,7 +3025,7 @@ def main():
     args = parser.parse_args()
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║         AutoMind Web UI v0.3.0                    ║
+║         AutoMind Web UI v1.0.0                    ║
 ║                                                  ║
 ║  打开浏览器访问: http://{args.host}:{args.port}              ║
 ║  API 文档:      http://{args.host}:{args.port}/docs         ║

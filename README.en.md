@@ -5,7 +5,14 @@
 AutoMind combines the core capabilities of Claude Code, OpenAI Codex, and Reasonix:
 MCP protocol support, a Skill system, hierarchical planning, symbolic reasoning,
 and self-correction — with a built-in **Web workbench** that works out of the box
-for chatting, working, and coding.
+for chatting, working, and coding. Since v1.0 the workbench is a modern
+React 18 + TypeScript + Ant Design app (sources in `web/`, prebuilt assets
+bundled) and ships a free **RAG knowledge base** — upload PDF/Word/MD/TXT and
+chat answers automatically retrieve and cite your documents. Pro adds
+unlimited docs / multi-KB / reranker / citations plus semantic caching and
+complexity-based model routing; Enterprise adds hybrid retrieval, doc-usage
+analytics, a retrieval audit log, a cost dashboard, and unlimited quotas
+(Community: 100 tasks/day and 3 workspaces; Pro: unlimited tasks, 30 workspaces).
 
 ## Editions: Community / Pro / Enterprise
 

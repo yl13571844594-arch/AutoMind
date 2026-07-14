@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v0.9.0</title>
+<title>AutoMind 使用手册 — v1.0.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v0.9.0</div>
+  <div class="ver">使用手册 · v1.0.0</div>
   <a href="#intro">1 · 产品简介</a>
   <a href="#quick">2 · 快速上手</a>
   <a href="#ui">3 · 界面总览</a>
@@ -199,7 +199,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v0.9.0</b></span>
+    <span class="chip">版本 <b>v1.0.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -211,6 +211,14 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <b>👥 多用户会话池、🔐 SSO/LDAP、🧩 RBAC 权限、🚪 私有模型网关</b>为<b>企业版</b> —
     由商业扩展包 <code>automind-pro</code> 提供，配置许可证（<code>AUTOMIND_LICENSE</code>）后自动激活；
     社区版对应入口显示 🔒。安全能力（鉴权/限流/脱敏/审计）不设付费墙。详见 <code>docs/EDITIONS.md</code>。
+  </div>
+  <div style="margin-top:10px;padding:12px 16px;border:1px solid rgba(123,159,255,.5);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
+    <b style="color:#7b9fff">🎉 v1.0 正式版四大升级</b> —
+    <b>🖥 界面全面重构</b>（React 18 + TypeScript + Ant Design，全部功能与操作位置不变）·
+    <b>📚 RAG 知识库</b>（上传 PDF/Word/MD/TXT，对话自动检索引用；社区版 5 文档/10MB，
+    专业版无限文档/200MB/多库/Reranker/引用溯源，企业版混合检索/热度统计/检索审计/批量导入）·
+    <b>⚡ 语义缓存 + 🧭 模型智能路由</b>（专业版：相似问题秒回 + 2 级路由；企业版：高级缓存 + N 级路由 + 💰 成本仪表盘）·
+    <b>📏 版本限额</b>（社区版每日任务 100 次 / 工作区 3 个；专业版任务不限 / 工作区 30 个；企业版全部不限）。
   </div>
   <div style="margin-top:10px;padding:12px 16px;border:1px dashed rgba(60,230,138,.35);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
     <b style="color:#3ce68a">🏢 v0.8 商业功能扩容</b> —
@@ -813,6 +821,19 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
       <p>对话模式上传图片（可多张）配视觉模型看图问答；🎤 语音实时转文字输入（Web Speech API）。</p></div>
     <div class="tile"><div class="ic">👥</div><b>多用户会话隔离</b>
       <p>每个浏览器独立会话 ID：团队共用一台服务，聊天记录互不可见、互不清除。</p></div>
+    <div class="tile"><div class="ic">📚</div><b>RAG 知识库 <span style="color:#3ce68a;font-size:.78em">v1.0 · 社区版起</span></b>
+      <p>侧边栏「📚 知识库」上传 PDF/Word/MD/TXT → 自动分段 + embedding → 对话时自动检索你的资料作答（可开关）。
+      社区版 5 文档/10MB；专业版无限文档/200MB/多库/Reranker/引用溯源/定时重嵌入/外部向量后端；
+      企业版混合检索（向量+词法）/热度统计/检索审计/目录批量导入、总量不限。</p></div>
+    <div class="tile"><div class="ic">⚡</div><b>语义缓存 <span style="color:#c9a227;font-size:.78em">🔒 专业版</span></b>
+      <p>对话模式相似问题秒回历史答案（0 Token）。专业版基础缓存（300 条/24h），
+      企业版高级缓存（2000 条/7 天 + 命中率与节省统计）。「🧭 路由与成本」视图可调阈值/清空。</p></div>
+    <div class="tile"><div class="ic">🧭</div><b>模型智能路由 <span style="color:#c9a227;font-size:.78em">🔒 专业版</span></b>
+      <p>按任务复杂度（长度/代码特征/多步骤，0~100 打分）自动分级选模型：简单问答走便宜小模型、复杂任务走强模型。
+      专业版 2 级路由，企业版 N 级 + 💰 成本仪表盘（按模型/日聚合成本 + 缓存节省）。</p></div>
+    <div class="tile"><div class="ic">📏</div><b>版本限额 <span style="color:#7b9fff;font-size:.78em">v1.0</span></b>
+      <p>社区版每日任务 100 次、工作区 3 个；专业版任务不限、工作区 30 个；企业版全部不限。
+      顶栏 📅 徽标实时显示当日用量，超限给出友好升级提示（跨天自动清零）。</p></div>
     <div class="tile"><div class="ic">⧉</div><b>输出便捷操作</b>
       <p>每条 AI 消息悬浮「⧉ 复制」；每个代码块带语言标签和独立复制按钮。</p></div>
   </div>
@@ -837,7 +858,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v0.9.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.0.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -938,7 +959,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v0.9.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.0.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

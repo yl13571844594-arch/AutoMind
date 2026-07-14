@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "0.9.0"
+version = "1.0.0"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
@@ -69,11 +69,14 @@ where = ["."]
 include = ["automind", "automind.*"]
 
 # Web 工作台静态资源必须随包分发，否则 pip 安装后界面退化为兜底页
+# v1.0：dist/ 为 React 前端构建产物（web/ 目录 pnpm build 生成），优先伺服
 [tool.setuptools.package-data]
 automind = [
     "static/*.html",
     "static/css/*.css",
     "static/js/*.js",
+    "static/dist/*.html",
+    "static/dist/assets/*",
 ]
 
 [tool.ruff]
