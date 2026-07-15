@@ -141,14 +141,19 @@ class TestChangesApi:
 
 class TestHistoryPersistence:
     def test_push_history_persists_and_caps(self, tmp_path, monkeypatch):
+        """v1.1 起任务历史持久化到 SQLite（automind/core/db.py）。"""
         from automind import server
-        monkeypatch.setattr(server, "_HISTORY_FILE", tmp_path / "hist.json")
+        from automind.core import db as db_mod
+        db = db_mod.reset_for_tests(tmp_path / "automind.db")
         monkeypatch.setattr(server, "_task_history", [])
-        for i in range(server._HISTORY_CAP + 10):
-            server._push_history({"session_id": f"s{i}", "task": f"t{i}",
-                                  "output": "o", "success": True})
-        assert len(server._task_history) == server._HISTORY_CAP
-        data = json.loads((tmp_path / "hist.json").read_text(encoding="utf-8"))
-        assert len(data) == server._HISTORY_CAP
-        assert data[-1]["session_id"] == f"s{server._HISTORY_CAP + 9}"
-        assert "time" in data[-1]
+        try:
+            for i in range(server._HISTORY_CAP + 10):
+                server._push_history({"session_id": f"s{i}", "task": f"t{i}",
+                                      "output": "o", "success": True})
+            assert len(server._task_history) == server._HISTORY_CAP
+            data = db.history_load()
+            assert len(data) == server._HISTORY_CAP
+            assert data[-1]["session_id"] == f"s{server._HISTORY_CAP + 9}"
+            assert "time" in data[-1]
+        finally:
+            db_mod.reset_for_tests(None)   # 释放临时库，避免影响其它用例

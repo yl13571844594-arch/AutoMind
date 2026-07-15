@@ -168,10 +168,8 @@ export default function ChatPanel() {
         </div>
       )}
 
-      <div style={{
-        display: 'flex', alignItems: 'flex-end', gap: 8, padding: '12px 18px 16px',
-        borderTop: '1px solid var(--border)', background: 'var(--bg1)',
-      }}>
+      <div className="input-bar">
+       <div className="input-inner">
         <button className="tpl-chip" title="添加图片（多模态）" onClick={() => fileRef.current?.click()}>📎</button>
         <button
           className="tpl-chip"
@@ -208,24 +206,11 @@ export default function ChatPanel() {
           }}
         />
         {!running ? (
-          <button
-            onClick={send}
-            title="发送 (Enter)"
-            style={{
-              width: 42, height: 42, borderRadius: 12, border: 'none', cursor: 'pointer',
-              background: 'var(--accent-grad)', color: '#fff', fontSize: '1em',
-            }}
-          >▶</button>
+          <button onClick={send} title="发送 (Enter)" className="send-btn">▶</button>
         ) : (
-          <button
-            onClick={sendStop}
-            title="停止"
-            style={{
-              width: 42, height: 42, borderRadius: 12, border: 'none', cursor: 'pointer',
-              background: 'var(--red)', color: '#fff', fontSize: '1em',
-            }}
-          >■</button>
+          <button onClick={sendStop} title="停止" className="send-btn stop">■</button>
         )}
+       </div>
       </div>
     </div>
   );

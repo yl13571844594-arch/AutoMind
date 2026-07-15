@@ -29,7 +29,12 @@ DEFAULT_KB = "default"
 
 
 class KnowledgeStore:
-    """单实例知识库存储：多库（专业版）、文档、片段与向量检索。"""
+    """单实例知识库存储：多库（专业版）、文档、片段与向量检索。
+
+    v1.1 起持久化为 SQLite（``<root>/kb.db``，WAL）；旧版 ``index.json`` /
+    ``chunks.json`` 首次打开自动一次性导入并保留原文件作备份。
+    内存中维护全量索引与片段（检索热路径零 IO），写操作增量落库。
+    """
 
     def __init__(self, root: str | Path = ".automind/kb", embedder: Any = None) -> None:
         self.root = Path(root)
@@ -38,31 +43,79 @@ class KnowledgeStore:
         self._index: dict = {"kbs": [{"id": DEFAULT_KB, "name": "默认知识库"}],
                              "docs": [], "settings": {}}
         self._chunks: list[dict] = []   # {id, doc_id, kb, seq, text, vec}
+        from automind.core.db import Database
+        self._db = Database(self.root / "kb.db")
         self._load()
 
-    # ── 持久化 ─────────────────────────────────────────
+    # ── 持久化（SQLite + 旧 JSON 一次性迁移）───────────
     def _load(self) -> None:
         try:
-            f = self.root / "index.json"
-            if f.exists():
-                data = json.loads(f.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and data.get("kbs"):
-                    self._index = data
-            cf = self.root / "chunks.json"
-            if cf.exists():
-                chunks = json.loads(cf.read_text(encoding="utf-8"))
-                if isinstance(chunks, list):
-                    self._chunks = chunks
+            self._migrate_legacy_json()
+            kbs = [{"id": r[0], "name": r[1]}
+                   for r in self._db.query("SELECT id,name FROM kb_kbs ORDER BY rowid")]
+            if not any(k["id"] == DEFAULT_KB for k in kbs):
+                kbs.insert(0, {"id": DEFAULT_KB, "name": "默认知识库"})
+                self._db.execute("INSERT OR IGNORE INTO kb_kbs(id,name) VALUES(?,?)",
+                                 (DEFAULT_KB, "默认知识库"))
+            docs = [{"id": r[0], "kb": r[1], "name": r[2], "size": r[3],
+                     "chunks": r[4], "time": r[5]}
+                    for r in self._db.query(
+                        "SELECT id,kb,name,size,chunks,time FROM kb_docs ORDER BY rowid")]
+            self._index = {
+                "kbs": kbs, "docs": docs,
+                "settings": self._db.kv_get("kb:settings", {}) or {},
+                "hit_stats": self._db.kv_get("kb:hit_stats", {}) or {},
+                "search_count": self._db.kv_get("kb:search_count", 0) or 0,
+            }
+            self._chunks = [
+                {"id": r[0], "doc_id": r[1], "kb": r[2], "seq": r[3],
+                 "text": r[4], "vec": json.loads(r[5])}
+                for r in self._db.query(
+                    "SELECT id,doc_id,kb,seq,text,vec FROM kb_chunks ORDER BY rowid")]
         except Exception as e:
             logger.warning("kb_load_failed", error=str(e))
 
-    def _save(self) -> None:
+    def _migrate_legacy_json(self) -> None:
+        """旧 index.json / chunks.json → SQLite（一次性；旧文件保留作备份）。"""
+        if self._db.kv_get("migrated:kb"):
+            return
+        self._db.kv_set("migrated:kb", True)
+        idx_f, chk_f = self.root / "index.json", self.root / "chunks.json"
+        if not idx_f.exists():
+            return
         try:
-            self.root.mkdir(parents=True, exist_ok=True)
-            (self.root / "index.json").write_text(
-                json.dumps(self._index, ensure_ascii=False), encoding="utf-8")
-            (self.root / "chunks.json").write_text(
-                json.dumps(self._chunks, ensure_ascii=False), encoding="utf-8")
+            index = json.loads(idx_f.read_text(encoding="utf-8")) or {}
+            chunks = (json.loads(chk_f.read_text(encoding="utf-8"))
+                      if chk_f.exists() else []) or []
+            for kb in index.get("kbs", []):
+                self._db.execute("INSERT OR IGNORE INTO kb_kbs(id,name) VALUES(?,?)",
+                                 (kb["id"], kb.get("name", kb["id"])))
+            self._db.executemany(
+                "INSERT OR IGNORE INTO kb_docs(id,kb,name,size,chunks,time) "
+                "VALUES(?,?,?,?,?,?)",
+                [(d["id"], d.get("kb", DEFAULT_KB), d.get("name", "?"),
+                  d.get("size", 0), d.get("chunks", 0), d.get("time", ""))
+                 for d in index.get("docs", [])])
+            self._db.executemany(
+                "INSERT OR IGNORE INTO kb_chunks(id,doc_id,kb,seq,text,vec) "
+                "VALUES(?,?,?,?,?,?)",
+                [(c["id"], c["doc_id"], c.get("kb", DEFAULT_KB), c.get("seq", 0),
+                  c.get("text", ""), json.dumps(c.get("vec", [])))
+                 for c in chunks])
+            for key in ("settings", "hit_stats", "search_count"):
+                if key in index:
+                    self._db.kv_set("kb:" + key, index[key])
+            logger.info("kb_migrated_to_sqlite",
+                        docs=len(index.get("docs", [])), chunks=len(chunks))
+        except Exception as e:
+            logger.warning("kb_migrate_failed", error=str(e))
+
+    def _save_meta(self) -> None:
+        """轻量元数据（设置/热度/检索计数）落库。"""
+        try:
+            self._db.kv_set("kb:settings", self._index.get("settings", {}))
+            self._db.kv_set("kb:hit_stats", self._index.get("hit_stats", {}))
+            self._db.kv_set("kb:search_count", self._index.get("search_count", 0))
         except Exception as e:
             logger.warning("kb_save_failed", error=str(e))
 
@@ -80,7 +133,8 @@ class KnowledgeStore:
         with self._lock:
             kb = {"id": "kb_" + uuid.uuid4().hex[:8], "name": name.strip()[:40]}
             self._index["kbs"].append(kb)
-            self._save()
+            self._db.execute("INSERT INTO kb_kbs(id,name) VALUES(?,?)",
+                             (kb["id"], kb["name"]))
             return kb
 
     def delete_kb(self, kb_id: str) -> int:
@@ -92,7 +146,9 @@ class KnowledgeStore:
             self._index["kbs"] = [k for k in self._index["kbs"] if k["id"] != kb_id]
             self._index["docs"] = [d for d in self._index["docs"] if d["kb"] != kb_id]
             self._chunks = [c for c in self._chunks if c["kb"] != kb_id]
-            self._save()
+            self._db.execute("DELETE FROM kb_kbs WHERE id=?", (kb_id,))
+            self._db.execute("DELETE FROM kb_docs WHERE kb=?", (kb_id,))
+            self._db.execute("DELETE FROM kb_chunks WHERE kb=?", (kb_id,))
             return before - len(self._index["docs"])
 
     # ── 文档 ───────────────────────────────────────────
@@ -118,16 +174,24 @@ class KnowledgeStore:
             raise ValueError("文档未提取到有效内容")
         doc_id = "doc_" + uuid.uuid4().hex[:10]
         with self._lock:
+            new_chunks = []
             for i, piece in enumerate(pieces):
-                self._chunks.append({
+                new_chunks.append({
                     "id": f"{doc_id}_{i}", "doc_id": doc_id, "kb": kb_id,
                     "seq": i, "text": piece, "vec": self._embedder.embed(piece),
                 })
+            self._chunks.extend(new_chunks)
             meta = {"id": doc_id, "kb": kb_id, "name": filename,
                     "size": len(data), "chunks": len(pieces),
                     "time": time.strftime("%Y-%m-%d %H:%M:%S")}
             self._index["docs"].append(meta)
-            self._save()
+            self._db.execute(
+                "INSERT INTO kb_docs(id,kb,name,size,chunks,time) VALUES(?,?,?,?,?,?)",
+                (doc_id, kb_id, filename, len(data), len(pieces), meta["time"]))
+            self._db.executemany(
+                "INSERT INTO kb_chunks(id,doc_id,kb,seq,text,vec) VALUES(?,?,?,?,?,?)",
+                [(c["id"], c["doc_id"], c["kb"], c["seq"], c["text"],
+                  json.dumps(c["vec"])) for c in new_chunks])
         logger.info("kb_doc_added", doc=filename, chunks=len(pieces), kb=kb_id)
         return meta
 
@@ -138,7 +202,8 @@ class KnowledgeStore:
             self._chunks = [c for c in self._chunks if c["doc_id"] != doc_id]
             changed = len(self._index["docs"]) != before
             if changed:
-                self._save()
+                self._db.execute("DELETE FROM kb_docs WHERE id=?", (doc_id,))
+                self._db.execute("DELETE FROM kb_chunks WHERE doc_id=?", (doc_id,))
             return changed
 
     def reembed_all(self) -> int:
@@ -146,8 +211,11 @@ class KnowledgeStore:
         with self._lock:
             for c in self._chunks:
                 c["vec"] = self._embedder.embed(c["text"])
+            self._db.executemany(
+                "UPDATE kb_chunks SET vec=? WHERE id=?",
+                [(json.dumps(c["vec"]), c["id"]) for c in self._chunks])
             self._index["settings"]["last_reembed"] = time.strftime("%Y-%m-%d %H:%M:%S")
-            self._save()
+            self._save_meta()
             return len(self._chunks)
 
     # ── 检索 ───────────────────────────────────────────
@@ -209,7 +277,7 @@ class KnowledgeStore:
                 for r in results:
                     stats[r["doc_id"]] = stats.get(r["doc_id"], 0) + 1
                 self._index["search_count"] = self._index.get("search_count", 0) + 1
-                self._save()
+                self._save_meta()
         except Exception:
             pass
 
@@ -227,33 +295,29 @@ class KnowledgeStore:
 
     def log_search(self, query: str, results: list[dict],
                    source: str = "api") -> None:
-        """检索审计日志（企业版）：记录查询与命中来源，容量 500 条滚动。"""
+        """检索审计日志（企业版）：SQLite 表存储，容量 500 条滚动。"""
         try:
-            f = self.root / "search_log.json"
-            log = []
-            if f.exists():
-                log = json.loads(f.read_text(encoding="utf-8")) or []
-            log.append({
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"), "source": source,
-                "query": query[:300],
-                "hits": [{"doc": r["doc_name"], "seq": r["seq"],
-                          "score": r["score"]} for r in results],
-            })
-            self.root.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps(log[-500:], ensure_ascii=False),
-                         encoding="utf-8")
+            hits = json.dumps(
+                [{"doc": r["doc_name"], "seq": r["seq"], "score": r["score"]}
+                 for r in results], ensure_ascii=False)
+            self._db.execute(
+                "INSERT INTO kb_search_log(time,source,query,hits) VALUES(?,?,?,?)",
+                (time.strftime("%Y-%m-%d %H:%M:%S"), source, query[:300], hits))
+            self._db.execute(
+                "DELETE FROM kb_search_log WHERE pos NOT IN "
+                "(SELECT pos FROM kb_search_log ORDER BY pos DESC LIMIT 500)")
         except Exception:
             pass
 
     def search_log(self, limit: int = 100) -> list[dict]:
         try:
-            f = self.root / "search_log.json"
-            if f.exists():
-                log = json.loads(f.read_text(encoding="utf-8")) or []
-                return log[-limit:][::-1]
+            rows = self._db.query(
+                "SELECT time,source,query,hits FROM kb_search_log "
+                "ORDER BY pos DESC LIMIT ?", (limit,))
+            return [{"time": r[0], "source": r[1], "query": r[2],
+                     "hits": json.loads(r[3])} for r in rows]
         except Exception:
-            pass
-        return []
+            return []
 
     # ── 设置（专业版：向量后端 / 定时重嵌入）──────────
     def get_settings(self) -> dict:
@@ -262,7 +326,7 @@ class KnowledgeStore:
     def update_settings(self, patch: dict) -> dict:
         with self._lock:
             self._index.setdefault("settings", {}).update(patch)
-            self._save()
+            self._save_meta()
             return dict(self._index["settings"])
 
 

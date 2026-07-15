@@ -158,28 +158,31 @@ def _accumulate_tokens(record: dict) -> None:
     _token_totals["tasks"] += 1
 
 
-_HISTORY_FILE = Path(".automind") / "task_history.json"
+# v1.1：任务历史持久化迁移至 SQLite（automind/core/db.py）；
+# 旧 JSON 首次启动自动导入并保留原文件作备份。
+from automind.core import db as _db_mod  # noqa: E402
+
+_HISTORY_FILE = Path(".automind") / "task_history.json"   # 旧文件（仅迁移用）
 _HISTORY_CAP = 200
 
 
 def _load_task_history() -> None:
-    """启动时恢复任务历史（关浏览器/重启服务后仍可回溯之前的产出）。"""
+    """启动时恢复任务历史（SQLite；旧 JSON 自动一次性迁移）。"""
     try:
-        if _HISTORY_FILE.exists():
-            data = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                _task_history.extend(data[-_HISTORY_CAP:])
+        db = _db_mod.get_db()
+        _db_mod.migrate_json_once(
+            db, "task_history", _HISTORY_FILE,
+            lambda data: db.history_replace(data[-_HISTORY_CAP:])
+            if isinstance(data, list) else None)
+        _task_history.extend(db.history_load()[-_HISTORY_CAP:])
     except Exception as e:
         logger.warning("history_load_failed", error=str(e))
 
 
 def _save_task_history() -> None:
-    """持久化任务历史（尽力而为，失败不影响主流程）。"""
+    """全量同步内存历史到 SQLite（删除/清空后调用；追加走 _push_history）。"""
     try:
-        _HISTORY_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _HISTORY_FILE.write_text(
-            json.dumps(_task_history[-_HISTORY_CAP:], ensure_ascii=False),
-            encoding="utf-8")
+        _db_mod.get_db().history_replace(_task_history[-_HISTORY_CAP:])
     except Exception:
         pass
 
@@ -191,7 +194,10 @@ def _push_history(record: dict) -> dict:
     record.setdefault("time", time.strftime("%Y-%m-%d %H:%M:%S"))
     _task_history.append(record)
     del _task_history[:-_HISTORY_CAP]
-    _save_task_history()
+    try:
+        _db_mod.get_db().history_append(record, cap=_HISTORY_CAP)
+    except Exception:
+        pass
     return record
 
 
@@ -1323,25 +1329,24 @@ async def api_quota():
 # REST API — 团队协作（任务分配 / 活动通知；共享语义见手册 8.14）
 # ═══════════════════════════════════════════════════════════
 
-_TEAM_FILE = Path(".automind") / "team_tasks.json"
+_TEAM_FILE = Path(".automind") / "team_tasks.json"   # 旧文件（仅迁移用）
 
 
 def _team_load() -> list[dict]:
+    """团队任务（SQLite；旧 JSON 自动一次性迁移）。"""
     try:
-        if _TEAM_FILE.exists():
-            data = json.loads(_TEAM_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, list):
-                return data
+        db = _db_mod.get_db()
+        _db_mod.migrate_json_once(
+            db, "team_tasks", _TEAM_FILE,
+            lambda data: db.team_replace(data) if isinstance(data, list) else None)
+        return db.team_load()
     except Exception:
-        pass
-    return []
+        return []
 
 
 def _team_save(items: list[dict]) -> None:
     try:
-        _TEAM_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _TEAM_FILE.write_text(json.dumps(items[-200:], ensure_ascii=False, indent=2),
-                              encoding="utf-8")
+        _db_mod.get_db().team_replace(items[-200:])
     except Exception:
         pass
 
@@ -3025,7 +3030,7 @@ def main():
     args = parser.parse_args()
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║         AutoMind Web UI v1.0.0                    ║
+║         AutoMind Web UI v1.1.0                    ║
 ║                                                  ║
 ║  打开浏览器访问: http://{args.host}:{args.port}              ║
 ║  API 文档:      http://{args.host}:{args.port}/docs         ║

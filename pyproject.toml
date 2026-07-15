@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "1.0.0"
+version = "1.1.0"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.0.0</title>
+<title>AutoMind 使用手册 — v1.1.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,11 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.0.0</div>
+  <div class="ver">使用手册 · v1.1.0</div>
+  <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
+    style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
+    border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
+    font-size:.82em;outline:none;box-sizing:border-box">
   <a href="#intro">1 · 产品简介</a>
   <a href="#quick">2 · 快速上手</a>
   <a href="#ui">3 · 界面总览</a>
@@ -188,6 +192,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <a class="sub" href="#autopilot">🔄 自主闭环</a>
   <a href="#cli">9 · 命令行与 REPL</a>
   <a href="#deploy">10 · 部署与运维</a>
+  <a class="sub" href="#storage">🗄 数据与存储</a>
   <a href="#faq">11 · 常见问题</a>
   <a href="#appendix">12 · 附录速查</a>
 </nav>
@@ -199,7 +204,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.0.0</b></span>
+    <span class="chip">版本 <b>v1.1.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -858,7 +863,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.0.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.1.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -897,6 +902,20 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="note"><b>运维接口：</b><code>GET /api/health</code>（免鉴权）返回版本 / 运行任务数 / 并发上限 / 运行时长，供探活与负载均衡。
   安装 <code>structlog</code> 输出 JSON 结构化日志，未装自动降级标准格式。服务退出自动释放 MCP / 向量库 / 模型连接池。</div>
+
+  <h3 id="storage" style="margin-top:26px">🗄 数据与存储（v1.1：SQLite）</h3>
+  <p>v1.1 起高频数据从零散 JSON 平面文件收敛到 <b>SQLite</b>（WAL 模式，并发安全、增量写入）。
+  首次启动自动把旧 JSON 数据一次性导入，<b>旧文件原地保留作备份</b>，升级零感知。</p>
+  <div class="tbl-wrap"><table>
+    <tr><th>数据</th><th>存储位置</th><th>说明</th></tr>
+    <tr><td>任务历史 / 团队任务 / 每日限额</td><td><code>.automind/automind.db</code></td><td>滚动上限 200 条历史；限额跨天自动清零</td></tr>
+    <tr><td>对话会话（多用户隔离）</td><td><code>.automind/sessions.db</code></td><td>每会话最近 200 条消息</td></tr>
+    <tr><td>知识库（文档/片段/向量/检索日志）</td><td><code>.automind/kb/kb.db</code></td><td>片段与向量增量落库，检索走内存热路径</td></tr>
+    <tr><td>配置 / API Key / 工作区</td><td><code>.automind_config.json</code></td><td>保持纯文本 JSON（体量小、可手工编辑）</td></tr>
+  </table></div>
+  <div class="note"><b>备份：</b>停止服务后整体拷贝 <code>.automind/</code> 目录与
+  <code>.automind_config.json</code> 即完成全量备份；迁移到新机器原样放回即可。
+  SQLite 文件可用任意 SQLite 工具（如 <code>sqlite3</code> CLI、DB Browser）直接查看。</div>
 </section>
 
 <!-- ═══════ 11 FAQ ═══════ -->
@@ -959,11 +978,38 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.0.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.1.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 
 </main>
 </div>
+<script>
+// 目录搜索：按关键字即时过滤左侧导航（含小节）
+(function(){
+  var inp = document.getElementById('toc-search');
+  if (!inp) return;
+  var links = Array.prototype.slice.call(document.querySelectorAll('#toc a'));
+  inp.addEventListener('input', function(){
+    var q = this.value.trim().toLowerCase();
+    links.forEach(function(a){
+      a.style.display = (!q || a.textContent.toLowerCase().indexOf(q) !== -1) ? '' : 'none';
+    });
+  });
+  // 滚动高亮当前章节
+  var secs = Array.prototype.slice.call(document.querySelectorAll('main section[id], main div[id^="m-"]'));
+  function sync(){
+    var y = window.scrollY + 120, cur = null;
+    secs.forEach(function(s){ if (s.offsetTop <= y) cur = s.id; });
+    links.forEach(function(a){
+      var on = cur && a.getAttribute('href') === '#' + cur;
+      a.style.color = on ? 'var(--acc,#7b9fff)' : '';
+      a.style.fontWeight = on ? '700' : '';
+    });
+  }
+  window.addEventListener('scroll', sync, {passive:true});
+  sync();
+})();
+</script>
 </body>
 </html>

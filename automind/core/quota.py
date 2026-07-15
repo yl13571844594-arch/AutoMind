@@ -32,7 +32,7 @@ QUOTA_RULES: dict[str, dict[str, int | None]] = {
     "enterprise": {"daily_tasks": None, "workspaces": None},
 }
 
-_QUOTA_FILE = Path(".automind") / "quota.json"
+_QUOTA_FILE = Path(".automind") / "quota.json"   # 旧文件（仅迁移用）
 _lock = threading.Lock()
 _state: dict = {"date": "", "tasks": 0}
 _loaded = False
@@ -43,24 +43,37 @@ def _today() -> str:
 
 
 def _load() -> None:
+    """加载计数（v1.1 起 SQLite kv 表；旧 quota.json 自动一次性迁移）。"""
     global _loaded
     if _loaded:
         return
     _loaded = True
     try:
-        if _QUOTA_FILE.exists():
-            data = json.loads(_QUOTA_FILE.read_text(encoding="utf-8"))
-            if isinstance(data, dict):
-                _state.update({"date": data.get("date", ""),
-                               "tasks": int(data.get("tasks", 0))})
+        from automind.core.db import get_db, migrate_json_once
+        db = get_db()
+        migrate_json_once(
+            db, "quota", _QUOTA_FILE,
+            lambda data: db.kv_set("quota", data) if isinstance(data, dict) else None)
+        data = db.kv_get("quota")
+        if isinstance(data, dict):
+            _state.update({"date": data.get("date", ""),
+                           "tasks": int(data.get("tasks", 0))})
     except Exception:
-        pass
+        # SQLite 不可用（极端环境）→ 回退旧 JSON 读取
+        try:
+            if _QUOTA_FILE.exists():
+                data = json.loads(_QUOTA_FILE.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    _state.update({"date": data.get("date", ""),
+                                   "tasks": int(data.get("tasks", 0))})
+        except Exception:
+            pass
 
 
 def _save() -> None:
     try:
-        _QUOTA_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _QUOTA_FILE.write_text(json.dumps(_state), encoding="utf-8")
+        from automind.core.db import get_db
+        get_db().kv_set("quota", dict(_state))
     except Exception:
         pass
 

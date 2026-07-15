@@ -44,9 +44,10 @@ export default function Header() {
         key={m}
         onClick={() => switchMode(m)}
         title={MODE_HINTS[m]}
+        className={mode === m ? 'on' : ''}
         style={{
           display: 'flex', alignItems: 'center', gap: 5, padding: '6px 13px',
-          border: 'none', borderRadius: 8, cursor: 'pointer', fontSize: '.84em',
+          border: 'none', borderRadius: 9, cursor: 'pointer', fontSize: '.84em',
           background: mode === m ? 'var(--accent-grad)' : 'transparent',
           color: mode === m ? '#fff' : 'var(--text2)', fontWeight: mode === m ? 600 : 400,
         }}
@@ -105,14 +106,8 @@ export default function Header() {
 
   return (
     <>
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 8, padding: '10px 16px',
-        borderBottom: '1px solid var(--border)', background: 'var(--bg1)', flexWrap: 'wrap',
-      }}>
-        <div style={{
-          display: 'flex', alignItems: 'center', gap: 2, background: 'var(--bg2)',
-          borderRadius: 10, padding: 3, border: '1px solid var(--border)',
-        }}>
+      <div className="hdr">
+        <div className="mode-seg">
           {modeBtn('chat', '💬')}
           {modeBtn('work', '⚙️')}
           {modeBtn('coding', '💻')}

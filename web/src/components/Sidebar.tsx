@@ -35,17 +35,8 @@ export default function Sidebar() {
   const navBtn = ([v, icon, label, feature]: [View, string, string, string?]) => {
     const locked = feature && !featureOn(feature) && v !== 'router';
     return (
-      <button
-        key={v}
-        onClick={() => setView(v)}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 10, width: '100%',
-          padding: '9px 14px', border: 'none', borderRadius: 10, cursor: 'pointer',
-          background: view === v ? 'var(--bg3)' : 'transparent',
-          color: view === v ? 'var(--text)' : 'var(--text2)',
-          fontSize: '.88em', fontWeight: view === v ? 600 : 400, textAlign: 'left',
-        }}
-      >
+      <button key={v} onClick={() => setView(v)}
+        className={'nav-btn' + (view === v ? ' active' : '')}>
         <span>{icon}</span><span style={{ flex: 1 }}>{label}</span>
         {locked && <span title="专业版功能">🔒</span>}
       </button>
@@ -72,14 +63,11 @@ export default function Sidebar() {
   ];
 
   return (
-    <aside style={{
-      width: 216, flexShrink: 0, display: 'flex', flexDirection: 'column',
-      borderRight: '1px solid var(--border)', background: 'var(--bg1)', padding: '14px 10px 10px',
-    }}>
+    <aside className="sidebar">
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '2px 8px 14px' }}>
         <span style={{
           width: 12, height: 12, borderRadius: '50%', background: 'var(--accent-grad)',
-          boxShadow: '0 0 10px var(--accent-glow)',
+          boxShadow: '0 0 12px var(--accent-glow)',
         }} />
         <b style={{ fontSize: '1.02em' }}>AutoMind</b>
         <small style={{ color: 'var(--text3)' }}>{version ? 'v' + version : ''}</small>
@@ -96,11 +84,7 @@ export default function Sidebar() {
 
       <div style={{ flex: 1 }} />
       <Dropdown menu={{ items: settingsItems }} placement="topLeft" trigger={['click']}>
-        <button style={{
-          display: 'flex', alignItems: 'center', gap: 8, width: '100%', padding: '10px 14px',
-          border: '1px solid var(--border)', borderRadius: 10, cursor: 'pointer',
-          background: 'var(--bg2)', color: 'var(--text)', fontSize: '.88em',
-        }}>
+        <button className="settings-btn">
           <span>⚙️</span><span>设置</span><span style={{ marginLeft: 'auto', color: 'var(--text3)' }}>▴</span>
         </button>
       </Dropdown>

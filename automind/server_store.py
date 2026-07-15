@@ -22,12 +22,13 @@ class Store:
 
     def __init__(self, env_key_map: dict[str, str] | None = None) -> None:
         self._config_file = Path(".automind_config.json")
-        self.chat_file = Path(".automind") / "chat_history.json"
+        self._chat_file = Path(".automind") / "chat_history.json"
         self.chats_dir = Path(".automind") / "chats"
         self.session_histories: dict[str, list] = {}
         self._env_key_map = env_key_map or {}
         self._config_cache: dict | None = None
         self._config_cache_time: float = 0.0
+        self._session_db = None   # 惰性创建；随 chat_file 重定向（测试隔离）
 
     # ── config_file：赋值即失效缓存 ──
     @property
@@ -39,6 +40,24 @@ class Store:
         self._config_file = Path(value)
         self._config_cache = None
         self._config_cache_time = 0.0
+
+    # ── chat_file：赋值同时重定向会话 SQLite 库（跟随同目录）──
+    @property
+    def chat_file(self) -> Path:
+        return self._chat_file
+
+    @chat_file.setter
+    def chat_file(self, value) -> None:
+        self._chat_file = Path(value)
+        self._session_db = None
+
+    def _db(self):
+        """会话库：``<chat_file 同目录>/sessions.db``（生产为 .automind/sessions.db）。"""
+        if self._session_db is None:
+            from automind.core.db import Database
+            self._chat_file.parent.mkdir(parents=True, exist_ok=True)
+            self._session_db = Database(self._chat_file.parent / "sessions.db")
+        return self._session_db
 
     # ── 配置读写（TTL 缓存）──
     def read_config(self) -> dict:
@@ -128,25 +147,17 @@ class Store:
             models.remove(model)
             self.write_config(data)
 
-    # ── 对话历史（default 会话单文件，向后兼容）──
+    # ── 对话历史（v1.1 起 SQLite；旧 JSON 逐会话惰性迁移）──
     def load_chat_history(self) -> list[dict]:
-        if self.chat_file.exists():
-            try:
-                return json.loads(self.chat_file.read_text(encoding="utf-8"))
-            except Exception:
-                pass
-        return []
+        return self.get_session_history("default")
 
     def save_chat_history(self, history: list[dict]) -> None:
-        try:
-            self.chat_file.parent.mkdir(parents=True, exist_ok=True)
-            self.chat_file.write_text(
-                json.dumps(history[-200:], ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception:
-            pass
+        self.session_histories["default"] = list(history)
+        self.save_session_history("default")
 
     # ── 多用户会话隔离 ──
     def session_file(self, sid: str) -> Path:
+        """旧版会话 JSON 文件路径（仅迁移与兼容查询用）。"""
         if not sid or sid == "default":
             return self.chat_file
         safe = re.sub(r"[^A-Za-z0-9_-]", "", sid)[:48] or "default"
@@ -155,21 +166,32 @@ class Store:
     def get_session_history(self, sid: str) -> list:
         sid = sid or "default"
         if sid not in self.session_histories:
-            f = self.session_file(sid)
+            hist = None
             try:
-                self.session_histories[sid] = (
-                    json.loads(f.read_text(encoding="utf-8")) if f.exists() else [])
+                hist = self._db().session_load(sid)
             except Exception:
-                self.session_histories[sid] = []
+                hist = None
+            if hist is None:
+                # SQLite 无记录 → 尝试旧 JSON 文件（一次性迁移，旧文件保留作备份）
+                f = self.session_file(sid)
+                try:
+                    hist = (json.loads(f.read_text(encoding="utf-8"))
+                            if f.exists() else [])
+                except Exception:
+                    hist = []
+                if hist:
+                    try:
+                        self._db().session_save(sid, hist[-200:])
+                    except Exception:
+                        pass
+            self.session_histories[sid] = hist
         return self.session_histories[sid]
 
     def save_session_history(self, sid: str) -> None:
         sid = sid or "default"
         hist = self.session_histories.get(sid, [])[-200:]
         self.session_histories[sid] = hist
-        f = self.session_file(sid)
         try:
-            f.parent.mkdir(parents=True, exist_ok=True)
-            f.write_text(json.dumps(hist, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._db().session_save(sid, hist)
         except Exception:
             pass
