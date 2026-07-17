@@ -46,6 +46,31 @@ for _stream in (sys.stdout, sys.stderr):
 
 APP_TITLE = "AutoMind — 通用自动化 Agent"
 
+_LOG_FILE = None   # 冻结模式启动日志（%APPDATA%\AutoMind\desktop.log）
+
+
+def _log(msg: str) -> None:
+    """打印 + （冻结模式）落盘：无控制台时问题也能事后追溯。"""
+    print(msg)
+    if _LOG_FILE is not None:
+        try:
+            with open(_LOG_FILE, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}\n")
+        except Exception:
+            pass
+
+
+def _alert(title: str, text: str) -> None:
+    """原生消息框（无控制台的冻结模式下向用户呈现错误）。"""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(0, text, title, 0x10)  # MB_ICONERROR
+            return
+        except Exception:
+            pass
+    print(f"{title}: {text}", file=sys.stderr or sys.stdout)
+
 
 def _setup_data_dir() -> str:
     """启动最早期固定数据目录（冻结环境 → %APPDATA%\\AutoMind）。
@@ -53,6 +78,7 @@ def _setup_data_dir() -> str:
     显式写回环境变量，保证之后无论何种导入顺序、以及可能的子进程，
     都解析到同一目录。
     """
+    global _LOG_FILE
     from automind.core.paths import data_dir
     d = data_dir()
     # 仅冻结模式写回环境变量（固定 %APPDATA%\AutoMind，含未来子进程）；
@@ -60,7 +86,26 @@ def _setup_data_dir() -> str:
     if getattr(sys, "frozen", False):
         os.environ.setdefault("AUTOMIND_DATA_DIR", str(d))
     d.mkdir(parents=True, exist_ok=True)
+    if getattr(sys, "frozen", False):
+        _LOG_FILE = str(d / "desktop.log")
+        try:   # 日志滚动：超 512KB 重开
+            if os.path.getsize(_LOG_FILE) > 512 * 1024:  # noqa: PTH202
+                os.remove(_LOG_FILE)  # noqa: PTH107
+        except OSError:
+            pass
+        # 段错误级崩溃也留痕（faulthandler 需真实文件句柄）
+        try:
+            import faulthandler
+            global _FAULT_FH
+            _FAULT_FH = open(str(d / "desktop-crash.log"), "a",  # noqa: SIM115
+                             encoding="utf-8")
+            faulthandler.enable(_FAULT_FH)
+        except Exception:
+            pass
     return str(d)
+
+
+_FAULT_FH = None
 
 
 def _pick_port(preferred: int | None) -> int:
@@ -150,13 +195,17 @@ def main() -> None:
     port = _pick_port(args.port)
     url = f"http://127.0.0.1:{port}"
 
-    print(f"AutoMind Desktop — 数据目录: {data_dir}")
-    print(f"启动服务: {url}")
+    _log(f"AutoMind Desktop v{_app_version()} — 数据目录: {data_dir}")
+    _log(f"启动服务: {url}")
     _start_server(port)
     if not _wait_ready(url):
-        print("!! 服务启动失败（30s 内未就绪），请检查数据目录下日志或以 --server-only 诊断")
+        _log("!! 服务启动失败（30s 内未就绪）")
+        _alert("AutoMind 启动失败",
+               "内置服务 30 秒内未就绪。\n\n"
+               f"诊断日志：{data_dir}\\desktop.log\n"
+               "可尝试：命令行运行 AutoMind.exe --server-only 查看详细输出。")
         sys.exit(1)
-    print("服务就绪 ✓")
+    _log("服务就绪 ✓")
 
     if args.server_only:
         print("--server-only 模式：按 Ctrl+C 退出")
@@ -207,7 +256,7 @@ def main() -> None:
             ))
         threading.Thread(target=tray.run, name="tray", daemon=True).start()
     except Exception as e:
-        print(f"托盘不可用（{e}），跳过")
+        _log(f"托盘不可用（{e}），跳过")
         tray = None
 
     # ── 窗口：pywebview（WebView2）→ 失败降级系统浏览器 ──
@@ -227,15 +276,19 @@ def main() -> None:
                     return False
                 win.events.closing += on_closing
 
-            webview.start()   # 阻塞直至窗口销毁
+            _log("打开 WebView2 窗口…")
+            # storage_path：WebView2 用户数据固定进数据目录 ——
+            # 安装到 Program Files（只读）后默认写 exe 旁目录会失败
+            webview.start(storage_path=os.path.join(data_dir, "webview"),  # noqa: PTH118
+                          private_mode=False)
             quit_app()
             return
         except Exception as e:
-            print(f"WebView 不可用（{e}），改用系统浏览器")
+            _log(f"WebView 不可用（{e}），改用系统浏览器")
 
     webbrowser.open(url)
-    print("已在浏览器打开；关闭本控制台即退出服务" if tray is None
-          else "已在浏览器打开；可从托盘图标退出")
+    _log("已在浏览器打开；可从托盘图标退出" if tray is not None
+         else "已在浏览器打开；关闭本进程即退出服务")
     try:
         while True:
             time.sleep(3600)
@@ -243,5 +296,40 @@ def main() -> None:
         quit_app()
 
 
+def _app_version() -> str:
+    try:
+        from automind import __version__
+        return __version__
+    except Exception:
+        return "?"
+
+
+def _excepthook(exc_type, exc, tb) -> None:
+    """未捕获异常：写错误日志 + 弹窗指引（无控制台的冻结模式不再静默死亡）。"""
+    import traceback
+    detail = "".join(traceback.format_exception(exc_type, exc, tb))
+    _log("!! 未捕获异常:\n" + detail)
+    log_hint = _LOG_FILE or "(控制台输出)"
+    try:
+        err_file = None
+        if _LOG_FILE:
+            err_file = _LOG_FILE.replace("desktop.log", "desktop-error.log")
+            with open(err_file, "a", encoding="utf-8") as f:
+                f.write(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}]\n{detail}\n")
+            log_hint = err_file
+    except Exception:
+        pass
+    _alert("AutoMind 遇到错误",
+           f"{exc_type.__name__}: {exc}\n\n完整错误已保存到：\n{log_hint}\n\n"
+           "请把该文件反馈给开发者以便修复。")
+
+
 if __name__ == "__main__":
-    main()
+    sys.excepthook = _excepthook
+    try:
+        main()
+    except SystemExit:
+        raise
+    except Exception:
+        _excepthook(*sys.exc_info())
+        sys.exit(1)
