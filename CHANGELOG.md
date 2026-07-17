@@ -2,6 +2,27 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [1.2.0] - 2026-07-17
+
+**桌面版（Windows 安装即用）**
+
+- **🖥 桌面封装**：新增 `desktop/` —— pywebview（WebView2）窗口壳 +
+  系统托盘 + 内嵌 uvicorn（仅 127.0.0.1 监听）。关窗最小化到托盘，
+  任务与定时调度继续运行；托盘菜单：显示窗口 / 浏览器打开 / 打开数据
+  目录 / 退出。降级链完备：无 WebView2 → 系统浏览器；无托盘依赖 →
+  纯窗口。`--server-only` / `--browser` / `--port` 调试参数。
+- **📁 数据目录统一解析**（`automind/core/paths.py`）：环境变量
+  `AUTOMIND_DATA_DIR` > 冻结环境（%APPDATA%\AutoMind 等平台标准目录）>
+  开发/pip 默认（cwd `.automind`，行为不变）。db/会话/知识库/专家/技能/
+  配置及 pro 存储全部接线；`/api/health` 新增 `paths` 诊断字段。
+- **📦 打包与安装器**：PyInstaller onedir spec（约 71MB，排除重型可选
+  依赖走内置降级）、品牌图标生成脚本、Inno Setup 中文安装器脚本
+  （WebView2 缺失自动补装、卸载询问是否保留用户数据）。构建文档
+  `desktop/README.md`。
+- 冻结版已验证：React 界面 / 知识库 / 内置手册 / WebView2 窗口全通。
+- 测试：新增 `tests/test_paths.py` 8 项（解析优先级 / 模块接线），
+  全量 330 项通过。
+
 ## [1.1.0] - 2026-07-15
 
 **SQLite 存储引擎 · 界面视觉精修 · 测试与文档增强**

@@ -71,7 +71,10 @@ class ExpertStore:
     """专家存取与业务规则（安装/创建/激活/用量/上限）。"""
 
     def __init__(self, store_path: str | Path | None = None) -> None:
-        self._path = Path(store_path or Path(".automind") / "experts.json")
+        if store_path is None:
+            from automind.core.paths import experts_file
+            store_path = experts_file()
+        self._path = Path(store_path)
 
     # ── 存储 ──
     def _load(self) -> list[dict]:

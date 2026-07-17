@@ -32,7 +32,12 @@ QUOTA_RULES: dict[str, dict[str, int | None]] = {
     "enterprise": {"daily_tasks": None, "workspaces": None},
 }
 
-_QUOTA_FILE = Path(".automind") / "quota.json"   # 旧文件（仅迁移用）
+def _legacy_quota_file() -> Path:
+    """旧版 quota.json（仅一次性迁移用；随数据目录解析）。"""
+    from automind.core.paths import legacy_file
+    return legacy_file("quota.json")
+
+
 _lock = threading.Lock()
 _state: dict = {"date": "", "tasks": 0}
 _loaded = False
@@ -52,7 +57,7 @@ def _load() -> None:
         from automind.core.db import get_db, migrate_json_once
         db = get_db()
         migrate_json_once(
-            db, "quota", _QUOTA_FILE,
+            db, "quota", _legacy_quota_file(),
             lambda data: db.kv_set("quota", data) if isinstance(data, dict) else None)
         data = db.kv_get("quota")
         if isinstance(data, dict):
@@ -61,8 +66,8 @@ def _load() -> None:
     except Exception:
         # SQLite 不可用（极端环境）→ 回退旧 JSON 读取
         try:
-            if _QUOTA_FILE.exists():
-                data = json.loads(_QUOTA_FILE.read_text(encoding="utf-8"))
+            if _legacy_quota_file().exists():
+                data = json.loads(_legacy_quota_file().read_text(encoding="utf-8"))
                 if isinstance(data, dict):
                     _state.update({"date": data.get("date", ""),
                                    "tasks": int(data.get("tasks", 0))})

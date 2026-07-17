@@ -82,7 +82,10 @@ CREATE TABLE IF NOT EXISTS kb_search_log (
 class Database:
     """线程安全的 SQLite 包装（单连接 + 互斥锁，WAL 模式）。"""
 
-    def __init__(self, path: str | Path = Path(".automind") / "automind.db") -> None:
+    def __init__(self, path: str | Path | None = None) -> None:
+        if path is None:
+            from automind.core.paths import db_file
+            path = db_file()
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()

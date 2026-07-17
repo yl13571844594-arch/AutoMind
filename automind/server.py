@@ -161,8 +161,10 @@ def _accumulate_tokens(record: dict) -> None:
 # v1.1：任务历史持久化迁移至 SQLite（automind/core/db.py）；
 # 旧 JSON 首次启动自动导入并保留原文件作备份。
 from automind.core import db as _db_mod  # noqa: E402
+from automind.core.paths import legacy_file as _legacy_file  # noqa: E402
+from automind.core.paths import skills_dir as _skills_dir  # noqa: E402
 
-_HISTORY_FILE = Path(".automind") / "task_history.json"   # 旧文件（仅迁移用）
+_HISTORY_FILE = _legacy_file("task_history.json")   # 旧文件（仅迁移用）
 _HISTORY_CAP = 200
 
 
@@ -389,7 +391,7 @@ _BUILTIN_SKILLS = {
     "log_analyzer", "doc_generator", "dep_audit",
 }
 # 自定义技能目录
-_SKILLS_DIR = Path(".automind") / "skills"
+_SKILLS_DIR = _skills_dir()
 
 
 def _reconnect_mcp_servers(agent) -> None:
@@ -508,6 +510,7 @@ def _acquire_run_agent(base_agent, sid: str):
 @app.get("/api/health")
 async def api_health():
     """健康检查（无需鉴权）— 供部署监控与负载均衡探活。"""
+    from automind.core.paths import describe as _paths_describe
     return {
         "status": "ok", "version": app.version,
         "edition": _edition.get_edition(),
@@ -515,6 +518,7 @@ async def api_health():
         "running_tasks": _running_tasks["count"],
         "max_concurrent": _MAX_CONCURRENT,
         "uptime_s": round(time.time() - _START_TIME, 1),
+        "paths": _paths_describe(),
     }
 
 
@@ -1329,7 +1333,7 @@ async def api_quota():
 # REST API — 团队协作（任务分配 / 活动通知；共享语义见手册 8.14）
 # ═══════════════════════════════════════════════════════════
 
-_TEAM_FILE = Path(".automind") / "team_tasks.json"   # 旧文件（仅迁移用）
+_TEAM_FILE = _legacy_file("team_tasks.json")   # 旧文件（仅迁移用）
 
 
 def _team_load() -> list[dict]:
@@ -3030,7 +3034,7 @@ def main():
     args = parser.parse_args()
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║         AutoMind Web UI v1.1.0                    ║
+║         AutoMind Web UI v1.2.0                    ║
 ║                                                  ║
 ║  打开浏览器访问: http://{args.host}:{args.port}              ║
 ║  API 文档:      http://{args.host}:{args.port}/docs         ║

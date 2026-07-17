@@ -21,9 +21,10 @@ class Store:
     CONFIG_CACHE_TTL = 2.0  # 秒
 
     def __init__(self, env_key_map: dict[str, str] | None = None) -> None:
-        self._config_file = Path(".automind_config.json")
-        self._chat_file = Path(".automind") / "chat_history.json"
-        self.chats_dir = Path(".automind") / "chats"
+        from automind.core.paths import config_file, data_dir
+        self._config_file = config_file()
+        self._chat_file = data_dir() / "chat_history.json"
+        self.chats_dir = data_dir() / "chats"
         self.session_histories: dict[str, list] = {}
         self._env_key_map = env_key_map or {}
         self._config_cache: dict | None = None

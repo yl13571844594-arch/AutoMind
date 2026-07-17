@@ -36,7 +36,10 @@ class KnowledgeStore:
     内存中维护全量索引与片段（检索热路径零 IO），写操作增量落库。
     """
 
-    def __init__(self, root: str | Path = ".automind/kb", embedder: Any = None) -> None:
+    def __init__(self, root: str | Path | None = None, embedder: Any = None) -> None:
+        if root is None:
+            from automind.core.paths import kb_dir
+            root = kb_dir()
         self.root = Path(root)
         self._embedder = embedder or _SimpleEmbedder()
         self._lock = threading.Lock()

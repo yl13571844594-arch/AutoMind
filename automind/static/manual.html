@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.1.0</title>
+<title>AutoMind 使用手册 — v1.2.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.1.0</div>
+  <div class="ver">使用手册 · v1.2.0</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -204,7 +204,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.1.0</b></span>
+    <span class="chip">版本 <b>v1.2.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -217,7 +217,13 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     由商业扩展包 <code>automind-pro</code> 提供，配置许可证（<code>AUTOMIND_LICENSE</code>）后自动激活；
     社区版对应入口显示 🔒。安全能力（鉴权/限流/脱敏/审计）不设付费墙。详见 <code>docs/EDITIONS.md</code>。
   </div>
-  <div style="margin-top:10px;padding:12px 16px;border:1px solid rgba(123,159,255,.5);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
+    <div style="margin-top:10px;padding:12px 16px;border:1px solid rgba(60,230,138,.5);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
+    <b style="color:#3ce68a">🖥 v1.2 桌面版</b> —
+    Windows 安装包双击即用：独立窗口（WebView2）+ 系统托盘 + 内嵌服务，无需 Python 环境与命令行；
+    关窗最小化到托盘，任务与定时任务继续运行；数据存放于 <code>%APPDATA%\AutoMind</code>（托盘菜单一键打开）。
+    自行构建见仓库 <code>desktop/README.md</code>。
+  </div>
+<div style="margin-top:10px;padding:12px 16px;border:1px solid rgba(123,159,255,.5);border-radius:10px;font-size:.9em;color:#a7b0c8;text-align:left">
     <b style="color:#7b9fff">🎉 v1.0 正式版四大升级</b> —
     <b>🖥 界面全面重构</b>（React 18 + TypeScript + Ant Design，全部功能与操作位置不变）·
     <b>📚 RAG 知识库</b>（上传 PDF/Word/MD/TXT，对话自动检索引用；社区版 5 文档/10MB，
@@ -863,7 +869,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.1.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.2.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -978,7 +984,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.1.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.2.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 
