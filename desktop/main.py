@@ -36,9 +36,36 @@ if not getattr(sys, "frozen", False):
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
 
-# Windows GBK 控制台兜底：诊断输出统一 UTF-8（无控制台/冻结模式下为 None，跳过）
+# ── 标准流兜底（双击启动的根因修复）────────────────────
+# console=False 的冻结 GUI 进程从资源管理器双击启动时 sys.stdout/stderr
+# 为 None：uvicorn 配置日志会调 sys.stdout.isatty() → AttributeError，
+# logging 的 StreamHandler 写 stderr 也会炸。装一个行为完整的空流桩
+# （isatty=False / write 丢弃），所有第三方库的隐式假设即恢复成立。
+# （从终端/管道启动时句柄存在，不走此分支 —— 这正是测试没暴露的原因。）
+import io as _io
+
+
+class _NullStdIO(_io.TextIOBase):
+    encoding = "utf-8"
+
+    def write(self, s: str) -> int:  # noqa: D102
+        return len(s)
+
+    def flush(self) -> None:  # noqa: D102
+        pass
+
+    def isatty(self) -> bool:  # noqa: D102
+        return False
+
+
+if sys.stdout is None:
+    sys.stdout = _NullStdIO()
+if sys.stderr is None:
+    sys.stderr = _NullStdIO()
+
+# Windows GBK 控制台兜底：诊断输出统一 UTF-8
 for _stream in (sys.stdout, sys.stderr):
-    if _stream is not None and hasattr(_stream, "reconfigure"):
+    if hasattr(_stream, "reconfigure"):
         try:
             _stream.reconfigure(encoding="utf-8", errors="replace")
         except Exception:
@@ -126,8 +153,10 @@ def _start_server(port: int) -> threading.Thread:
 
     from automind.server import app
 
+    # use_colors=False：显式关闭彩色，避免 uvicorn 探测终端（isatty）
     config = uvicorn.Config(app, host="127.0.0.1", port=port,
-                            log_level="warning", access_log=False)
+                            log_level="warning", access_log=False,
+                            use_colors=False)
     server = uvicorn.Server(config)
 
     t = threading.Thread(target=server.run, name="automind-server", daemon=True)
