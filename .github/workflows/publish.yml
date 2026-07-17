@@ -1,0 +1,72 @@
+name: Publish to PyPI
+
+# 社区版 PyPI 发布 — 两种触发方式：
+#   1. 推送版本 tag（vX.Y.Z）自动发布；
+#   2. Actions 页手动 Run workflow（workflow_dispatch，可对已有 tag 补发）。
+#
+# 采用 PyPI Trusted Publishing（OIDC），仓库与工作流零令牌：
+# 需先在 pypi.org → 项目 automind-agent → Settings → Publishing 添加
+# Trusted Publisher（owner: yl13571844594-arch, repo: AutoMind,
+# workflow: publish.yml, environment: pypi）。
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Audit artifacts (no commercial code)
+        run: |
+          python - <<'EOF'
+          import sys, zipfile, tarfile, pathlib
+          bad = []
+          markers = ("automind_pro", ".automind_config.json", ".automind_license",
+                     "LICENSE-COMMERCIAL")
+          for art in pathlib.Path("dist").iterdir():
+              names = []
+              if art.suffix == ".whl":
+                  names = zipfile.ZipFile(art).namelist()
+              elif art.name.endswith(".tar.gz"):
+                  names = tarfile.open(art).getnames()
+              bad += [f"{art.name}: {n}" for n in names
+                      if any(m in n for m in markers)]
+          if bad:
+              print("FORBIDDEN CONTENT:\n" + "\n".join(bad))
+              sys.exit(1)
+          print("audit ok")
+          EOF
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write   # OIDC Trusted Publishing 必需
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

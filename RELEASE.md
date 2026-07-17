@@ -47,6 +47,22 @@ python -m automind_pro.license PRO 20271231 acme   # 生成客户许可证
 
 ## 上传 PyPI（社区版）
 
+**方式 A · GitHub Actions 可信发布（推荐，零令牌）**
+
+仓库已内置 `.github/workflows/publish.yml`：推送版本 tag（`vX.Y.Z`）自动
+构建 + 审计 + 发布；也可在 Actions 页手动 Run workflow 对已有 tag 补发。
+首次使用需一次性配置（之后永久生效，无需任何令牌）：
+
+1. 打开 https://pypi.org/manage/project/automind-agent/settings/publishing/
+   （项目尚未存在时用 https://pypi.org/manage/account/publishing/ 的
+   "Add a pending publisher"）；
+2. 添加 Trusted Publisher：Owner `yl13571844594-arch`、Repository `AutoMind`、
+   Workflow `publish.yml`、Environment `pypi`；
+3. GitHub 仓库 Settings → Environments 新建名为 `pypi` 的 environment
+   （可加保护规则，仅允许 tag 触发）。
+
+**方式 B · 本机 twine（需 API Token）**
+
 PyPI 需 API Token（https://pypi.org/manage/account/ → API tokens；
 用户名固定填 `__token__`，令牌切勿贴进任何对话）：
 
