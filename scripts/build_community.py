@@ -24,7 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
 
 # ── 开源源码包白名单 ─────────────────────────────────────
-INCLUDE_DIRS = ["automind", "tests", "examples", "demo", "docs", ".github"]
+# v1.0+：web/ 为 React 前端工程源码（构建产物在 automind/static/dist 随包）
+INCLUDE_DIRS = ["automind", "web", "tests", "examples", "demo", "docs", ".github"]
 INCLUDE_FILES = [
     "pyproject.toml", "README.md", "README.en.md", "LICENSE", "RELEASE.md",
     "CHANGELOG.md", "CONTRIBUTING.md",
@@ -33,7 +34,8 @@ INCLUDE_FILES = [
     ".gitignore", ".gitattributes",
 ]
 # 目录内仍需排除的模式
-EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
+EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+                 "node_modules"}
 EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".rar", ".key", ".pem"}
 # 任何情况下都不允许进包的敏感/商业标记
 FORBIDDEN_NAMES = {"automind_pro", ".automind_config.json", ".automind_license",
