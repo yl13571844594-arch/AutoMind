@@ -9,7 +9,7 @@
 #define AppExe "AutoMind.exe"
 
 [Setup]
-AppId={{8F3A9C1E-6D2B-4E7A-9B5C-AUTOMIND0001}
+AppId={{8F3A9C1E-6D2B-4E7A-9B5C-3D41A87E5F02}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppPublisher={#AppPublisher}
@@ -28,7 +28,8 @@ PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible
 
 [Languages]
-Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
+; 简体中文语言文件随仓库分发（官方翻译页收录版本，Inno 默认不内置）
+Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
@@ -36,8 +37,9 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "dist\AutoMind\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
-; WebView2 Evergreen Bootstrapper（~2MB，微软官方；缺运行时的精简系统静默补装）
-Source: "MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall external skipifsourcedoesntexist
+; WebView2 Evergreen Bootstrapper（~2MB，微软官方签名；内嵌进安装包，
+; 缺运行时的精简系统自动静默补装。构建目录无此文件时跳过（仅影响该兜底）
+Source: "MicrosoftEdgeWebview2Setup.exe"; DestDir: "{tmp}"; Flags: deleteafterinstall skipifsourcedoesntexist
 
 [Icons]
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
@@ -67,7 +69,7 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   DataDir: string;
 begin
-  if CurUninstallStep = usPostUninstall then
+  if (CurUninstallStep = usPostUninstall) and not UninstallSilent then
   begin
     DataDir := ExpandConstant('{userappdata}\AutoMind');
     if DirExists(DataDir) then

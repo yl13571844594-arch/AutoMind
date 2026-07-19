@@ -69,3 +69,7 @@ desktop/dist/
 desktop/Output/
 desktop/icon.ico
 desktop/MicrosoftEdgeWebview2Setup.exe
+
+# 桌面安装器构建产物与第三方引导器（微软官方下载，见 desktop/README.md）
+desktop/Output/
+desktop/MicrosoftEdgeWebview2Setup.exe

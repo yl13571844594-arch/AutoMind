@@ -28,12 +28,26 @@ dist\AutoMind\AutoMind.exe --server-only --port 18765
 curl http://127.0.0.1:18765/api/health     # → {"status":"ok", ... "frozen": true}
 ```
 
-## 三、安装器（可选，需 Inno Setup 6）
+## 三、安装器（Inno Setup 6）
 
-1. （可选）下载 [WebView2 Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/)
-   放到本目录（`MicrosoftEdgeWebview2Setup.exe`）——精简系统缺运行时会自动补装；
-2. `iscc installer.iss` → `Output/AutoMind-Setup-<ver>.exe`（中文向导、
-   开始菜单/桌面快捷方式、卸载时询问是否保留用户数据）。
+```bash
+winget install JRSoftware.InnoSetup        # 一次性安装编译器
+# （可选但推荐）官方 WebView2 引导器，内嵌进安装包给精简系统兜底：
+curl -L -o MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+"%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" installer.iss
+```
+
+产物：`Output/AutoMind-Setup-<ver>.exe`（约 32MB，lzma2/max 压缩）。
+
+- 中文/英文安装向导（简体中文语言文件 `ChineseSimplified.isl` 随仓库分发，
+  取自官方翻译页收录版本）；
+- 默认按用户安装（免管理员，落 `%LOCALAPPDATA%\Programs\AutoMind`），
+  管理员运行可选装到 Program Files；
+- 自动检测并静默补装 WebView2 运行时（注册表已有则跳过）；
+- 卸载时询问是否保留用户数据（静默卸载默认保留）。
+
+已通过的 QA 闭环：静默安装 → 快捷方式/卸载项验证 → 已安装程序启动
+（窗口/托盘/服务就绪）→ 静默卸载（程序清除、数据保留）。
 
 ## 四、运行行为
 
