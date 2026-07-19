@@ -135,6 +135,54 @@ def _setup_data_dir() -> str:
 _FAULT_FH = None
 
 
+# ── 单实例互斥（Windows 命名互斥体）─────────────────────
+# 用户在"没反应"的几十秒里往往会连点数次 → 多实例抢端口、互相拖慢。
+# 重复启动时：读取上个实例记录的地址，直接用浏览器打开它并退出。
+_MUTEX_NAME = "Local\\AutoMindDesktopSingleton"
+_ERROR_ALREADY_EXISTS = 183
+
+
+def _acquire_single_instance() -> bool:
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW(None, False, _MUTEX_NAME)
+        return ctypes.windll.kernel32.GetLastError() != _ERROR_ALREADY_EXISTS
+    except Exception:
+        return True   # 互斥体异常不阻断启动
+
+
+def _instance_file(data_dir: str) -> str:
+    return os.path.join(data_dir, "instance.json")  # noqa: PTH118
+
+
+def _write_instance(data_dir: str, port: int) -> None:
+    try:
+        import json
+        with open(_instance_file(data_dir), "w", encoding="utf-8") as f:
+            json.dump({"port": port, "pid": os.getpid()}, f)
+    except Exception:
+        pass
+
+
+def _read_instance_url(data_dir: str) -> str | None:
+    """读取已运行实例的地址并确认健康；不健康返回 None。"""
+    try:
+        import json
+        with open(_instance_file(data_dir), encoding="utf-8") as f:
+            port = int(json.load(f).get("port", 0))
+        if not port:
+            return None
+        url = f"http://127.0.0.1:{port}"
+        with urllib.request.urlopen(url + "/api/health", timeout=2) as r:
+            if r.status == 200:
+                return url
+    except Exception:
+        pass
+    return None
+
+
 def _pick_port(preferred: int | None) -> int:
     candidates = ([preferred] if preferred else []) + [8765, 0]
     for port in candidates:
@@ -148,23 +196,38 @@ def _pick_port(preferred: int | None) -> int:
     raise RuntimeError("找不到可用端口")
 
 
+_server_error: list[str] = []   # 服务线程内异常（供就绪等待快速失败与留痕）
+
+
 def _start_server(port: int) -> threading.Thread:
-    import uvicorn
+    def _run() -> None:
+        try:
+            import uvicorn
 
-    from automind.server import app
+            from automind.server import app
 
-    # use_colors=False：显式关闭彩色，避免 uvicorn 探测终端（isatty）
-    config = uvicorn.Config(app, host="127.0.0.1", port=port,
-                            log_level="warning", access_log=False,
-                            use_colors=False)
-    server = uvicorn.Server(config)
+            # use_colors=False：显式关闭彩色，避免 uvicorn 探测终端（isatty）
+            config = uvicorn.Config(app, host="127.0.0.1", port=port,
+                                    log_level="warning", access_log=False,
+                                    use_colors=False)
+            uvicorn.Server(config).run()
+        except Exception:
+            import traceback
+            detail = traceback.format_exc()
+            _server_error.append(detail)
+            _log("!! 服务线程异常:\n" + detail)
 
-    t = threading.Thread(target=server.run, name="automind-server", daemon=True)
+    t = threading.Thread(target=_run, name="automind-server", daemon=True)
     t.start()
     return t
 
 
-def _wait_ready(url: str, timeout: float = 30.0) -> bool:
+# 冷启动（尤其杀软首次逐文件扫描 onedir 的上千个模块）可能远超 30s
+_READY_TIMEOUT = 90.0
+
+
+def _wait_ready(url: str, timeout: float = _READY_TIMEOUT,
+                thread: threading.Thread | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -172,7 +235,11 @@ def _wait_ready(url: str, timeout: float = 30.0) -> bool:
                 if r.status == 200:
                     return True
         except Exception:
-            time.sleep(0.3)
+            pass
+        # 服务线程已死（端口被抢 / import 失败）→ 立即失败，不空等
+        if _server_error or (thread is not None and not thread.is_alive()):
+            return False
+        time.sleep(0.3)
     return False
 
 
@@ -211,6 +278,48 @@ def _tray_icon_image():
     return img
 
 
+# 启动画面：双击后窗口立即出现（冷启动 + 杀软扫描可能要几十秒，
+# 没有即时反馈用户会以为没点上而反复双击 → 多实例雪崩）
+_SPLASH_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+html,body{height:100%;margin:0;background:#060913;color:#e8ecf7;
+  font-family:'Segoe UI','Microsoft YaHei',sans-serif;overflow:hidden}
+.wrap{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:18px}
+.dot{width:52px;height:52px;border-radius:50%;
+  background:linear-gradient(135deg,#7b9fff,#b594ff);
+  box-shadow:0 0 44px rgba(123,159,255,.55);animation:pulse 1.6s ease infinite}
+@keyframes pulse{50%{transform:scale(.86);box-shadow:0 0 20px rgba(123,159,255,.35)}}
+h1{font-size:1.25em;font-weight:600;margin:0}
+p{color:#8e9abb;font-size:.85em;margin:0}
+.bar{width:220px;height:4px;border-radius:2px;background:#1f2740;overflow:hidden}
+.bar i{display:block;height:100%;width:40%;border-radius:2px;
+  background:linear-gradient(90deg,#7b9fff,#b594ff);animation:slide 1.4s ease-in-out infinite}
+@keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+</style></head><body><div class="wrap">
+<div class="dot"></div><h1>AutoMind 正在启动</h1>
+<div class="bar"><i></i></div>
+<p>首次启动可能需要一分钟（安全软件扫描），请稍候…</p>
+</div></body></html>"""
+
+
+def _fail_html(data_dir: str, reason: str) -> str:
+    import html as _html
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+html,body{{height:100%;margin:0;background:#060913;color:#e8ecf7;
+  font-family:'Segoe UI','Microsoft YaHei',sans-serif}}
+.wrap{{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:14px;padding:0 40px;text-align:center}}
+h1{{font-size:1.2em;margin:0;color:#ff6b6b}}
+p{{color:#8e9abb;font-size:.86em;margin:0;line-height:1.8}}
+code{{background:#1f2740;border-radius:6px;padding:2px 8px;font-size:.84em}}
+</style></head><body><div class="wrap">
+<h1>⚠ AutoMind 启动失败</h1>
+<p>{_html.escape(reason)}</p>
+<p>诊断日志：<code>{_html.escape(data_dir)}\\desktop.log</code><br>
+请关闭本窗口后重试；若反复失败，把日志文件反馈给开发者。</p>
+</div></body></html>"""
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="AutoMind Desktop")
     parser.add_argument("--server-only", action="store_true",
@@ -221,22 +330,31 @@ def main() -> None:
     args = parser.parse_args()
 
     data_dir = _setup_data_dir()
+
+    # ── 单实例：已有实例在跑 → 打开它的界面后退出（多次双击不再雪崩）──
+    if not args.server_only and not _acquire_single_instance():
+        existing = _read_instance_url(data_dir)
+        _log(f"检测到已运行实例：{existing or '(尚未就绪)'}")
+        if existing:
+            webbrowser.open(existing)
+        else:
+            _alert("AutoMind 已在运行",
+                   "AutoMind 正在启动中（或驻留在系统托盘）。\n"
+                   "请稍候几秒，或点击托盘图标打开主窗口。")
+        return
+
     port = _pick_port(args.port)
     url = f"http://127.0.0.1:{port}"
 
     _log(f"AutoMind Desktop v{_app_version()} — 数据目录: {data_dir}")
     _log(f"启动服务: {url}")
-    _start_server(port)
-    if not _wait_ready(url):
-        _log("!! 服务启动失败（30s 内未就绪）")
-        _alert("AutoMind 启动失败",
-               "内置服务 30 秒内未就绪。\n\n"
-               f"诊断日志：{data_dir}\\desktop.log\n"
-               "可尝试：命令行运行 AutoMind.exe --server-only 查看详细输出。")
-        sys.exit(1)
-    _log("服务就绪 ✓")
+    server_thread = _start_server(port)
 
     if args.server_only:
+        if not _wait_ready(url, thread=server_thread):
+            _log("!! 服务启动失败")
+            sys.exit(1)
+        _log("服务就绪 ✓")
         print("--server-only 模式：按 Ctrl+C 退出")
         try:
             while True:
@@ -259,6 +377,10 @@ def main() -> None:
             webbrowser.open(url)
 
     def quit_app(*_):
+        try:
+            os.remove(_instance_file(data_dir))  # noqa: PTH107
+        except OSError:
+            pass
         try:
             if tray is not None:
                 tray.stop()
@@ -289,12 +411,13 @@ def main() -> None:
         tray = None
 
     # ── 窗口：pywebview（WebView2）→ 失败降级系统浏览器 ──
+    # 窗口立即打开显示启动画面；服务就绪后切到真实界面（后台线程驱动）。
     if not args.browser:
         try:
             import webview
 
             win = webview.create_window(
-                APP_TITLE, url, width=1360, height=860,
+                APP_TITLE, html=_SPLASH_HTML, width=1360, height=860,
                 min_size=(960, 640), background_color="#060913")
             window_ref.append(win)
 
@@ -305,16 +428,37 @@ def main() -> None:
                     return False
                 win.events.closing += on_closing
 
-            _log("打开 WebView2 窗口…")
+            def _boot(w) -> None:
+                if _wait_ready(url, thread=server_thread):
+                    _log("服务就绪 ✓ → 加载主界面")
+                    _write_instance(data_dir, port)
+                    w.load_url(url)
+                else:
+                    reason = ("内置服务异常退出（端口冲突或组件缺失）"
+                              if _server_error or not server_thread.is_alive()
+                              else f"内置服务 {int(_READY_TIMEOUT)} 秒内未就绪"
+                                   "（可能是安全软件扫描拖慢，可重试）")
+                    _log(f"!! 启动失败：{reason}")
+                    w.load_html(_fail_html(data_dir, reason))
+
+            _log("打开 WebView2 窗口（启动画面）…")
             # storage_path：WebView2 用户数据固定进数据目录 ——
             # 安装到 Program Files（只读）后默认写 exe 旁目录会失败
-            webview.start(storage_path=os.path.join(data_dir, "webview"),  # noqa: PTH118
+            webview.start(_boot, win,
+                          storage_path=os.path.join(data_dir, "webview"),  # noqa: PTH118
                           private_mode=False)
             quit_app()
             return
         except Exception as e:
             _log(f"WebView 不可用（{e}），改用系统浏览器")
 
+    # 浏览器降级路径：等就绪再开，避免打开空白页
+    if not _wait_ready(url, thread=server_thread):
+        _log("!! 服务启动失败")
+        _alert("AutoMind 启动失败",
+               f"内置服务未能就绪。\n诊断日志：{data_dir}\\desktop.log")
+        sys.exit(1)
+    _write_instance(data_dir, port)
     webbrowser.open(url)
     _log("已在浏览器打开；可从托盘图标退出" if tray is not None
          else "已在浏览器打开；关闭本进程即退出服务")
