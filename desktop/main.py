@@ -167,16 +167,14 @@ def _write_instance(data_dir: str, port: int) -> None:
 
 
 def _read_instance_url(data_dir: str) -> str | None:
-    """读取已运行实例的地址并确认健康；不健康返回 None。"""
+    """读取已运行实例的地址并确认健康（直连探测）；不健康返回 None。"""
     try:
         import json
         with open(_instance_file(data_dir), encoding="utf-8") as f:
             port = int(json.load(f).get("port", 0))
-        if not port:
-            return None
-        url = f"http://127.0.0.1:{port}"
-        with urllib.request.urlopen(url + "/api/health", timeout=2) as r:
-            if r.status == 200:
+        if port:
+            url = f"http://127.0.0.1:{port}"
+            if _probe(url):
                 return url
     except Exception:
         pass
@@ -225,17 +223,26 @@ def _start_server(port: int) -> threading.Thread:
 # 冷启动（尤其杀软首次逐文件扫描 onedir 的上千个模块）可能远超 30s
 _READY_TIMEOUT = 90.0
 
+# 本机探测必须绕过系统代理：用户开着代理/VPN 时（国内极常见），
+# urllib 默认走系统代理 → 代理回连不了用户本机 127.0.0.1 →
+# 服务明明健康、探测却全部失败，表现为"启动失败/界面打不开"。
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _probe(url: str, timeout: float = 2.0) -> bool:
+    try:
+        with _DIRECT.open(url + "/api/health", timeout=timeout) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
 
 def _wait_ready(url: str, timeout: float = _READY_TIMEOUT,
                 thread: threading.Thread | None = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
-        try:
-            with urllib.request.urlopen(url + "/api/health", timeout=2) as r:
-                if r.status == 200:
-                    return True
-        except Exception:
-            pass
+        if _probe(url):
+            return True
         # 服务线程已死（端口被抢 / import 失败）→ 立即失败，不空等
         if _server_error or (thread is not None and not thread.is_alive()):
             return False
@@ -348,6 +355,16 @@ def main() -> None:
 
     _log(f"AutoMind Desktop v{_app_version()} — 数据目录: {data_dir}")
     _log(f"启动服务: {url}")
+    # 系统代理留痕（本机探测已强制直连；WebView2 亦强制 direct://）
+    try:
+        proxies = urllib.request.getproxies()
+        if proxies:
+            _log(f"检测到系统代理: {sorted(proxies)}（本机连接将绕过）")
+    except Exception:
+        pass
+    # WebView2 只用于加载本机界面 → 强制直连，杜绝代理拦截 127.0.0.1
+    os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+                          "--proxy-server=direct://")
     server_thread = _start_server(port)
 
     if args.server_only:
@@ -433,13 +450,20 @@ def main() -> None:
                     _log("服务就绪 ✓ → 加载主界面")
                     _write_instance(data_dir, port)
                     w.load_url(url)
-                else:
-                    reason = ("内置服务异常退出（端口冲突或组件缺失）"
-                              if _server_error or not server_thread.is_alive()
-                              else f"内置服务 {int(_READY_TIMEOUT)} 秒内未就绪"
-                                   "（可能是安全软件扫描拖慢，可重试）")
-                    _log(f"!! 启动失败：{reason}")
-                    w.load_html(_fail_html(data_dir, reason))
+                    return
+                # 兜底复核：超时后再直连探测一次 —— 若服务其实健康
+                # （曾见探测被环境因素干扰），仍然加载主界面而非报错
+                if _probe(url, timeout=4):
+                    _log("超时但复核健康 → 加载主界面")
+                    _write_instance(data_dir, port)
+                    w.load_url(url)
+                    return
+                reason = ("内置服务异常退出（端口冲突或组件缺失）"
+                          if _server_error or not server_thread.is_alive()
+                          else f"内置服务 {int(_READY_TIMEOUT)} 秒内未就绪"
+                               "（可能是安全软件扫描拖慢，可重试）")
+                _log(f"!! 启动失败：{reason}")
+                w.load_html(_fail_html(data_dir, reason))
 
             _log("打开 WebView2 窗口（启动画面）…")
             # storage_path：WebView2 用户数据固定进数据目录 ——
