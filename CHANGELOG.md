@@ -23,6 +23,29 @@
 - 测试：新增 `tests/test_paths.py` 8 项（解析优先级 / 模块接线），
   全量 330 项通过。
 
+## [1.2.0] - 未发布
+
+**桌面版落地：安装包 · 自动更新 · 代码签名管线**
+
+- **🖥 Windows 桌面版**（`desktop/`）：pywebview（WebView2）窗口壳 + 系统托盘 +
+  内嵌 uvicorn；启动画面即时反馈、单实例互斥（重复双击自动复用）、90s 冷启动
+  容忍、崩溃捕获（错误弹窗 + desktop-error.log）、系统代理绕过；数据目录统一
+  `%APPDATA%\AutoMind`（`core/paths.py`），开发/pip 模式行为不变。
+- **📦 正式安装包**：Inno Setup 中文向导（`AutoMind-Setup-<ver>.exe`，约 31MB）；
+  免管理员按用户安装、WebView2 运行时自动补装（内嵌微软官方引导器）、
+  卸载可选保留用户数据。已通过 静默安装→启动→静默卸载 完整 QA。
+- **🔄 自动更新**（`core/updater.py`）：GitHub Releases 版本检查（6h 缓存、
+  代理→直连双通道）；桌面版一键升级 —— 下载安装包 → **Authenticode 签名校验**
+  （已签名程序强制要求新包同发布者，防投毒/降级）→ 静默安装自动重启；
+  pip 模式给出升级命令。界面入口：设置菜单「🔄 检查更新」+ 启动静默检查通知
+  （`/api/update/check|apply|state`）。
+- **🔏 代码签名管线**：`desktop/sign.ps1`（signtool 定位 + SHA256 + RFC3161
+  时间戳三服务器回退 + 验签）、`build_release.ps1` 一键流水线（前端→冻结→
+  签名→安装器→签名→校验；未配置证书自动降级未签名构建）、installer.iss
+  `/DSIGN` 集成（Setup 与卸载器同签）。证书到手设 `AUTOMIND_CERT_THUMBPRINT`
+  即全签名产出。
+- 新增 updater 测试 10 项，全量 344 项通过。
+
 ## [1.1.0] - 2026-07-15
 
 **SQLite 存储引擎 · 界面视觉精修 · 测试与文档增强**

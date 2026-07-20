@@ -62,7 +62,42 @@ curl -L -o MicrosoftEdgeWebview2Setup.exe "https://go.microsoft.com/fwlink/p/?Li
 数据全部在 `%APPDATA%\AutoMind`（配置 config.json、automind.db、
 sessions.db、kb/、skills/）；托盘菜单「打开数据目录」可直达。
 
-## 五、已知事项
+## 五、一键发布与代码签名
+
+```powershell
+# 完整流水线：前端构建 → PyInstaller → 签名 exe → 安装器 → 签名 Setup → 校验
+.\build_release.ps1              # 未配置证书时自动产出未签名构建
+.\build_release.ps1 -SkipWeb     # web 未改动时提速
+```
+
+**OV 证书到手后（一次性配置，之后每次构建自动签名）：**
+
+1. 双击 PFX 导入「当前用户 → 个人」证书库；
+2. 取证书指纹：`Get-ChildItem Cert:\CurrentUser\My`（40 位 Thumbprint）；
+3. `setx AUTOMIND_CERT_THUMBPRINT <指纹>`（或临时 `$env:AUTOMIND_CERT_THUMBPRINT=...`）；
+4. 重跑 `.\build_release.ps1` → AutoMind.exe 与 Setup.exe 均带
+   SHA256 签名 + RFC3161 时间戳（sectigo/digicert/globalsign 自动回退），
+   SmartScreen 蓝色弹窗随信誉累积消失。
+
+不想导入证书库也可用 PFX 直签：设 `AUTOMIND_CERT_PFX` + `AUTOMIND_CERT_PWD`
+（密码只放环境变量）。手动签名/验签：`.\sign.ps1 -Path <文件>` /
+`.\sign.ps1 -Path <文件> -VerifyOnly`。
+
+## 六、自动更新
+
+应用内置更新通道（左下角「⚙ 设置 → 🔄 检查更新」，启动 3 秒后也会静默检查并
+弹可点通知）：
+
+- **检查**：查询 GitHub Releases 最新版（结果缓存 6 小时）；
+- **升级（桌面版）**：下载 `AutoMind-Setup-<ver>.exe` → **Authenticode 签名
+  校验**（当前程序已签名时，强制要求新包签名有效且同一发布者 —— 防投毒/降级）
+  → 静默安装 → 自动重启，配置与数据全保留；
+- **pip/源码模式**：给出 `pip install -U "automind-agent[web]"` 一键复制。
+
+发布新版本 = 打 tag 推 GitHub Release 并上传 `AutoMind-Setup-<ver>.exe`
+资产，存量用户即可收到更新提示。
+
+## 七、已知事项
 
 - 未签名 exe 首次运行可能触发 SmartScreen「更多信息 → 仍要运行」；
   有收入后购买代码签名证书（OV）即可根治；

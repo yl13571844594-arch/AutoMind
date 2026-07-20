@@ -23,6 +23,12 @@ SetupIconFile=icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; 代码签名：build_release.ps1 传 /DSIGN 与 /Ssignps1=... 时对 Setup.exe 签名
+; （主程序 AutoMind.exe 在打包前已由 sign.ps1 签好）
+#ifdef SIGN
+SignTool=signps1
+SignedUninstaller=yes
+#endif
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesInstallIn64BitMode=x64compatible

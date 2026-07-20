@@ -1317,6 +1317,31 @@ def _cache_store(raw_task: str, images: list | None, reply: str,
         logger.warning("cache_store_failed", error=str(e))
 
 
+# ── 自动更新（GitHub Releases；桌面版可一键静默升级）──
+
+
+@app.get("/api/update/check")
+async def api_update_check(force: bool = False):
+    """检查新版本（6h 缓存；force=true 强制刷新）。"""
+    from automind.core import updater
+    import asyncio as _aio
+    return await _aio.to_thread(updater.check, force)
+
+
+@app.post("/api/update/apply")
+async def api_update_apply():
+    """桌面版：下载 → 签名校验 → 静默升级并自动重启；pip 模式返回升级命令提示。"""
+    from automind.core import updater
+    return updater.apply_update()
+
+
+@app.get("/api/update/state")
+async def api_update_state():
+    """升级进度（downloading/verifying/installing/error + progress%）。"""
+    from automind.core import updater
+    return updater.state()
+
+
 @app.get("/api/quota")
 async def api_quota():
     """版本限额快照：每日任务用量 / 工作区上限 / 知识库限额。"""

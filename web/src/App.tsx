@@ -8,6 +8,7 @@ import PreviewModal from './components/modals/PreviewModal';
 import SettingsModals from './components/modals/SettingsModals';
 import TemplatesModal from './components/modals/TemplatesModal';
 import TourModal from './components/modals/TourModal';
+import UpdateModal from './components/modals/UpdateModal';
 import WorkspacesModal from './components/modals/WorkspacesModal';
 import RightPanel from './components/right/RightPanel';
 import Sidebar from './components/Sidebar';
@@ -30,6 +31,31 @@ const VIEWS: Record<string, React.ComponentType> = {
   kb: KbView, stats: StatsView, schedule: ScheduleView, history: HistoryView,
   audit: AuditView, router: RouterView,
 };
+
+// 启动后静默检查更新（每会话一次，走服务端 6h 缓存）；有新版给出可点通知
+function useUpdateNotify() {
+  const { notification } = AntApp.useApp();
+  useEffect(() => {
+    const t = window.setTimeout(async () => {
+      try {
+        const r = await (await fetch('/api/update/check')).json();
+        if (r.available && !sessionStorage.getItem('automind_update_notified')) {
+          sessionStorage.setItem('automind_update_notified', '1');
+          notification.info({
+            key: 'update', message: `发现新版本 v${r.latest}`,
+            description: '点击查看更新内容并一键升级',
+            placement: 'bottomRight', duration: 8,
+            onClick: () => { notification.destroy('update'); useUi.getState().openModal('update'); },
+            style: { cursor: 'pointer' },
+          });
+        }
+      } catch { /* 离线等场景静默 */ }
+    }, 3000);
+    return () => window.clearTimeout(t);
+  }, []);
+}
+
+function UpdateNotifier() { useUpdateNotify(); return null; }
 
 export default function App() {
   const theme = useApp((s) => s.theme);
@@ -71,6 +97,7 @@ export default function App() {
       }}
     >
       <AntApp>
+        <UpdateNotifier />
         <div className="app-shell">
           <Sidebar />
           <div className="app-main">
@@ -89,6 +116,7 @@ export default function App() {
         <WorkspacesModal />
         <TemplatesModal />
         <TourModal />
+        <UpdateModal />
         <ApprovalModal />
         <PreviewModal />
       </AntApp>
