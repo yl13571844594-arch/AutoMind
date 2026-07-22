@@ -2,35 +2,17 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
-## [1.2.0] - 2026-07-17
-
-**桌面版（Windows 安装即用）**
-
-- **🖥 桌面封装**：新增 `desktop/` —— pywebview（WebView2）窗口壳 +
-  系统托盘 + 内嵌 uvicorn（仅 127.0.0.1 监听）。关窗最小化到托盘，
-  任务与定时调度继续运行；托盘菜单：显示窗口 / 浏览器打开 / 打开数据
-  目录 / 退出。降级链完备：无 WebView2 → 系统浏览器；无托盘依赖 →
-  纯窗口。`--server-only` / `--browser` / `--port` 调试参数。
-- **📁 数据目录统一解析**（`automind/core/paths.py`）：环境变量
-  `AUTOMIND_DATA_DIR` > 冻结环境（%APPDATA%\AutoMind 等平台标准目录）>
-  开发/pip 默认（cwd `.automind`，行为不变）。db/会话/知识库/专家/技能/
-  配置及 pro 存储全部接线；`/api/health` 新增 `paths` 诊断字段。
-- **📦 打包与安装器**：PyInstaller onedir spec（约 71MB，排除重型可选
-  依赖走内置降级）、品牌图标生成脚本、Inno Setup 中文安装器脚本
-  （WebView2 缺失自动补装、卸载询问是否保留用户数据）。构建文档
-  `desktop/README.md`。
-- 冻结版已验证：React 界面 / 知识库 / 内置手册 / WebView2 窗口全通。
-- 测试：新增 `tests/test_paths.py` 8 项（解析优先级 / 模块接线），
-  全量 330 项通过。
-
 ## [1.2.0] - 2026-07-22
 
-**桌面版落地：安装包 · 自动更新 · 代码签名管线**
+**桌面版落地：Windows 安装包 · 自动更新 · 代码签名（Certum 全签名）**
 
 - **🖥 Windows 桌面版**（`desktop/`）：pywebview（WebView2）窗口壳 + 系统托盘 +
-  内嵌 uvicorn；启动画面即时反馈、单实例互斥（重复双击自动复用）、90s 冷启动
-  容忍、崩溃捕获（错误弹窗 + desktop-error.log）、系统代理绕过；数据目录统一
-  `%APPDATA%\AutoMind`（`core/paths.py`），开发/pip 模式行为不变。
+  内嵌 uvicorn（仅 127.0.0.1 监听）；启动画面即时反馈、单实例互斥（重复双击
+  自动复用）、90s 冷启动容忍、崩溃捕获（错误弹窗 + desktop-error.log）、
+  系统代理绕过；关窗最小化到托盘（任务与定时调度继续运行）。降级链完备：
+  无 WebView2 → 系统浏览器；无托盘依赖 → 纯窗口。数据目录统一解析
+  （`core/paths.py`：`AUTOMIND_DATA_DIR` > 冻结环境 `%APPDATA%\AutoMind` >
+  开发/pip 默认 cwd `.automind`，行为不变），`/api/health` 增 `paths` 诊断字段。
 - **📦 正式安装包**：Inno Setup 中文向导（`AutoMind-Setup-<ver>.exe`，约 31MB）；
   免管理员按用户安装、WebView2 运行时自动补装（内嵌微软官方引导器）、
   卸载可选保留用户数据。已通过 静默安装→启动→静默卸载 完整 QA。
