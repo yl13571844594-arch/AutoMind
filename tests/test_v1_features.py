@@ -10,7 +10,15 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "pro"))
 
-from automind.core import edition as edition_mod
+try:
+    import automind_pro  # noqa: F401  商业扩展；仓库含 pro/ 时可用，社区 CI 无
+    _HAS_PRO = True
+except ImportError:
+    _HAS_PRO = False
+
+requires_pro = pytest.mark.skipif(
+    not _HAS_PRO, reason="automind_pro 商业扩展未安装（社区 CI 跳过 Pro 特性测试）")
+
 from automind.core import quota as quota_mod
 from automind.rag.kb import KnowledgeStore
 from automind.rag.parser import chunk_text, extract_text
@@ -66,7 +74,7 @@ class TestQuota:
 
 class TestParser:
     def test_txt(self):
-        assert extract_text("a.txt", "你好 world".encode("utf-8")) == "你好 world"
+        assert extract_text("a.txt", "你好 world".encode()) == "你好 world"
 
     def test_md(self):
         assert "# 标题" in extract_text("a.md", b"# \xe6\xa0\x87\xe9\xa2\x98\ncontent"
@@ -96,11 +104,11 @@ class TestKnowledgeStore:
         meta = store.add_document(
             "python.md",
             "Python 是一种解释型编程语言，适合快速开发。\n\n"
-            "FastAPI 是现代 Python Web 框架，性能出色。".encode("utf-8"))
+            "FastAPI 是现代 Python Web 框架，性能出色。".encode())
         assert meta["chunks"] >= 1
         store.add_document(
             "cooking.txt",
-            "红烧肉的做法：五花肉切块，焯水后炒糖色，加料酒生抽炖煮四十分钟。".encode("utf-8"))
+            "红烧肉的做法：五花肉切块，焯水后炒糖色，加料酒生抽炖煮四十分钟。".encode())
         assert store.doc_count() == 2
 
         hits = store.search("Python Web 框架", top_k=2)
@@ -162,6 +170,7 @@ class TestKnowledgeStore:
 # ── 语义缓存（专业版实现，直接实例化测试）──────────────
 
 
+@requires_pro
 class TestSemanticCache:
     def _make(self, tmp_path, **kw):
         from automind_pro.semantic_cache import SemanticCacheFeature
@@ -193,6 +202,7 @@ class TestSemanticCache:
 # ── 模型路由 ────────────────────────────────────────────
 
 
+@requires_pro
 class TestModelRouter:
     def _make(self, tmp_path, **kw):
         from automind_pro.model_router import ModelRouterFeature

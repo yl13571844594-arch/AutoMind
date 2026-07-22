@@ -1323,8 +1323,9 @@ def _cache_store(raw_task: str, images: list | None, reply: str,
 @app.get("/api/update/check")
 async def api_update_check(force: bool = False):
     """检查新版本（6h 缓存；force=true 强制刷新）。"""
-    from automind.core import updater
     import asyncio as _aio
+
+    from automind.core import updater
     return await _aio.to_thread(updater.check, force)
 
 

@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from automind.core.db import Database, migrate_json_once
 
@@ -81,10 +78,10 @@ class TestJsonMigration:
 
     def test_migrate_missing_or_broken_file(self, tmp_path):
         db = Database(tmp_path / "t.db")
-        assert not migrate_json_once(db, "a", tmp_path / "nope.json", lambda d: None)
+        assert not migrate_json_once(db, "a", tmp_path / "nope.json", lambda _d: None)
         broken = tmp_path / "broken.json"
         broken.write_text("{invalid", encoding="utf-8")
-        assert not migrate_json_once(db, "b", broken, lambda d: None)
+        assert not migrate_json_once(db, "b", broken, lambda _d: None)
         db.close()
 
 
