@@ -91,51 +91,13 @@ jobs:
         with:
           files: desktop/Output/AutoMind-Setup-*.exe
 
-  # ── macOS：分别原生构建两架构 .app（arm64 + x86_64）────
-  #   普通 pip 只装单架构 wheel，直接 universal2 会失败；故各自原生构建，
-  #   再由 macos-dmg 作业 lipo 合并成通用二进制。matrix 也规避了 Intel
-  #   (macos-13) 单一 runner 池排队慢的问题。
-  macos-build:
+  # ── macOS 通用 DMG（Apple Silicon + Intel）────────────
+  #   全程在 macos-14(arm64) 单机完成，规避 Intel(macos-13) runner 池排队：
+  #     arm64 片 → 原生 PyInstaller；
+  #     x86_64 片 → Rosetta 2 下用同一 universal2 Python(arch -x86_64) 构建；
+  #     两片 lipo 合并成通用二进制 → 签名 → DMG →（可选）公证。
+  macos:
     needs: web
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { arch: arm64,  runner: macos-14 }
-          - { arch: x86_64, runner: macos-13 }
-    runs-on: ${{ matrix.runner }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - uses: actions/download-artifact@v4
-        with:
-          name: web-dist
-          path: automind/static/dist/
-      - name: Install deps
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[desktop]"
-      - name: Generate icons
-        working-directory: desktop
-        run: python make_icon.py
-      - name: Build native .app (${{ matrix.arch }})
-        working-directory: desktop
-        run: |
-          pyinstaller automind.spec --noconfirm
-          echo "架构：$(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
-      - name: Package .app tarball
-        working-directory: desktop/dist
-        run: tar -czf AutoMind-app-${{ matrix.arch }}.tgz AutoMind.app
-      - uses: actions/upload-artifact@v4
-        with:
-          name: AutoMind-app-${{ matrix.arch }}
-          path: desktop/dist/AutoMind-app-${{ matrix.arch }}.tgz
-          retention-days: 3
-
-  # ── macOS 通用 DMG：lipo 合并两架构 → 签名 → DMG（→ 公证）──
-  macos-dmg:
-    needs: macos-build
     runs-on: macos-14
     env:
       MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
@@ -146,20 +108,58 @@ jobs:
       MAC_NOTARY_TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
       - uses: actions/download-artifact@v4
-        with: { name: AutoMind-app-arm64, path: arm64 }
-      - uses: actions/download-artifact@v4
-        with: { name: AutoMind-app-x86_64, path: x86_64 }
-      - name: Extract + lipo merge → universal .app
+        with:
+          name: web-dist
+          path: automind/static/dist/
+      - name: Verify Python is universal2 (Rosetta 交叉构建前提)
+        run: |
+          PYBIN="$(python3 -c 'import sys;print(sys.executable)')"
+          echo "python: $PYBIN"
+          ARCHS="$(lipo -archs "$PYBIN" 2>/dev/null || echo single)"
+          echo "python archs: $ARCHS"
+          case "$ARCHS" in
+            *x86_64*arm64*|*arm64*x86_64*) echo "✓ universal2";;
+            *) echo "::warning::Python 非 universal2（$ARCHS），x86_64 片将回退方案";;
+          esac
+          # 确保 Rosetta 2 可用（Apple Silicon runner 一般已装）
+          softwareupdate --install-rosetta --agree-to-license 2>/dev/null || true
+      - name: Generate icons
+        working-directory: desktop
+        run: python make_icon.py
+      # 1) arm64 原生片
+      - name: Build arm64 slice
+        working-directory: desktop
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e "..[desktop]"
+          pyinstaller automind.spec --noconfirm
+          echo "arm64 archs: $(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
+          mv dist/AutoMind.app "$RUNNER_TEMP/AutoMind-arm64.app"
+          rm -rf build dist
+      # 2) x86_64 片（Rosetta：同一 universal2 Python 以 arch -x86_64 运行）
+      - name: Build x86_64 slice (Rosetta)
+        working-directory: desktop
+        run: |
+          arch -x86_64 python3 -m venv "$RUNNER_TEMP/venv-x86"
+          VPY="$RUNNER_TEMP/venv-x86/bin/python"
+          echo "x86 venv archs: $(lipo -archs "$VPY" 2>/dev/null || echo n/a)"
+          arch -x86_64 "$VPY" -m pip install --upgrade pip
+          arch -x86_64 "$VPY" -m pip install -e "..[desktop]"
+          arch -x86_64 "$VPY" -m PyInstaller automind.spec --noconfirm
+          echo "x86_64 archs: $(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
+          mv dist/AutoMind.app "$RUNNER_TEMP/AutoMind-x86_64.app"
+      # 3) lipo 合并 → 通用 .app
+      - name: Merge universal .app
         working-directory: desktop
         run: |
           mkdir -p dist
-          tar -xzf "$GITHUB_WORKSPACE/arm64/AutoMind-app-arm64.tgz" -C "$GITHUB_WORKSPACE/arm64"
-          tar -xzf "$GITHUB_WORKSPACE/x86_64/AutoMind-app-x86_64.tgz" -C "$GITHUB_WORKSPACE/x86_64"
           brew install create-dmg || true
           bash packaging/macos/merge_universal.sh \
-            "$GITHUB_WORKSPACE/arm64/AutoMind.app" \
-            "$GITHUB_WORKSPACE/x86_64/AutoMind.app" \
+            "$RUNNER_TEMP/AutoMind-arm64.app" \
+            "$RUNNER_TEMP/AutoMind-x86_64.app" \
             dist/AutoMind.app
       # ── 代码签名（可选）：配了 Developer ID 证书 secret 才导入钥匙串 ──
       #   仓库 Settings → Secrets 添加（缺任一即走 ad-hoc，DMG 仍可正常安装）：
