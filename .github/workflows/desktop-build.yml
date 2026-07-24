@@ -44,6 +44,9 @@ jobs:
   windows:
     needs: web
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"          # runner 默认 cp1252，中文 print 会 UnicodeEncodeError
+      PYTHONIOENCODING: "utf-8"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
