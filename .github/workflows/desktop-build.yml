@@ -1,0 +1,229 @@
+name: Build Desktop Installers
+
+# 桌面版三平台安装包一键构建：
+#   Windows  → AutoMind-Setup-<ver>.exe   （Inno Setup 安装器，x64 / ARM64 兼容）
+#   macOS    → AutoMind-<ver>.dmg          （通用二进制，Apple Silicon + Intel）
+#   Linux    → automind_<ver>_amd64.deb    （Debian / Ubuntu）
+#
+# 触发：手动 Run workflow，或推送 v*.*.* tag（tag 时自动附加到 GitHub Release）。
+# 说明：代码签名默认跳过（未在 CI 配置证书时产出未签名构建，可正常安装使用）。
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write   # tag 触发时创建/更新 Release 需要
+
+jobs:
+  # ── 前端只构建一次，产物供三平台复用 ──────────────────
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with: { version: 9 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - name: Build React frontend
+        working-directory: web
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: automind/static/dist/
+          retention-days: 3
+
+  # ── Windows 安装器 ────────────────────────────────────
+  windows:
+    needs: web
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: automind/static/dist/
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[desktop]"
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Generate icons
+        working-directory: desktop
+        run: python make_icon.py
+      - name: Build (PyInstaller + Inno Setup, unsigned)
+        working-directory: desktop
+        shell: pwsh
+        run: .\build_release.ps1 -SkipWeb -NoSign
+      - name: Smoke test (server-only /api/health)
+        working-directory: desktop
+        shell: pwsh
+        run: |
+          $p = Start-Process -PassThru ".\dist\AutoMind\AutoMind.exe" -ArgumentList "--server-only","--port","18765"
+          $ok = $false
+          foreach ($i in 1..30) {
+            Start-Sleep 2
+            try { if ((Invoke-WebRequest "http://127.0.0.1:18765/api/health" -UseBasicParsing).StatusCode -eq 200) { $ok = $true; break } } catch {}
+          }
+          Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+          if (-not $ok) { throw "冒烟测试失败：/api/health 未就绪" }
+          Write-Host "冒烟测试通过 ✓"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoMind-Windows-Setup
+          path: desktop/Output/AutoMind-Setup-*.exe
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/Output/AutoMind-Setup-*.exe
+
+  # ── macOS 通用 DMG（Apple Silicon + Intel）────────────
+  macos:
+    needs: web
+    runs-on: macos-13   # universal2 Python + 可产通用二进制
+    env:
+      # 作业级映射，供步骤 if: env.X != '' 判断（缺 secret 即空串 → 走 ad-hoc）
+      MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      MAC_CODESIGN_IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
+      MAC_NOTARY_APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
+      MAC_NOTARY_PASSWORD: ${{ secrets.MAC_NOTARY_PASSWORD }}
+      MAC_NOTARY_TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: automind/static/dist/
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[desktop]"
+          brew install create-dmg || true
+      - name: Generate icons
+        working-directory: desktop
+        run: python make_icon.py
+      - name: Build universal .app
+        working-directory: desktop
+        env:
+          AUTOMIND_VERSION: "1.2.0"
+        run: pyinstaller automind.spec --noconfirm
+      # ── 代码签名（可选）：配了 Developer ID 证书 secret 才导入钥匙串 ──
+      #   仓库 Settings → Secrets 添加（缺任一即走 ad-hoc，DMG 仍可用）：
+      #     MAC_CERT_P12_BASE64  Developer ID Application 证书(.p12)的 base64
+      #     MAC_CERT_PASSWORD    该 .p12 的导出密码
+      #     MAC_CODESIGN_IDENTITY "Developer ID Application: 名称 (TEAMID)"
+      - name: Import signing certificate
+        if: ${{ env.MAC_CERT_P12_BASE64 != '' }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/app-signing.keychain-db"
+          KPW="$(openssl rand -base64 24)"
+          security create-keychain -p "$KPW" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KPW" "$KEYCHAIN"
+          echo "$MAC_CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -k "$KPW" "$KEYCHAIN" >/dev/null
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          rm -f "$RUNNER_TEMP/cert.p12"
+      - name: Build DMG
+        working-directory: desktop
+        env:
+          AUTOMIND_MAC_CODESIGN_IDENTITY: ${{ env.MAC_CODESIGN_IDENTITY }}
+        run: bash packaging/macos/build_dmg.sh
+      # ── 公证 + 装订（可选）：配了 Apple ID 三件套才执行 ──
+      #     MAC_NOTARY_APPLE_ID   Apple ID 邮箱
+      #     MAC_NOTARY_PASSWORD   App 专用密码
+      #     MAC_NOTARY_TEAM_ID    团队 ID
+      - name: Notarize DMG
+        if: ${{ env.MAC_NOTARY_APPLE_ID != '' }}
+        working-directory: desktop
+        run: |
+          DMG=$(ls Output/AutoMind-*.dmg | head -1)
+          xcrun notarytool submit "$DMG" --apple-id "$MAC_NOTARY_APPLE_ID" \
+            --password "$MAC_NOTARY_PASSWORD" --team-id "$MAC_NOTARY_TEAM_ID" --wait
+          xcrun stapler staple "$DMG"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoMind-macOS-DMG
+          path: desktop/Output/AutoMind-*.dmg
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/Output/AutoMind-*.dmg
+
+  # ── Linux .deb（Debian / Ubuntu，amd64）───────────────
+  linux:
+    needs: web
+    runs-on: ubuntu-22.04   # webkit2gtk-4.1 + girepository-1.0 组合稳定
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: automind/static/dist/
+      - name: Install system deps (WebKit2GTK)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config python3-dev fakeroot \
+            libgirepository1.0-dev libcairo2-dev \
+            gir1.2-gtk-3.0 gir1.2-webkit2-4.1 libwebkit2gtk-4.1-0
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          # PyGObject<3.50 走 girepository-1.0（与上面的 -dev 包匹配）
+          pip install "pygobject<3.50" pycairo
+          pip install -e ".[desktop]"
+      - name: Generate icons
+        working-directory: desktop
+        run: python make_icon.py
+      - name: Build onedir
+        working-directory: desktop
+        run: pyinstaller automind.spec --noconfirm
+      - name: Smoke test (server-only /api/health)
+        working-directory: desktop
+        run: |
+          ./dist/AutoMind/AutoMind --server-only --port 18765 &
+          PID=$!
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 2
+            if curl -fsS http://127.0.0.1:18765/api/health >/dev/null 2>&1; then ok=1; break; fi
+          done
+          kill $PID 2>/dev/null || true
+          [ "$ok" = "1" ] || { echo "冒烟测试失败"; exit 1; }
+          echo "冒烟测试通过 ✓"
+      - name: Build .deb
+        working-directory: desktop
+        run: bash packaging/linux/build_deb.sh
+      - name: Lint package (lintian, 不阻断)
+        run: |
+          sudo apt-get install -y lintian || true
+          lintian desktop/Output/automind_*_amd64.deb || true
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoMind-Linux-deb
+          path: desktop/Output/automind_*_amd64.deb
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: desktop/Output/automind_*_amd64.deb

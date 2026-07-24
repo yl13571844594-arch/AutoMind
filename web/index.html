@@ -4,9 +4,83 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoMind — 通用自动化 Agent</title>
+  <style>
+    /* 首屏占位 + 白屏兜底（React 挂载成功后其内容被替换）。
+       任何原因（脚本加载失败 / 运行时异常 / 内核过旧）导致 React 未挂载时，
+       用户看到可读的提示与操作，而非纯空白页。 */
+    html, body { height: 100%; margin: 0; }
+    body {
+      background: #060913; color: #e8ecf7;
+      font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+    }
+    #boot {
+      position: fixed; inset: 0; display: flex; flex-direction: column;
+      align-items: center; justify-content: center; gap: 16px; padding: 0 40px;
+      text-align: center;
+    }
+    #boot .dot {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: linear-gradient(135deg, #7b9fff, #b594ff);
+      box-shadow: 0 0 40px rgba(123,159,255,.5); animation: bp 1.6s ease infinite;
+    }
+    @keyframes bp { 50% { transform: scale(.85); box-shadow: 0 0 18px rgba(123,159,255,.35); } }
+    #boot h1 { font-size: 1.15em; font-weight: 600; margin: 0; }
+    #boot p { color: #8e9abb; font-size: .86em; margin: 0; line-height: 1.8; }
+    #boot .err { color: #ff6b6b; }
+    #boot code { background: #1f2740; border-radius: 6px; padding: 2px 8px; font-size: .82em; }
+    #boot button {
+      margin-top: 4px; padding: 8px 20px; border: 0; border-radius: 8px; cursor: pointer;
+      color: #fff; font-size: .9em; background: linear-gradient(135deg, #7b9fff, #b594ff);
+    }
+  </style>
 </head>
 <body>
-  <div id="root"></div>
+  <div id="root">
+    <!-- React 未接管前的占位；挂载成功即被清除 -->
+    <div id="boot">
+      <div class="dot"></div>
+      <h1>AutoMind 正在加载…</h1>
+      <p>正在初始化工作台界面</p>
+    </div>
+  </div>
+  <noscript>
+    <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+                padding:0 40px;text-align:center;color:#ff6b6b;font-size:1em">
+      本应用需要启用 JavaScript 才能运行，请在浏览器设置中开启后重试。
+    </div>
+  </noscript>
+  <script>
+    // 白屏兜底：监听脚本错误与"迟迟未挂载"，把纯空白替换成可读提示。
+    (function () {
+      var shown = false;
+      function rootMounted() {
+        var r = document.getElementById('root');
+        // React 挂载后 #boot 被移除、#root 出现应用节点
+        return r && !document.getElementById('boot') && r.children.length > 0;
+      }
+      function showError(detail) {
+        if (shown || rootMounted()) return;
+        shown = true;
+        var boot = document.getElementById('boot');
+        if (!boot) return;
+        boot.innerHTML =
+          '<h1 class="err">⚠ 界面未能加载</h1>' +
+          '<p>页面脚本未能正常运行，通常是浏览器/内核版本过旧或资源加载失败。</p>' +
+          (detail ? '<p><code>' + String(detail).slice(0, 300).replace(/</g, '&lt;') + '</code></p>' : '') +
+          '<p>请尝试刷新；桌面版可用系统浏览器打开，或更新 Microsoft Edge WebView2 运行时。</p>' +
+          '<button onclick="location.reload()">刷新重试</button>';
+      }
+      window.addEventListener('error', function (e) {
+        // 资源(script/link)加载失败或运行时异常
+        showError(e && (e.message || (e.target && e.target.src) || ''));
+      }, true);
+      window.addEventListener('unhandledrejection', function (e) {
+        showError(e && e.reason && (e.reason.message || e.reason));
+      });
+      // 兜底计时：12s 仍未挂载且无错误 → 也给出提示（避免永久假死空白）
+      setTimeout(function () { if (!rootMounted()) showError(''); }, 12000);
+    })();
+  </script>
   <script type="module" src="/src/main.tsx"></script>
 </body>
 </html>

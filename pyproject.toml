@@ -56,6 +56,16 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
 ]
+# 桌面版打包（Windows/macOS/Linux 通用；平台窗口/托盘后端见下）
+#   pywebview 后端：Windows=WebView2 内置，macOS=pyobjc（随 pywebview 装），
+#   Linux=WebKit2GTK（需系统包 gir1.2-webkit2-4.1 + PyGObject，CI 里 apt 安装）。
+desktop = [
+    "automind-agent[web]",
+    "pyinstaller>=6.3",
+    "pywebview>=5.0",
+    "pystray>=0.19",
+    "pillow>=10.0",
+]
 
 [project.scripts]
 automind = "automind.main:main"

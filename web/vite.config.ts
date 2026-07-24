@@ -10,6 +10,9 @@ export default defineConfig({
     outDir: '../automind/static/dist',
     emptyOutDir: true,
     chunkSizeWarningLimit: 1600,
+    // 显式基线：兼容较旧的 WebView2/Edge 内核，避免个别机器因不支持的新语法
+    // 直接白屏（对应"部分电脑安装后空白界面"）。es2020 覆盖桌面版目标内核。
+    target: 'es2020',
   },
   server: {
     port: 5173,

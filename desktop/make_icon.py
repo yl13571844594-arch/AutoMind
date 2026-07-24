@@ -1,4 +1,10 @@
-"""生成 desktop/icon.ico — 品牌双色渐变圆点 + 描边（多尺寸）。"""
+"""生成品牌图标 — 双色渐变圆点 + 内亮斑（多尺寸）。
+
+产物（跨平台打包共用同一视觉）：
+    icon.ico   Windows（PyInstaller/Inno）
+    icon.png   Linux（.desktop / .deb，512×512）
+    icon.icns  macOS（.app 包，best-effort；失败不阻断）
+"""
 
 from __future__ import annotations
 
@@ -28,12 +34,29 @@ def draw(size: int) -> Image.Image:
 
 
 def main() -> None:
-    out = Path(__file__).parent / "icon.ico"
+    here = Path(__file__).parent
+
+    # Windows .ico（多尺寸）
+    ico = here / "icon.ico"
     sizes = [16, 24, 32, 48, 64, 128, 256]
     imgs = [draw(s) for s in sizes]
-    imgs[-1].save(out, format="ICO", sizes=[(s, s) for s in sizes],
+    imgs[-1].save(ico, format="ICO", sizes=[(s, s) for s in sizes],
                   append_images=imgs[:-1])
-    print(f"已生成 {out}")
+    print(f"已生成 {ico}")
+
+    # Linux .png（512×512，供 .desktop / hicolor 图标主题）
+    png = here / "icon.png"
+    draw(512).save(png, format="PNG")
+    print(f"已生成 {png}")
+
+    # macOS .icns（Pillow 直写；老版本或缺编码器时跳过，CI 可用 sips 兜底）
+    icns = here / "icon.icns"
+    try:
+        base = draw(1024)
+        base.save(icns, format="ICNS")
+        print(f"已生成 {icns}")
+    except Exception as e:  # noqa: BLE001
+        print(f"跳过 icon.icns（{e}）；macOS 构建时可用 sips 从 icon.png 生成")
 
 
 if __name__ == "__main__":
