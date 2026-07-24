@@ -60,9 +60,12 @@ a = Analysis(
         "reportlab", "ldap3", "tkinter", "pytest",
     ],
     noarchive=False,
-    # macOS 通用二进制（Apple Silicon + Intel 同一 .app）；
-    # 依赖需提供 universal2/两架构 wheel，CI 在 universal2 Python 上构建。
-    target_arch="universal2" if IS_MAC else None,
+    # macOS 架构：默认按 runner 原生架构构建（arm64 或 x86_64）——
+    # 普通 pip 装的是单架构 wheel，直接 universal2 会因依赖非 fat 而失败。
+    # 通用二进制由 CI 分别原生构建两架构后 lipo 合并（见 merge_universal.sh）。
+    # 如确有 universal2 wheel，可置 AUTOMIND_MAC_UNIVERSAL=1 让 PyInstaller 直出。
+    target_arch=("universal2" if IS_MAC
+                 and os.environ.get("AUTOMIND_MAC_UNIVERSAL") == "1" else None),
 )
 
 pyz = PYZ(a.pure)

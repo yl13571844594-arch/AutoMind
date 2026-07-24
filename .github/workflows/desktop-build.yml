@@ -91,18 +91,19 @@ jobs:
         with:
           files: desktop/Output/AutoMind-Setup-*.exe
 
-  # ── macOS 通用 DMG（Apple Silicon + Intel）────────────
-  macos:
+  # ── macOS：分别原生构建两架构 .app（arm64 + x86_64）────
+  #   普通 pip 只装单架构 wheel，直接 universal2 会失败；故各自原生构建，
+  #   再由 macos-dmg 作业 lipo 合并成通用二进制。matrix 也规避了 Intel
+  #   (macos-13) 单一 runner 池排队慢的问题。
+  macos-build:
     needs: web
-    runs-on: macos-13   # universal2 Python + 可产通用二进制
-    env:
-      # 作业级映射，供步骤 if: env.X != '' 判断（缺 secret 即空串 → 走 ad-hoc）
-      MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
-      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
-      MAC_CODESIGN_IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
-      MAC_NOTARY_APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
-      MAC_NOTARY_PASSWORD: ${{ secrets.MAC_NOTARY_PASSWORD }}
-      MAC_NOTARY_TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: arm64,  runner: macos-14 }
+          - { arch: x86_64, runner: macos-13 }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -115,17 +116,53 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[desktop]"
-          brew install create-dmg || true
       - name: Generate icons
         working-directory: desktop
         run: python make_icon.py
-      - name: Build universal .app
+      - name: Build native .app (${{ matrix.arch }})
         working-directory: desktop
-        env:
-          AUTOMIND_VERSION: "1.2.0"
-        run: pyinstaller automind.spec --noconfirm
+        run: |
+          pyinstaller automind.spec --noconfirm
+          echo "架构：$(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
+      - name: Package .app tarball
+        working-directory: desktop/dist
+        run: tar -czf AutoMind-app-${{ matrix.arch }}.tgz AutoMind.app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AutoMind-app-${{ matrix.arch }}
+          path: desktop/dist/AutoMind-app-${{ matrix.arch }}.tgz
+          retention-days: 3
+
+  # ── macOS 通用 DMG：lipo 合并两架构 → 签名 → DMG（→ 公证）──
+  macos-dmg:
+    needs: macos-build
+    runs-on: macos-14
+    env:
+      MAC_CERT_P12_BASE64: ${{ secrets.MAC_CERT_P12_BASE64 }}
+      MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+      MAC_CODESIGN_IDENTITY: ${{ secrets.MAC_CODESIGN_IDENTITY }}
+      MAC_NOTARY_APPLE_ID: ${{ secrets.MAC_NOTARY_APPLE_ID }}
+      MAC_NOTARY_PASSWORD: ${{ secrets.MAC_NOTARY_PASSWORD }}
+      MAC_NOTARY_TEAM_ID: ${{ secrets.MAC_NOTARY_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: AutoMind-app-arm64, path: arm64 }
+      - uses: actions/download-artifact@v4
+        with: { name: AutoMind-app-x86_64, path: x86_64 }
+      - name: Extract + lipo merge → universal .app
+        working-directory: desktop
+        run: |
+          mkdir -p dist
+          tar -xzf "$GITHUB_WORKSPACE/arm64/AutoMind-app-arm64.tgz" -C "$GITHUB_WORKSPACE/arm64"
+          tar -xzf "$GITHUB_WORKSPACE/x86_64/AutoMind-app-x86_64.tgz" -C "$GITHUB_WORKSPACE/x86_64"
+          brew install create-dmg || true
+          bash packaging/macos/merge_universal.sh \
+            "$GITHUB_WORKSPACE/arm64/AutoMind.app" \
+            "$GITHUB_WORKSPACE/x86_64/AutoMind.app" \
+            dist/AutoMind.app
       # ── 代码签名（可选）：配了 Developer ID 证书 secret 才导入钥匙串 ──
-      #   仓库 Settings → Secrets 添加（缺任一即走 ad-hoc，DMG 仍可用）：
+      #   仓库 Settings → Secrets 添加（缺任一即走 ad-hoc，DMG 仍可正常安装）：
       #     MAC_CERT_P12_BASE64  Developer ID Application 证书(.p12)的 base64
       #     MAC_CERT_PASSWORD    该 .p12 的导出密码
       #     MAC_CODESIGN_IDENTITY "Developer ID Application: 名称 (TEAMID)"
