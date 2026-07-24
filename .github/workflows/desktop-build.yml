@@ -126,6 +126,10 @@ jobs:
           esac
           # 确保 Rosetta 2 可用（Apple Silicon runner 一般已装）
           softwareupdate --install-rosetta --agree-to-license 2>/dev/null || true
+      - name: Install arm64 deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[desktop]"
       - name: Generate icons
         working-directory: desktop
         run: python make_icon.py
@@ -133,8 +137,6 @@ jobs:
       - name: Build arm64 slice
         working-directory: desktop
         run: |
-          python -m pip install --upgrade pip
-          pip install -e "..[desktop]"
           pyinstaller automind.spec --noconfirm
           echo "arm64 archs: $(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
           mv dist/AutoMind.app "$RUNNER_TEMP/AutoMind-arm64.app"
