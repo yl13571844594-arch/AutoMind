@@ -53,7 +53,7 @@ GITHUB.md
 AUTOMIND_REFACTOR_PLAN.md
 BUGS_21_TO_FIX.md
 
-# ���ؿ����������ã����������ֿ⣩
+# ���ؿ����������ã����������ֿ⣩
 .claude/
 
 # v1.0 React 前端：构建产物需随仓库分发（覆盖上面的通用 dist/ 规则）
@@ -73,3 +73,9 @@ desktop/MicrosoftEdgeWebview2Setup.exe
 # 桌面安装器构建产物与第三方引导器（微软官方下载，见 desktop/README.md）
 desktop/Output/
 desktop/MicrosoftEdgeWebview2Setup.exe
+
+# 三平台安装包成品（体积大，走 CI artifacts / GitHub Release 分发，不入库）
+# 注意：只忽略安装包本身，packaging/ 下的构建脚本仍需版本化
+desktop/packaging/**/*.exe
+desktop/packaging/**/*.dmg
+desktop/packaging/**/*.deb
