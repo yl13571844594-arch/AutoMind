@@ -79,3 +79,5 @@ desktop/MicrosoftEdgeWebview2Setup.exe
 desktop/packaging/**/*.exe
 desktop/packaging/**/*.dmg
 desktop/packaging/**/*.deb
+# 校验和随每次构建变化，跟随安装包一起发布，不入库（避免仓库里留下过期哈希）
+desktop/packaging/SHA256SUMS

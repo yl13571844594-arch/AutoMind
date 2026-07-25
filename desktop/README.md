@@ -139,12 +139,45 @@ bash packaging/linux/build_deb.sh          # → Output/automind_<ver>_amd64.deb
 macOS 数据目录 `~/Library/Application Support/AutoMind`，Linux
 `~/.local/share/automind`（`automind/core/paths.py` 统一解析）。
 
-**签名**：CI 默认产未签名/ad-hoc 包（可正常安装运行）。要正式签名：
-- Windows → 本机 `build_release.ps1`（Certum 云证书，见 `SIGNING.md`）；
-- macOS → 仓库 Secrets 配 `MAC_CERT_P12_BASE64`/`MAC_CERT_PASSWORD`/
-  `MAC_CODESIGN_IDENTITY` 即深度签名，再配 `MAC_NOTARY_APPLE_ID`/
-  `MAC_NOTARY_PASSWORD`/`MAC_NOTARY_TEAM_ID` 即公证装订（去除首启右键）；
-- Linux → `.deb` 一般无需签名，直接 `dpkg -i` 安装。
+### 分发包签名现状
+
+| 平台 | 签名方式 | 现状 |
+|------|----------|------|
+| Windows | Authenticode（Certum OV 云证书） | ✅ **正式签名**（本机 `build_release.ps1` 产出） |
+| macOS | Apple Developer ID + 公证 | ad-hoc 签名（首启需右键→「打开」一次） |
+| Linux | 无系统级代码签名 | 提供 SHA256 校验和 |
+
+- **Windows**：本机 `.\build_release.ps1 -SkipWeb` 即产出全签名包
+  （`AutoMind.exe` + `Setup.exe` + 卸载器，SHA256 + RFC3161 时间戳）。
+  前置：SimplySign Desktop 已登录、`AUTOMIND_CERT_THUMBPRINT` 等环境变量，
+  详见 `SIGNING.md`。**CI 产出的是未签名包**（云端无证书私钥），对外分发
+  请用本机签名版。
+- **macOS**：正式签名需 Apple Developer ID 证书（Certum 证书对苹果无效，
+  且 `codesign` 仅存在于 macOS）。CI 的深度签名（hardened runtime + 时间戳）
+  与公证装订流程**已接好**，仓库 Secrets 填入 `MAC_CERT_P12_BASE64`/
+  `MAC_CERT_PASSWORD`/`MAC_CODESIGN_IDENTITY`（+ `MAC_NOTARY_APPLE_ID`/
+  `MAC_NOTARY_PASSWORD`/`MAC_NOTARY_TEAM_ID`）即自动生效，无需改代码。
+- **Linux**：`.deb` 没有系统强制校验的代码签名 —— apt 校验的是软件源
+  Release 文件的 GPG 签名，单个 `.deb` 默认不验签（`debsig-verify` 在
+  Debian/Ubuntu 上默认关闭）。故按惯例提供校验和，直接 `dpkg -i` 安装。
+
+### 校验和
+
+三平台安装包的 SHA256 校验和随包发布（`packaging/SHA256SUMS`，纯 LF 行尾）：
+
+```bash
+cd desktop/packaging && sha256sum -c SHA256SUMS   # Linux/macOS
+```
+
+```powershell
+Get-FileHash .\AutoMind-Setup-1.2.0.exe -Algorithm SHA256   # Windows
+```
+
+生成（三个包就位后在 `desktop/packaging/` 下跑）：
+
+```bash
+sha256sum windows/*.exe macos/*.dmg linux/*.deb > SHA256SUMS
+```
 
 ## 八、空白界面（白屏）兼容
 
