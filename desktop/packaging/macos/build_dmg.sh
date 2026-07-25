@@ -39,8 +39,14 @@ if [ -n "$IDENTITY" ]; then
            --sign "$IDENTITY" "$APP"
   codesign --verify --deep --strict --verbose=2 "$APP" || true
 else
-  echo "签名：ad-hoc（未配置 Developer ID；用户首次需右键→打开）"
-  codesign --force --deep --sign - "$APP" || true
+  # ad-hoc 签名不是可选项：Apple Silicon 上 arm64 可执行文件**必须**带有效
+  # 签名才能运行，完全未签名会被内核直接 SIGKILL。因此这里失败必须中断，
+  # 不能 `|| true` 放行一个在 M 系列机器上根本起不来的包。
+  echo "签名：ad-hoc（未配置 Developer ID）"
+  codesign --force --deep --sign - "$APP"
+  codesign --verify --deep --strict "$APP" \
+    || { echo "!! ad-hoc 签名校验失败 —— 该包在 Apple Silicon 上无法启动"; exit 1; }
+  echo "ad-hoc 签名校验通过 ✓"
 fi
 
 # 2) 组装 DMG 内容（应用 + /Applications 快捷方式，拖拽安装）
@@ -81,4 +87,14 @@ fi
 echo ""
 echo "✅ 构建完成：$DMG"
 ls -lh "$DMG"
-echo "提示：如需分发到未公证机器，用户右键 AutoMind.app →「打开」一次即可。"
+if [ -z "$IDENTITY" ]; then
+  cat <<'TIP'
+
+提示：未公证包在用户机器上会被 Gatekeeper 拦一次，放行方式随系统版本不同：
+  · macOS 14 及更早：右键 AutoMind.app →「打开」→ 弹窗里再点「打开」
+  · macOS 15 (Sequoia) 起：右键「打开」的旁路已被移除 —— 需先双击一次
+    （弹出拦截提示后），再去 系统设置 → 隐私与安全性 → 下方点「仍要打开」
+  · 命令行一键放行：xattr -dr com.apple.quarantine /Applications/AutoMind.app
+彻底免此步骤需 Apple Developer ID 签名 + 公证（见 desktop/README.md）。
+TIP
+fi

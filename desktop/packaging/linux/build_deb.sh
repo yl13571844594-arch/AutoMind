@@ -67,7 +67,29 @@ EOF
 # 5) 安装体积（KB）
 INSTALLED_KB="$(du -sk "$STAGE/opt" | cut -f1)"
 
+# 5.5) 探测真实 glibc 需求 —— 必须与构建机实际链接的版本一致。
+# 声明过松（如写死 >= 2.31 但实际需 2.35）后果很隐蔽：dpkg 认为依赖满足
+# 照常安装，用户一运行才报 "GLIBC_2.34 not found" —— 装得上、跑不了。
+# 故从产物里实测取最高版本，让 dpkg 在过旧系统上直接拒装并给出明确提示。
+detect_glibc_req() {
+  local found=""
+  if command -v objdump >/dev/null 2>&1; then
+    found="$(find "$STAGE/opt" -type f \( -name '*.so' -o -name '*.so.*' -o -name 'AutoMind' \) -print0 \
+      | xargs -0 -r objdump -T 2>/dev/null \
+      | grep -oE 'GLIBC_2\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' \
+      | sort -uV | tail -1)"
+  fi
+  # objdump 缺失时退回保守值（Ubuntu 22.04 基线），宁可严格勿放行
+  echo "${found:-2.35}"
+}
+GLIBC_REQ="$(detect_glibc_req)"
+echo "探测到 glibc 需求：>= $GLIBC_REQ"
+
 # 6) DEBIAN/control
+# 依赖说明：PyInstaller 只打包了 GTK/GLib/Pango 等 typelib，**没有**
+# WebKit2-4.x.typelib —— pywebview 运行时要靠系统的 gir1.2-webkit2-* 提供，
+# 缺了就建不出 WebKit 窗口（只能降级系统浏览器）。故它是 Depends 而非
+# Recommends（Recommends 在 --no-install-recommends / dpkg -i 下会被跳过）。
 cat > "$STAGE/DEBIAN/control" <<EOF
 Package: $PKG
 Version: $VER
@@ -76,8 +98,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: AutoMind Team <noreply@automind.dev>
 Installed-Size: $INSTALLED_KB
-Depends: libc6 (>= 2.31), libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37
-Recommends: gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0
+Depends: libc6 (>= $GLIBC_REQ), libgtk-3-0, libwebkit2gtk-4.1-0 | libwebkit2gtk-4.0-37, gir1.2-webkit2-4.1 | gir1.2-webkit2-4.0
 Homepage: https://github.com/yl13571844594-arch/AutoMind
 Description: 通用自动化 Agent（社区版）
  AutoMind 是支持分层规划、符号推理、自我纠错、MCP 与多模型后端的

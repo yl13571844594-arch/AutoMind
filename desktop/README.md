@@ -161,6 +161,48 @@ macOS 数据目录 `~/Library/Application Support/AutoMind`，Linux
   Release 文件的 GPG 签名，单个 `.deb` 默认不验签（`debsig-verify` 在
   Debian/Ubuntu 上默认关闭）。故按惯例提供校验和，直接 `dpkg -i` 安装。
 
+### 未签名/ad-hoc 包能正常安装吗？
+
+**能装能用，但 macOS 首次启动要手动放行一次；Linux 完全无感。**
+
+**macOS（ad-hoc 签名，未公证）**
+
+DMG 本身双击即可挂载、拖进 Applications 正常安装。拦截发生在**首次启动**：
+从浏览器下载的文件带 `com.apple.quarantine` 属性，Gatekeeper 对未公证应用
+会拦一次。放行方式随系统版本不同（这点很多文档没更新，照旧说法会卡住）：
+
+| 系统 | 放行方式 |
+|------|----------|
+| macOS 14 及更早 | 右键 `AutoMind.app` →「打开」→ 弹窗再点「打开」 |
+| macOS 15 (Sequoia) 起 | **右键「打开」旁路已被 Apple 移除**：先双击触发拦截提示，再去 系统设置 → 隐私与安全性 → 下方「仍要打开」 |
+| 任意版本（命令行） | `xattr -dr com.apple.quarantine /Applications/AutoMind.app` |
+
+放行一次后永久生效。注意 **ad-hoc 签名本身不是可有可无**：Apple Silicon
+要求 arm64 可执行文件必须带有效签名，完全未签名会被内核直接 SIGKILL，
+所以 `build_dmg.sh` 在 ad-hoc 签名失败时会中断构建而非放行。
+
+**Linux（.deb，无代码签名）**
+
+`.deb` 本来就没有系统强制的代码签名，apt 只校验软件源 Release 的 GPG
+签名，单个 `.deb` 默认不验签，**装的时候不会有任何签名相关的阻拦**。
+推荐用 apt 安装（会自动解依赖）：
+
+```bash
+sudo apt install ./automind_1.2.0_amd64.deb
+```
+
+用 `sudo dpkg -i automind_1.2.0_amd64.deb` 也可以，但 dpkg 不解析依赖，
+缺依赖时需补一句 `sudo apt install -f`。
+
+系统要求：**Ubuntu 22.04+ / Debian 12+**（glibc ≥ 2.35）。控制文件里的
+glibc 版本由 `build_deb.sh` 从产物实测生成，不是写死的 —— 声明过松会导致
+在旧系统上"装得上、一跑就报 GLIBC_2.34 not found"，实测生成可让 dpkg 直接
+拒装并给出明确原因。WebKit2 的 typelib 未随包分发（PyInstaller 只收了
+GTK/GLib 等），故 `gir1.2-webkit2-4.1` 是硬依赖，缺了只能降级到系统浏览器。
+
+**Windows** 已是 Certum OV 正式签名，无此类问题；仅 OV 证书在下载量积累
+足够信誉前，SmartScreen 可能仍提示一次「更多信息 → 仍要运行」。
+
 ### 校验和
 
 三平台安装包的 SHA256 校验和随包发布（`packaging/SHA256SUMS`，纯 LF 行尾）：
