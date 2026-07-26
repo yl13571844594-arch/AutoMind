@@ -355,10 +355,11 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     </g>
     <text x="26" y="184" fill="#6b7591" font-size="10">系统</text>
     <g fill="#a7b0c8">
-      <text x="30" y="206">📊 统计分析</text>
-      <text x="30" y="230">⏰ 定时任务</text>
-      <text x="30" y="254">📜 任务历史</text>
-      <text x="30" y="278">🛡️ 安全审计</text>
+      <text x="30" y="206">📈 观测中心</text>
+      <text x="30" y="230">📊 统计分析</text>
+      <text x="30" y="254">⏰ 定时任务</text>
+      <text x="30" y="278">📜 任务历史</text>
+      <text x="30" y="302">🛡️ 安全审计</text>
     </g>
     <!-- 顶栏 -->
     <rect x="170" y="22" width="460" height="34" rx="10" fill="#141c36"/>
@@ -842,6 +843,12 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <div class="tile"><div class="ic">🧭</div><b>模型智能路由 <span style="color:#c9a227;font-size:.78em">🔒 专业版</span></b>
       <p>按任务复杂度（长度/代码特征/多步骤，0~100 打分）自动分级选模型：简单问答走便宜小模型、复杂任务走强模型。
       专业版 2 级路由，企业版 N 级 + 💰 成本仪表盘（按模型/日聚合成本 + 缓存节省）。</p></div>
+    <div class="tile"><div class="ic">📈</div><b>观测中心 <span style="color:#3ce68a;font-size:.78em">v1.3 · 社区版起</span></b>
+      <p>侧边栏「📈 观测中心」把 Agent 的执行过程画成实时更新的 DAG：任务 → 计划步骤 → 工具调用三层，
+      六种状态配色（待执行/执行中/成功/失败/回溯/已中断），点节点看耗时与失败原因。
+      <b>社区版</b>可看当前任务的实时 DAG（只读、仅当前任务）；
+      <b>专业版</b>加实时看板（成功率 / P50·P95 耗时 / 工具热度 / 失败归因）、200 次运行历史回看与 JSON 导出；
+      <b>企业版</b>历史扩到 2000 次并按会话维度分组。全程本机内存构建，不额外消耗 Token。</p></div>
     <div class="tile"><div class="ic">📏</div><b>版本限额 <span style="color:#7b9fff;font-size:.78em">v1.0</span></b>
       <p>社区版每日任务 100 次、工作区 3 个；专业版任务不限、工作区 30 个；企业版全部不限。
       顶栏 📅 徽标实时显示当日用量，超限给出友好升级提示（跨天自动清零）。</p></div>

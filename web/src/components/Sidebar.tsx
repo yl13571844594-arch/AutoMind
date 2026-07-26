@@ -12,6 +12,7 @@ const NAV_WORK: [View, string, string][] = [
   ['team', '👥', '团队'],
 ];
 const NAV_SYS: [View, string, string, string?][] = [
+  ['observe', '📈', '观测中心'],
   ['stats', '📊', '统计分析'],
   ['router', '🧭', '路由与成本', 'model_router'],
   ['schedule', '⏰', '定时任务', 'scheduler'],

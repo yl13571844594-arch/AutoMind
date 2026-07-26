@@ -466,6 +466,7 @@ def get_agent():
 
 # ── 会话级 Agent 池（§7.4 执行态多用户隔离 — 企业版特性 session_pool）──
 from automind.core import edition as _edition  # noqa: E402
+from automind.core import observability as _observability  # noqa: E402
 
 
 def _session_agent_factory():
@@ -505,6 +506,24 @@ def _acquire_run_agent(base_agent, sid: str):
 # ═══════════════════════════════════════════════════════════
 # REST API — 状态与配置
 # ═══════════════════════════════════════════════════════════
+
+
+@app.get("/api/observe/dag")
+async def api_observe_dag(session_id: str = "default"):
+    """当前任务的实时执行 DAG —— **社区版即可用**（只读、仅当前任务）。
+
+    社区版语义：每个会话只保留最近一次任务的图，新任务开始即替换，不落盘、
+    不提供历史与聚合。历史留存、实时看板与导出属专业版「观测中心」
+    （见 /api/observe/runs、/api/observe/dashboard）。
+    """
+    graph = _observability.snapshot(session_id)
+    return {
+        "available": graph is not None,
+        "edition": _edition.get_edition(),
+        # 社区版为 True：前端据此显示"仅当前任务"的只读提示与升级入口
+        "limited": not _edition.has_feature("observability"),
+        "graph": graph,
+    }
 
 
 @app.get("/api/health")
@@ -2558,14 +2577,21 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
 
     # 注入执行过程事件回调（实时展示思考/工具调用/计划步骤）
     async def _event_sink(ev):
+        # 先并入观测 DAG（纯内存，异常不影响推送），再发给前端
+        try:
+            _observability.record(chat_sid, ev)
+        except Exception:
+            pass
         try:
             await ws.send_json({"session_id": session_id, **ev})
         except Exception:
             pass
     agent.event_sink = _event_sink
 
-    await ws.send_json({"type": "task_start", "session_id": session_id,
-                        "interaction": agent._interaction.value})
+    _start_ev = {"type": "task_start", "session_id": session_id,
+                 "interaction": agent._interaction.value}
+    _observability.record(chat_sid, _start_ev)
+    await ws.send_json(_start_ev)
     t0 = time.perf_counter()
     try:
         # ── 对话模式：流式 ──
@@ -2589,6 +2615,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                     "cached": True, "cache_score": cached["score"],
                 }
                 _push_history(record)
+                _observability.record(chat_sid, {"type": "chat_done"})
                 await ws.send_json({"type": "chat_done", "session_id": session_id,
                                     "tokens": 0, "prompt_tokens": 0,
                                     "completion_tokens": 0, "cached": True,
@@ -2618,6 +2645,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
+            _observability.record(chat_sid, {"type": "chat_done"})
             await ws.send_json({"type": "chat_done", "session_id": session_id,
                                 "tokens": usage.total,
                                 "prompt_tokens": usage.prompt_tokens,
@@ -2647,6 +2675,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
+            _observability.record(chat_sid, {"type": "task_complete", **record})
             await ws.send_json({"type": "task_complete", **record})
             return
 
@@ -2672,6 +2701,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
+            _observability.record(chat_sid, {"type": "task_complete", **record})
             await ws.send_json({"type": "task_complete", **record})
             return
 
@@ -2690,12 +2720,14 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         }
         _push_history(record)
         _accumulate_tokens(record)
+        _observability.record(chat_sid, {"type": "task_complete", **record})
         await ws.send_json({"type": "task_complete", **record})
         # 团队协作：向所有在线成员广播活动（同事的 Agent 改了文件 → 通知你）
         await _broadcast(_team_event(chat_sid, task, record))
 
     except asyncio.CancelledError:
         try:
+            _observability.record(chat_sid, {"type": "task_cancelled"})
             await ws.send_json({"type": "task_cancelled", "session_id": session_id})
         except Exception:
             pass
@@ -2704,6 +2736,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         import traceback
         traceback.print_exc()
         try:
+            _observability.record(chat_sid, {"type": "task_error", "error": str(e)})
             await ws.send_json({"type": "task_error", "session_id": session_id,
                                 "error": str(e)})
         except Exception:
@@ -2790,7 +2823,7 @@ def _attach_extensions() -> None:
     for name in ("scheduler", "advanced_stats", "session_pool",
                  "custom_templates", "audit_export",
                  "sso_ldap", "rbac", "model_gateway",
-                 "experts_pro", "expert_approval"):
+                 "experts_pro", "expert_approval", "observability"):
         feature = _edition.get_feature(name)
         if feature is not None and hasattr(feature, "attach"):
             try:
@@ -2822,6 +2855,9 @@ def _attach_extensions() -> None:
         app.add_api_route(path, _locked("custom_templates"), methods=[method])
     # 审计报告导出（专业版）
     app.add_api_route("/api/audit/export", _locked("audit_export"), methods=["GET"])
+    # 观测中心历史/看板（专业版）—— 社区版仅开放下方 /api/observe/dag
+    for path in ("/api/observe/runs", "/api/observe/dashboard"):
+        app.add_api_route(path, _locked("observability"), methods=["GET"])
     # SSO / LDAP（企业版）
     for method, path in (("POST", "/api/auth/login"), ("GET", "/api/auth/session"),
                          ("POST", "/api/auth/logout")):

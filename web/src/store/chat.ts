@@ -7,7 +7,8 @@ import type { Mode } from './app';
 export interface TraceItem {
   label: string; body: string; kind: string;   // body 为已渲染安全 HTML
 }
-export interface PlanRow { text: string; state: 'pending' | 'run' | 'ok' | 'fail'; error?: string }
+// goalId：后端事件用 goal_id 标识步骤（不是下标），进度更新必须按它匹配
+export interface PlanRow { text: string; goalId?: string; state: 'pending' | 'run' | 'ok' | 'fail'; error?: string }
 export interface MaStep { role: string; subtask: string; state: 'pending' | 'run' | 'ok'; output?: string }
 export interface LoopIter { iter: number; max: number; action?: string; obs?: string; done?: boolean }
 

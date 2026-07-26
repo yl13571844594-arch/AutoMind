@@ -39,6 +39,10 @@
     rbac           ent      ``attach(server_ctx)`` 注册 /api/rbac 路由；
                             ``check(role, action) -> bool``
     model_gateway  ent      ``attach(server_ctx)`` 注册 /api/gateway 路由
+    observability  pro      ``attach(server_ctx)`` 注册 /api/observe/runs|
+                            dashboard 路由；订阅
+                            ``automind.core.observability.add_listener``
+                            留存历史（社区版仅当前任务实时 DAG）
     ============= ======== ==============================================
 
 ``server_ctx``（服务端传给 attach 的上下文字典，稳定契约 v1）：
@@ -79,6 +83,7 @@ COMMERCIAL_FEATURES: dict[str, tuple[str, str]] = {
     "semantic_cache": (EDITION_PRO, "语义缓存（相似问题秒回，省 Token）"),
     "model_router": (EDITION_PRO, "模型智能路由（按任务复杂度分级选模型）"),
     "cost_dashboard": (EDITION_ENTERPRISE, "成本仪表盘（模型成本/缓存节省分析）"),
+    "observability": (EDITION_PRO, "观测中心（执行流程可视化 + 实时看板）"),
 }
 
 _EDITION_LABELS = {

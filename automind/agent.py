@@ -115,6 +115,7 @@ class AutoMindAgent:
         self.event_bus = EventBus()
         # 执行过程事件回调（由 Web 层注入，用于实时展示执行过程）
         self.event_sink = None
+        self._active_goal_id: str | None = None
         self.llm = self._init_llm()
         self.tool_registry = ToolRegistry()
         self.permissions = PermissionEngine(
@@ -530,6 +531,7 @@ class AutoMindAgent:
         async def on_action(tc, result) -> None:
             out = result.output if result.success else result.error
             await self._emit({"type": "step_action", "iter": tag,
+                              "goal_id": getattr(self, "_active_goal_id", None),
                               "tool": tc.name,
                               "args": {k: str(v)[:200] for k, v in (tc.arguments or {}).items()},
                               "success": result.success,
@@ -573,14 +575,29 @@ class AutoMindAgent:
 
         # 推送计划已生成事件（含叶子步骤），供前端实时展示
         leaves = plan.root_goal.leaf_goals()
+        # Goal 只存 children，父指针需现推 —— 观测中心用它还原真实的计划层级
+        # （叶子之间并非顺序依赖，串成链会显示出并不存在的依赖关系）
+        parent_of: dict[str, str | None] = {}
+
+        def _map_parents(node, parent_id: str | None) -> None:
+            parent_of[node.id] = parent_id
+            for child in node.children:
+                _map_parents(child, node.id)
+
+        _map_parents(plan.root_goal, None)
+        root_id = plan.root_goal.id
         await self._emit({
             "type": "plan_created",
             "task": plan.task_description,
             "steps": [
                 {"goal_id": g.id, "description": g.description,
-                 "tool": g.assigned_action.tool_name if g.assigned_action else None}
+                 "tool": g.assigned_action.tool_name if g.assigned_action else None,
+                 # parent_id 为 None 表示直挂根；根自身的 id 也一并告知，
+                 # 便于消费方把「根目标」映射到自己的 root 节点
+                 "parent_id": parent_of.get(g.id)}
                 for g in leaves
             ],
+            "root_goal_id": root_id,
         })
 
         # 记录计划树（库层走 logger，Web 层已有 plan_created 事件流）
@@ -603,6 +620,8 @@ class AutoMindAgent:
     # ═══════════════════════════════════════════════════════════
 
     async def _on_step_start(self, goal: Any) -> None:
+        # 记录当前步骤：ReAct 的工具调用事件据此归属到所属计划步骤
+        self._active_goal_id = goal.id
         await self.event_bus.emit(
             type("EventType", (), {"value": "goal.start"})(),
             {"goal_id": goal.id, "description": goal.description},
@@ -617,6 +636,8 @@ class AutoMindAgent:
         else:
             logger.warning("step_end", goal=step_result.goal_description,
                            status="fail", error=step_result.error or "")
+        if getattr(self, "_active_goal_id", None) == step_result.goal_id:
+            self._active_goal_id = None
         await self._emit({"type": "plan_step_end",
                           "goal_id": step_result.goal_id,
                           "description": step_result.goal_description,

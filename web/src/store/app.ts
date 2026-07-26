@@ -4,7 +4,7 @@ import { apiGet, apiPost } from '../api/client';
 
 export type Mode = 'chat' | 'work' | 'coding' | 'multi' | 'loop';
 export type View = 'chat' | 'plan' | 'tools' | 'experts' | 'team' | 'kb'
-  | 'stats' | 'schedule' | 'history' | 'audit' | 'router';
+  | 'stats' | 'schedule' | 'history' | 'audit' | 'router' | 'observe';
 
 export const MODE_LABELS: Record<string, string> = {
   chat: '对话', work: '工作', coding: '编程', multi: '协同', loop: '循环',

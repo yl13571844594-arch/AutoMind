@@ -16,6 +16,7 @@ import AuditView from './components/views/AuditView';
 import ExpertsView from './components/views/ExpertsView';
 import HistoryView from './components/views/HistoryView';
 import KbView from './components/views/KbView';
+import ObserveView from './components/views/ObserveView';
 import PlanView from './components/views/PlanView';
 import RouterView from './components/views/RouterView';
 import ScheduleView from './components/views/ScheduleView';
@@ -29,7 +30,7 @@ import { connectWS } from './ws';
 const VIEWS: Record<string, React.ComponentType> = {
   plan: PlanView, tools: ToolsView, experts: ExpertsView, team: TeamView,
   kb: KbView, stats: StatsView, schedule: ScheduleView, history: HistoryView,
-  audit: AuditView, router: RouterView,
+  audit: AuditView, router: RouterView, observe: ObserveView,
 };
 
 // 启动后静默检查更新（每会话一次，走服务端 6h 缓存）；有新版给出可点通知

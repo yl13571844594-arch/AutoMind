@@ -5,6 +5,7 @@ import { chatSid, MODE_LABELS, useApp, type Mode } from './store/app';
 import {
   uid, useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem,
 } from './store/chat';
+import { useObserve } from './store/observe';
 import { usePanel } from './store/panel';
 import { esc, renderMarkdown } from './lib/markdown';
 
@@ -165,6 +166,8 @@ function setRunning(on: boolean) {
 // ── 事件分发 ───────────────────────────────────────────
 function handle(data: any) {
   const mode = taskMode();
+  // 观测中心：同一份事件流就地累积成执行 DAG（实时，无需轮询后端）
+  try { useObserve.getState().onEvent(data); } catch { /* 观测失败不影响主流程 */ }
   switch (data.type) {
     case 'task_start':
       removeTyping(mode);
@@ -238,22 +241,26 @@ function handle(data: any) {
 
     case 'plan_created': {
       const rows: PlanRow[] = (data.steps || []).map((s: any, i: number) => ({
-        text: `${i + 1}. ${s.description}${s.tool ? ` [${s.tool}]` : ''}`, state: 'pending',
+        text: `${i + 1}. ${s.description}${s.tool ? ` [${s.tool}]` : ''}`,
+        goalId: String(s.goal_id || ''), state: 'pending',
       }));
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({ ...i, plan: rows }));
       else if (live.loop) execTrace(mode, `📋 已生成计划（${rows.length} 步）`,
         rows.map((r) => `<div>${esc(r.text)}</div>`).join(''), 'plan');
       break;
     }
+    // 按 goal_id 匹配（后端事件不含 index —— 早期按下标匹配导致进度从不更新）
     case 'plan_step_start':
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({
-        ...i, plan: i.plan.map((r: PlanRow, k: number) => (k === data.index ? { ...r, state: 'run' } : r)),
+        ...i,
+        plan: i.plan.map((r: PlanRow) => (r.goalId && r.goalId === String(data.goal_id || '')
+          ? { ...r, state: 'run' } : r)),
       }));
       break;
     case 'plan_step_end':
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({
         ...i,
-        plan: i.plan.map((r: PlanRow, k: number) => (k === data.index
+        plan: i.plan.map((r: PlanRow) => (r.goalId && r.goalId === String(data.goal_id || '')
           ? { ...r, state: data.success ? 'ok' : 'fail', error: data.error } : r)),
       }));
       break;
