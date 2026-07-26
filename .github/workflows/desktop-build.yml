@@ -85,11 +85,12 @@ jobs:
         with:
           name: AutoMind-Windows-Setup
           path: desktop/Output/AutoMind-Setup-*.exe
-      - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: desktop/Output/AutoMind-Setup-*.exe
+      # 【刻意不做 Attach to release】
+      # CI 产的 Windows 包既未签名、也不含内嵌 WebView2 引导器（云端无证书
+      # 私钥；引导器需本机预置），比本机 build_release.ps1 的产物严格更差。
+      # 曾发生过：推 tag 触发本工作流 → 该步骤把 Release 上**已签名**的安装包
+      # 覆盖成 CI 未签名版，用户下到的反而是差的那个。故此处只留 artifact
+      # 供内部取用，对外分发一律用本机签名版手动上传（见 desktop/README.md）。
 
   # ── macOS 通用 DMG（Apple Silicon + Intel）────────────
   #   全程在 macos-14(arm64) 单机完成，规避 Intel(macos-13) runner 池排队：
