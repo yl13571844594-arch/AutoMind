@@ -595,6 +595,16 @@ def main() -> None:
             _log(f"WebView2 运行时版本：{wv}")
     server_thread = _start_server(port)
 
+    # 启动即在后台刷新版本检查：界面约 3 秒后就会询问 /api/update/check，
+    # 缓存过期时那次查询会现场联网、慢甚至超时 —— 用户因此收不到升级提示。
+    # 提前预热，"打开应用即提示新版本"才真正成立。
+    if not args.server_only:
+        try:
+            from automind.core import updater
+            updater.check_async(force=True)
+        except Exception as e:
+            _log(f"版本检查预热跳过（{e}）")
+
     if args.server_only:
         if not _wait_ready(url, thread=server_thread):
             _log("!! 服务启动失败")

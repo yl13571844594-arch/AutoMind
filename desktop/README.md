@@ -88,14 +88,34 @@ sessions.db、kb/、skills/）；托盘菜单「打开数据目录」可直达�
 应用内置更新通道（左下角「⚙ 设置 → 🔄 检查更新」，启动 3 秒后也会静默检查并
 弹可点通知）：
 
-- **检查**：查询 GitHub Releases 最新版（结果缓存 6 小时）；
-- **升级（桌面版）**：下载 `AutoMind-Setup-<ver>.exe` → **Authenticode 签名
-  校验**（当前程序已签名时，强制要求新包签名有效且同一发布者 —— 防投毒/降级）
-  → 静默安装 → 自动重启，配置与数据全保留；
-- **pip/源码模式**：给出 `pip install -U "automind-agent[web]"` 一键复制。
+- **检查**：查询 GitHub Releases 最新版（结果缓存 6 小时）。桌面版**启动即在
+  后台强制刷新一次**，界面 3 秒后询问时拿到的就是新鲜结果 —— 否则缓存过期那
+  一次会现场联网、慢甚至超时，用户根本收不到升级提示；
+- **下载（桌面版）**：直连 GitHub 在国内常年 <0.5 MB/s 且易断，30 MB+ 的安装
+  包因此频繁失败。现在**并发探测直连 + 多个公共镜像，取最先响应的线路**下载
+  （实测 0.42 → 2.18 MB/s，约 5 倍），断链自动**换线路 + HTTP Range 断点续传**，
+  不必从头再来；界面实时显示速度、已下载量与重试次数；
+- **校验**：下载完成后三重把关，全过才安装 ——
+  **字节数**（防截断）→ **SHA256**（基线取自官方 API 的 `SHA256SUMS` 资产，
+  防镜像篡改/损坏）→ **Authenticode 签名**（当前程序已签名时，强制要求新包签名
+  有效且同一发布者 —— 防投毒/降级）。版本与校验基线**只认 GitHub 官方 API**，
+  镜像仅用于搬运字节，故镜像作恶也无法让改过的包通过；
+- **安装**：静默安装 → 自动重启，配置与数据全保留。**安装失败也会把旧版本拉
+  回来**（否则用户点了升级，应用就此再没回来），Inno 日志留在
+  `%TEMP%\AutoMindUpdate\install.log`；
+- **平台**：一键静默升级仅 Windows 冻结包；macOS/Linux 给出发布页下载入口；
+  pip/源码模式给出 `pip install -U "automind-agent[web]"` 一键复制。
+
+镜像可配置 —— 环境变量 `AUTOMIND_UPDATE_MIRRORS`：
+
+```bash
+# 逗号分隔的前缀；direct 表示直连（默认已含直连 + 4 个公共镜像）
+set AUTOMIND_UPDATE_MIRRORS=https://ghfast.top/,direct
+set AUTOMIND_UPDATE_MIRRORS=direct          # 只走直连（境外/内网环境）
+```
 
 发布新版本 = 打 tag 推 GitHub Release 并上传 `AutoMind-Setup-<ver>.exe`
-资产，存量用户即可收到更新提示。
+与 `SHA256SUMS` 资产，存量用户即可收到更新提示。
 
 ## 七、macOS / Linux 打包
 

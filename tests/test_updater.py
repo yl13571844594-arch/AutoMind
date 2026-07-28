@@ -106,6 +106,8 @@ class TestApply:
         db_mod.reset_for_tests(tmp_path / "t.db")
         try:
             monkeypatch.setattr(updater, "_is_frozen", lambda: True)
+            # 一键升级仅 Windows 支持；此处要测的是域名校验，故直接放行平台判断
+            monkeypatch.setattr(updater, "can_auto_install", lambda: True)
             monkeypatch.setattr(updater, "check", lambda *_a, **_k: {
                 "available": True, "latest": "99.0.0",
                 "asset_url": "https://evil.example.com/AutoMind-Setup-99.0.0.exe",

@@ -45,7 +45,19 @@ export default function UpdateModal() {
     }, 600);
   };
 
+  // 仅 Windows 冻结包支持一键静默升级；mac/Linux 给发布页下载（后端 can_auto_install）
   const desktop = info?.mode === 'desktop';
+  const autoInstall = info?.can_auto_install ?? desktop;
+
+  // 下载中的可读进度：已下载/总量 + 实时速度 + 换镜像重试次数。
+  // 30MB 的包在弱网下要下好几分钟，没有速度反馈用户只会以为卡死了。
+  const dl = applyState?.status === 'downloading' ? applyState : null;
+  const dlHint = dl && [
+    dl.total ? `${fmtSize(dl.downloaded || 0)} / ${fmtSize(dl.total)}` : null,
+    dl.speed ? `${dl.speed} MB/s` : null,
+    dl.mirror ? `来源 ${dl.mirror}` : null,
+    dl.attempt > 1 ? `第 ${dl.attempt} 次尝试（自动换线路续传）` : null,
+  ].filter(Boolean).join(' · ');
 
   return (
     <Modal title="🔄 检查更新" open={open} width={560}
@@ -82,7 +94,9 @@ export default function UpdateModal() {
                 : <div>
                   <Progress percent={applyState.progress || 0} status="active" />
                   <span className="hint-text">
-                    {applyState.status === 'verifying' ? '正在校验安装包签名…' : '正在下载更新…'}
+                    {applyState.status === 'verifying'
+                      ? '正在校验安装包（校验和 + 数字签名）…'
+                      : dlHint ? `正在下载更新 — ${dlHint}` : '正在下载更新…'}
                   </span>
                 </div>
           )}
@@ -93,19 +107,24 @@ export default function UpdateModal() {
               <Button onClick={() => window.open(info.release_url, '_blank')}>查看发布页 ↗</Button>
             )}
             {info.available && (
-              desktop
+              autoInstall
                 ? <Button type="primary" loading={!!applying} onClick={apply}>
                   {applying ? '更新中…' : '⬇ 立即更新（自动重启）'}
                 </Button>
-                : <Button type="primary" onClick={() => {
-                  navigator.clipboard?.writeText('pip install -U "automind-agent[web]"');
-                  message.success('升级命令已复制：pip install -U "automind-agent[web]"');
-                }}>复制升级命令</Button>
+                : desktop
+                  ? <Button type="primary" onClick={() => window.open(info.release_url, '_blank')}>
+                    ⬇ 下载新版安装包 ↗
+                  </Button>
+                  : <Button type="primary" onClick={() => {
+                    navigator.clipboard?.writeText('pip install -U "automind-agent[web]"');
+                    message.success('升级命令已复制：pip install -U "automind-agent[web]"');
+                  }}>复制升级命令</Button>
             )}
           </Space>
-          {info.available && desktop && !applying && (
+          {info.available && autoInstall && !applying && (
             <Paragraph type="secondary" style={{ fontSize: '.76em', margin: 0 }}>
-              更新包来自 GitHub Releases，安装前自动校验数字签名；升级过程静默完成，你的配置与数据全部保留。
+              更新包来自 GitHub Releases，下载自动选择最快线路并支持断点续传；安装前校验文件大小、
+              SHA256 与数字签名，三项全过才会安装。升级静默完成，你的配置与数据全部保留。
             </Paragraph>
           )}
         </Space>
