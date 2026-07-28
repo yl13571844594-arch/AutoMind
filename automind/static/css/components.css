@@ -251,3 +251,26 @@ button.locked .lock-ico{font-size:.72em;margin-left:3px;opacity:.9}
 .expert-card .ec-desc{font-size:.76em;color:var(--text3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .expert-card .ec-actions{display:flex;gap:6px;flex-shrink:0;align-items:center}
 .ec-btn{padding:4px 12px;font-size:.76em;border-radius:6px}
+
+/* ── 🔄 升级横幅（兼容版界面；常驻，不同于 2.5s 即散的 toast）── */
+#update-banner{position:fixed;right:20px;bottom:20px;z-index:300;width:340px;max-width:calc(100vw - 40px);
+  padding:14px 16px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  background:var(--bg1);box-shadow:var(--shadow);font-size:.86em}
+#update-banner .ub-head{display:flex;align-items:center;gap:8px}
+#update-banner .ub-title{flex:1;font-weight:600;color:var(--text)}
+#update-banner .ub-title.err{color:var(--red)}
+#update-banner .ub-x{border:0;background:none;color:var(--text3);font-size:1.2em;line-height:1;cursor:pointer;padding:0 2px}
+#update-banner .ub-x:hover{color:var(--text)}
+#update-banner .ub-sub{margin-top:5px;color:var(--text3);font-size:.88em;line-height:1.6}
+#update-banner .ub-notes{margin-top:9px;padding:8px 10px;max-height:132px;overflow-y:auto;
+  border:1px solid var(--border);border-radius:8px;background:var(--bg0);
+  color:var(--text2);font-size:.85em;line-height:1.7;white-space:pre-wrap}
+#update-banner .ub-acts{display:flex;flex-wrap:wrap;gap:7px;margin-top:11px}
+#update-banner .ub-btn{padding:5px 12px;font-size:.86em;border:1px solid var(--border);
+  border-radius:7px;background:var(--bg2);color:var(--text2);cursor:pointer;transition:var(--transition)}
+#update-banner .ub-btn:hover{border-color:var(--border-focus);color:var(--text)}
+#update-banner .ub-btn.primary{border-color:transparent;background:var(--accent);color:#fff}
+#update-banner .ub-btn.primary:hover{opacity:.9}
+#update-banner .ub-bar{margin-top:10px;height:5px;border-radius:3px;background:var(--bg2);overflow:hidden}
+#update-banner .ub-bar i{display:block;height:100%;border-radius:3px;background:var(--accent);
+  transition:width .3s ease}

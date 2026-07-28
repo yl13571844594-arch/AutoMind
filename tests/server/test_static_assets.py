@@ -47,8 +47,10 @@ class TestSkeleton:
         css = [a for a in assets if a.endswith(".css")]
         js = [a for a in assets if a.endswith(".js")]
         assert len(css) == 5, css
-        # v0.7 + theme/workspace/templates；v0.9 + editor/experts/team
-        assert len(js) == 12, js
+        # v0.7 + theme/workspace/templates；v0.9 + editor/experts/team；v1.3.1 + update
+        assert len(js) == 13, js
+        assert "js/update.js" in js, "兼容版界面必须带版本检查 —— 被兜底路由到这里的" \
+                                     "老内核用户正是最需要升级提示的那批人"
         # 加载顺序必须保持（core 最先；特性模块在基础六件套之后）
         assert js[0] == "js/core.js"
         assert js[:6] == ["js/core.js", "js/ws.js", "js/chat.js",

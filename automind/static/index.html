@@ -41,6 +41,7 @@
       <button role="menuitem" onclick="toggleTheme()"><span class="icon" id="sm-theme-ico">🌓</span><span id="sm-theme-label">切换主题</span></button>
       <button role="menuitem" onclick="closeSettingsMenu();showWorkspaces()"><span class="icon">🗂</span><span>工作区管理</span></button>
       <div class="sm-div"></div>
+      <button role="menuitem" onclick="closeSettingsMenu();checkUpdate(true)"><span class="icon">🔄</span><span>检查更新</span></button>
       <button role="menuitem" onclick="closeSettingsMenu();showTour()"><span class="icon">🧭</span><span>新手引导</span></button>
       <button role="menuitem" onclick="closeSettingsMenu();window.open('/manual','_blank')"><span class="icon">📖</span><span>使用手册</span></button>
     </div>
@@ -218,5 +219,6 @@
 <script src="/static/js/editor.js"></script>
 <script src="/static/js/experts.js"></script>
 <script src="/static/js/team.js"></script>
+<script src="/static/js/update.js"></script>
 </body>
 </html>

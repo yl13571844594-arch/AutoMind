@@ -11,6 +11,7 @@
     3. ``/legacy`` 兼容界面 + 前端预检/自愈 —— 老内核与已污染机器的兜底。
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -114,6 +115,48 @@ class TestLegacyRoute:
     def test_legacy_has_no_module_scripts(self, client):
         # 老内核跑到这里必须能用：出现 type="module" 就说明兜底无效
         assert 'type="module"' not in client.get("/legacy").text
+
+
+class TestLegacyUpdateNotice:
+    """兼容版界面的升级提示 —— 被兜底路由到 /legacy 的正是最需要升级的用户。"""
+
+    @staticmethod
+    def _src() -> str:
+        return (STATIC / "js" / "update.js").read_text(encoding="utf-8")
+
+    def test_module_is_loaded_by_legacy_ui(self, client):
+        html = client.get("/legacy").text
+        assert "/static/js/update.js" in html
+
+    def test_manual_entry_in_settings_menu(self, client):
+        # 没有手动入口，用户就只能等那次自动检查；错过就再也点不到
+        assert "checkUpdate(true)" in client.get("/legacy").text
+
+    def test_exposes_check_update_globally(self):
+        # 整个文件包在 IIFE 里，不显式挂到 window 上 onclick 就取不到
+        assert "window.checkUpdate = checkUpdate" in self._src()
+
+    @pytest.mark.parametrize("syntax,pattern", [
+        ("箭头函数", r"=>"),
+        ("模板字符串", r"`"),
+        ("const 声明", r"\bconst\s"),
+        ("let 声明", r"\blet\s"),
+        ("展开运算符", r"\.\.\."),
+        ("class 声明", r"\bclass\s"),
+    ])
+    def test_stays_es5(self, syntax, pattern):
+        """必须保持 ES5：这个文件要在连 React 产物都跑不起来的老内核上工作，
+        混进任何 ES6 语法都会让它整体解析失败 —— 那正是它要解决的问题本身。"""
+        assert not re.search(pattern, self._src()), \
+            f"update.js 混入了 {syntax}，老内核会整体解析失败而收不到升级提示"
+
+    def test_uses_xhr_not_fetch(self):
+        # fetch 在老内核上可能不存在；XHR 才是这条路径上的通用解
+        assert "XMLHttpRequest" in self._src()
+
+    def test_auto_prompt_is_once_per_session(self):
+        src = self._src()
+        assert "sessionStorage" in src and "automind_update_notified" in src
 
 
 @pytest.mark.skipif(not (DIST / "index.html").exists(), reason="前端未构建")
