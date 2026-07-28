@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoMind — 通用自动化 Agent</title>
   <style>
@@ -27,13 +28,18 @@
     #boot h1 { font-size: 1.15em; font-weight: 600; margin: 0; }
     #boot p { color: #8e9abb; font-size: .86em; margin: 0; line-height: 1.8; }
     #boot .err { color: #ff6b6b; }
-    #boot code { background: #1f2740; border-radius: 6px; padding: 2px 8px; font-size: .82em; }
+    #boot code {
+      display: inline-block; max-width: 90vw; overflow-wrap: break-word;
+      background: #1f2740; border-radius: 6px; padding: 2px 8px; font-size: .82em;
+    }
+    #boot .acts { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 4px; }
     #boot button {
-      margin-top: 4px; padding: 8px 20px; border: 0; border-radius: 8px; cursor: pointer;
+      padding: 8px 20px; border: 0; border-radius: 8px; cursor: pointer;
       color: #fff; font-size: .9em; background: linear-gradient(135deg, #7b9fff, #b594ff);
     }
+    #boot button.ghost { background: #1f2740; color: #c8d2ee; }
   </style>
-  <script type="module" crossorigin src="/static/dist/assets/index-Cf7oWRCw.js"></script>
+  <script type="module" crossorigin src="/static/dist/assets/index-Y3944XEH.js"></script>
   <link rel="stylesheet" crossorigin href="/static/dist/assets/index-CyM9A_G6.css">
 </head>
 <body>
@@ -51,36 +57,187 @@
       本应用需要启用 JavaScript 才能运行，请在浏览器设置中开启后重试。
     </div>
   </noscript>
+
   <script>
-    // 白屏兜底：监听脚本错误与"迟迟未挂载"，把纯空白替换成可读提示。
+    /* ── 现代语法探针（必须独立成块）─────────────────────────
+       内核过旧时，本块会整体解析失败（SyntaxError），变量保持 false；
+       浏览器逐块解析 <script>，故不会波及下方的兜底逻辑 —— 这正是它
+       不能与主逻辑写在一起的原因。探针语法对齐构建目标（ES2017）。
+       注意：不使用 eval / new Function 探测，页面 CSP 未开 unsafe-eval。 */
+    window.__AM_SYNTAX_OK__ = false;
+  </script>
+  <script>
+    window.__AM_SYNTAX_OK__ = (function () {
+      class Probe { get ok() { return true; } }
+      const fn = async (...xs) => `${xs.length}`;
+      const [first = 1] = [];
+      const { z = 2 } = {};
+      return new Probe().ok && typeof fn === 'function' && first === 1 && z === 2;
+    })();
+  </script>
+
+  <script>
+    /* ── 启动兜底与自愈 ───────────────────────────────────
+       三类失败各自对症处理，目标是"用户永远拿到可用界面"：
+         A) 内核过旧（不支持 ES 模块 / 现代语法）
+            → 预检直接切到 /legacy 经典界面（无构建产物依赖，功能一致）。
+         B) 产物 404（升级后浏览器仍用缓存里的旧 index.html，其引用的
+            旧哈希 JS 已随新版本删除 —— 线上"界面未能加载"的实际根因）
+            → 一次性带缓存穿透参数硬刷新自愈；仍失败才提示。
+         C) 解析/运行时异常
+            → 展示可读原因 + 可操作按钮（刷新 / 兼容版 / 复制诊断）。 */
     (function () {
+      var LEGACY = '/legacy';
+      var RELOAD_KEY = 'am_boot_reload';
       var shown = false;
+
       function rootMounted() {
         var r = document.getElementById('root');
         // React 挂载后 #boot 被移除、#root 出现应用节点
         return r && !document.getElementById('boot') && r.children.length > 0;
       }
-      function showError(detail) {
+
+      // ── A. 内核能力预检 ──
+      // 产物是 ES 模块；不支持时 <script type="module"> 会被静默忽略，
+      // 页面永远停在占位上。提前判定并切走，比等超时提示更有用。
+      function kernelOk() {
+        try {
+          if (!('noModule' in document.createElement('script'))) return false;
+          if (typeof Promise !== 'function' || typeof fetch !== 'function') return false;
+          if (typeof WeakMap !== 'function' || typeof Symbol !== 'function') return false;
+          if (typeof Object.assign !== 'function' || typeof Object.entries !== 'function') return false;
+          return window.__AM_SYNTAX_OK__ === true;
+        } catch (e) {
+          return false;
+        }
+      }
+      if (!kernelOk()) {
+        location.replace(LEGACY + '?from=preflight');
+        return;
+      }
+
+      // ── B. 一次性硬刷新自愈（sessionStorage 防循环）──
+      function hardReloadOnce(why) {
+        try {
+          if (sessionStorage.getItem(RELOAD_KEY)) return false;   // 已自愈过仍失败
+          sessionStorage.setItem(RELOAD_KEY, why);
+        } catch (e) {
+          return false;   // 无 sessionStorage 则不冒无限刷新的风险
+        }
+        // 换 URL 而非 reload()：绕开磁盘缓存里那份陈旧的 index.html
+        location.replace('/?_cb=' + Date.now());
+        return true;
+      }
+      function clearReloadMark() {
+        try { sessionStorage.removeItem(RELOAD_KEY); } catch (e) { /* 忽略 */ }
+      }
+
+      // ── C. 错误呈现 ──
+      function esc(s) {
+        return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      }
+      function showError(reason, detail) {
         if (shown || rootMounted()) return;
         shown = true;
         var boot = document.getElementById('boot');
         if (!boot) return;
+        var diag = [
+          'reason: ' + reason,
+          'detail: ' + (detail || '(无)'),
+          'ua: ' + navigator.userAgent,
+          'url: ' + location.href,
+        ].join('\n');
         boot.innerHTML =
           '<h1 class="err">⚠ 界面未能加载</h1>' +
-          '<p>页面脚本未能正常运行，通常是浏览器/内核版本过旧或资源加载失败。</p>' +
-          (detail ? '<p><code>' + String(detail).slice(0, 300).replace(/</g, '&lt;') + '</code></p>' : '') +
-          '<p>请尝试刷新；桌面版可用系统浏览器打开，或更新 Microsoft Edge WebView2 运行时。</p>' +
-          '<button onclick="location.reload()">刷新重试</button>';
+          '<p>' + esc(reason) + '</p>' +
+          (detail ? '<p><code>' + esc(String(detail).slice(0, 300)) + '</code></p>' : '') +
+          '<p>可先点「打开兼容版界面」继续使用，功能与主界面一致。</p>' +
+          '<div class="acts">' +
+          '<button id="bt-reload">刷新重试</button>' +
+          '<button class="ghost" id="bt-legacy">打开兼容版界面</button>' +
+          '<button class="ghost" id="bt-copy">复制诊断信息</button>' +
+          '</div>';
+        document.getElementById('bt-reload').onclick = function () {
+          clearReloadMark();
+          location.replace('/?_cb=' + Date.now());
+        };
+        document.getElementById('bt-legacy').onclick = function () {
+          location.replace(LEGACY + '?from=error');
+        };
+        document.getElementById('bt-copy').onclick = function (e) {
+          var btn = e.currentTarget;
+          function done() { btn.textContent = '已复制 ✓'; }
+          try {
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+              navigator.clipboard.writeText(diag).then(done, function () { window.prompt('请手动复制：', diag); });
+              return;
+            }
+          } catch (err) { /* 落到下面的兜底 */ }
+          window.prompt('请手动复制：', diag);
+        };
       }
+
+      // 资源加载失败：区分「产物 404（陈旧缓存）」与「解析/运行时错误」。
+      // 前者可自愈，后者只能提示 —— 分开处理才能给出对的话术和对的动作。
+      function onResourceError(url) {
+        if (shown || rootMounted()) return;
+        var fallback = function (e) {
+          showError('页面脚本未能正常运行，通常是浏览器/内核版本过旧。', url + (e ? ' (' + e + ')' : ''));
+        };
+        try {
+          fetch(url, { cache: 'reload' }).then(function (res) {
+            if (res.status === 404) {
+              // 缓存里的旧 index.html 指向了新版本已删除的哈希产物
+              if (hardReloadOnce('stale-html')) return;
+              showError('检测到浏览器缓存了旧版页面，自动刷新后仍未恢复。' +
+                        '请清除浏览器缓存，或点「打开兼容版界面」。', url + ' → 404');
+              return;
+            }
+            fallback('HTTP ' + res.status);
+          }, function () {
+            fallback('资源请求失败');
+          });
+        } catch (e) {
+          fallback('');
+        }
+      }
+
       window.addEventListener('error', function (e) {
-        // 资源(script/link)加载失败或运行时异常
-        showError(e && (e.message || (e.target && e.target.src) || ''));
+        var t = e && e.target;
+        // 资源(script/link)加载失败：事件目标是元素且无 message
+        if (t && t !== window && (t.tagName === 'SCRIPT' || t.tagName === 'LINK')) {
+          onResourceError(t.src || t.href || '');
+          return;
+        }
+        var msg = (e && e.message) || '';
+        // 语法错误 = 内核不认识产物里的语法（预检可能因特性检测不全漏判），
+        // 与普通运行时异常给不同话术：前者刷新无用，直接引导兼容版。
+        if (/SyntaxError|Unexpected (token|identifier)|无效|语法/i.test(msg)) {
+          showError('浏览器内核版本过旧，无法解析页面脚本。请点「打开兼容版界面」，' +
+                    '或更新 Microsoft Edge WebView2 运行时后重试。', msg);
+          return;
+        }
+        showError('页面脚本运行时出错。', msg);
       }, true);
+
       window.addEventListener('unhandledrejection', function (e) {
-        showError(e && e.reason && (e.reason.message || e.reason));
+        showError('页面脚本运行时出错（未处理的异步异常）。',
+                  e && e.reason && (e.reason.message || e.reason));
       });
-      // 兜底计时：12s 仍未挂载且无错误 → 也给出提示（避免永久假死空白）
-      setTimeout(function () { if (!rootMounted()) showError(''); }, 12000);
+
+      // 兜底计时：15s 仍未挂载且无错误 → 也给出提示（避免永久假死空白）
+      setTimeout(function () {
+        if (rootMounted()) return;
+        showError('界面初始化超时，脚本可能被安全软件拦截或加载中断。', '');
+      }, 15000);
+
+      // 挂载成功即清掉自愈标记，下次遇到问题仍有一次自动刷新机会
+      var poll = setInterval(function () {
+        if (!rootMounted()) return;
+        clearReloadMark();
+        clearInterval(poll);
+      }, 500);
+      setTimeout(function () { clearInterval(poll); }, 30000);
     })();
   </script>
 </body>

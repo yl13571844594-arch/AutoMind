@@ -11,8 +11,14 @@ export default defineConfig({
     emptyOutDir: true,
     chunkSizeWarningLimit: 1600,
     // 显式基线：兼容较旧的 WebView2/Edge 内核，避免个别机器因不支持的新语法
-    // 直接白屏（对应"部分电脑安装后空白界面"）。es2020 覆盖桌面版目标内核。
-    target: 'es2020',
+    // 直接白屏（对应"部分电脑安装后空白界面"）。
+    // es2020 → es2017：可选链 `?.`/空值合并 `??` 需 Chromium 80+，而企业
+    // 机器上被组策略钉住的 WebView2 可能停留在更早的内核；es2017 只要求
+    // Chromium 55+，覆盖面显著更广，产物体积代价可忽略。
+    target: 'es2017',
+    // modulepreload polyfill：老内核不支持 <link rel="modulepreload"> 时
+    // 由 polyfill 预取，避免分包被跳过导致的加载失败。
+    modulePreload: { polyfill: true },
   },
   server: {
     port: 5173,

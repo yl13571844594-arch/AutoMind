@@ -30,6 +30,7 @@ except ImportError:
 from automind import __version__
 from automind.core.logging import get_logger
 from automind.server_web import apply_security_headers as _apply_security_headers
+from automind.server_web import dist_asset_refs as _dist_asset_refs
 from automind.server_web import versioned_html as _versioned_html
 
 logger = get_logger("automind.server")
@@ -3065,19 +3066,56 @@ async def manual_page():
     return JSONResponse({"error": "手册文件缺失"}, status_code=404)
 
 
-@app.get("/")
-async def index():
-    # v1.0 React 前端（Vite 构建产物，资源带内容哈希无需手动 cache-bust）；
-    # 未构建时回退到经典原生 JS 界面，功能一致。
-    dist_index = STATIC_DIR / "dist" / "index.html"
-    if dist_index.exists():
-        return HTMLResponse(dist_index.read_text(encoding="utf-8"))
+def _missing_dist_assets(html: str) -> list[str]:
+    """返回 dist 首页引用但磁盘上不存在的构建产物（正常为空列表）。"""
+    missing = []
+    for ref in _dist_asset_refs(html):
+        # "/static/dist/assets/x.js" → STATIC_DIR / "dist/assets/x.js"
+        rel = ref[len("/static/"):]
+        if not (STATIC_DIR / rel).exists():
+            missing.append(ref)
+    return missing
+
+
+def _classic_index() -> HTMLResponse:
+    """经典原生 JS 界面（无构建步骤、无 ES 模块）—— 全链路的最后兜底。"""
     html_path = STATIC_DIR / "index.html"
     if html_path.exists():
         html = html_path.read_text(encoding="utf-8")
         # 版本化静态资源 URL → 版本升级即自动 cache-bust（server_web.py）
         return HTMLResponse(_versioned_html(html, __version__))
     return HTMLResponse(_fallback_html())
+
+
+@app.get("/")
+async def index():
+    # v1.0 React 前端（Vite 构建产物，资源带内容哈希无需手动 cache-bust）；
+    # 未构建 / 产物不完整时回退到经典原生 JS 界面，功能一致。
+    dist_index = STATIC_DIR / "dist" / "index.html"
+    if dist_index.exists():
+        try:
+            html = dist_index.read_text(encoding="utf-8")
+        except OSError as e:
+            logger.error(f"读取 React 前端产物失败（{e}）→ 回退经典界面")
+        else:
+            # 完整性守卫：index.html 与 assets 来自不同次构建时，引用的哈希
+            # 文件会 404 让用户看到"界面未能加载"。此处提前发现并回退到
+            # 必定可用的经典界面，用户始终有可用界面而不是错误页。
+            missing = _missing_dist_assets(html)
+            if not missing:
+                return HTMLResponse(html)
+            logger.error(f"React 前端产物不完整，缺失 {missing} → 回退经典界面")
+    return _classic_index()
+
+
+@app.get("/legacy")
+async def legacy_index():
+    """经典原生 JS 界面的固定入口。
+
+    供前端启动兜底使用：内核过旧（不支持 ES 模块）或 React 产物加载失败时，
+    错误页提供"打开兼容版界面"一键切换到这里 —— 无构建产物依赖，功能一致。
+    """
+    return _classic_index()
 
 
 def _fallback_html() -> str:
@@ -3096,7 +3134,7 @@ def main():
     args = parser.parse_args()
     print(f"""
 ╔══════════════════════════════════════════════════╗
-║         AutoMind Web UI v1.2.0                    ║
+║         AutoMind Web UI v{__version__:<24}║
 ║                                                  ║
 ║  打开浏览器访问: http://{args.host}:{args.port}              ║
 ║  API 文档:      http://{args.host}:{args.port}/docs         ║

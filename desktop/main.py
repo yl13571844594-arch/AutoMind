@@ -373,6 +373,105 @@ def _mark_blank_seen(data_dir: str) -> None:
         pass
 
 
+# ── WebView2 缓存自愈 ───────────────────────────────────
+# 线上"升级后部分电脑界面未能加载"的实际根因：入口页引用带内容哈希的
+# index-<hash>.js；旧版本允许 HTML 落盘缓存，升级后 WebView2 仍吐出上一版
+# HTML，而它引用的哈希文件已随新版本删除 → 404 → 白屏兜底提示。
+# 服务端已改为对 HTML 下发 no-store 杜绝再次发生（automind/server_web.py）；
+# 但**已被污染的机器**必须主动清一次缓存，否则升级后仍命中那份旧 HTML。
+_WEBVIEW_CACHE_DIRS = ("Cache", "Code Cache", "GPUCache", "Service Worker")
+
+
+def _webview_storage_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "webview")  # noqa: PTH118
+
+
+def _purge_webview_cache(data_dir: str) -> int:
+    """清空 WebView2 的 HTTP/代码缓存目录，返回清理处数。
+
+    只删缓存目录，**不动** Cookies / Local Storage —— 登录态与前端本地设置
+    完全保留，用户无感。
+    """
+    import shutil
+    root = _webview_storage_path(data_dir)
+    if not os.path.isdir(root):  # noqa: PTH112
+        return 0
+    removed = 0
+    for cur, dirs, _files in os.walk(root):
+        for name in list(dirs):
+            if name not in _WEBVIEW_CACHE_DIRS:
+                continue
+            shutil.rmtree(os.path.join(cur, name), ignore_errors=True)  # noqa: PTH118
+            removed += 1
+            dirs.remove(name)   # 已删除，无需再往下遍历
+    return removed
+
+
+def _purge_cache_on_version_change(data_dir: str) -> None:
+    """版本号变化时清一次 WebView2 缓存（升级自愈，仅首次启动新版本时触发）。"""
+    stamp = os.path.join(data_dir, "webview_build.txt")  # noqa: PTH118
+    current = _app_version()
+    try:
+        previous = ""
+        if os.path.exists(stamp):  # noqa: PTH110
+            with open(stamp, encoding="utf-8") as f:
+                previous = f.read().strip()
+        if previous == current:
+            return
+        n = _purge_webview_cache(data_dir)
+        _log(f"版本变化（{previous or '首次运行'} → {current}）：已清理 WebView2 缓存 {n} 处")
+        with open(stamp, "w", encoding="utf-8") as f:
+            f.write(current)
+    except Exception as e:
+        _log(f"清理 WebView2 缓存失败（不影响启动）：{e}")
+
+
+# WebView2 运行时最低内核。前端产物基线为 ES2017（Chromium 55+），此处取更
+# 保守的 90 作为"建议升级"提示线，低于它只提示并直接走兼容版界面，不阻断启动。
+_WEBVIEW2_MIN_MAJOR = 90
+
+_WEBVIEW2_CLIENT = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+
+
+def _webview2_version() -> str:
+    """已安装的 WebView2 Evergreen 运行时版本号；读不到返回空串。"""
+    if sys.platform != "win32":
+        return ""
+    try:
+        import winreg
+    except ImportError:
+        return ""
+    candidates = (
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{_WEBVIEW2_CLIENT}"),
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{_WEBVIEW2_CLIENT}"),
+        (winreg.HKEY_CURRENT_USER, rf"Software\Microsoft\EdgeUpdate\Clients\{_WEBVIEW2_CLIENT}"),
+    )
+    for hive, sub in candidates:
+        try:
+            with winreg.OpenKey(hive, sub) as k:
+                pv, _ = winreg.QueryValueEx(k, "pv")
+                if pv and str(pv) != "0.0.0.0":
+                    return str(pv)
+        except OSError:
+            continue
+    return ""
+
+
+def _webview2_too_old() -> bool:
+    """运行时内核是否低于建议版本（读不到版本时**不**判定为老，避免误伤）。"""
+    ver = _webview2_version()
+    if not ver:
+        return False
+    try:
+        major = int(ver.split(".")[0])
+    except (ValueError, IndexError):
+        return False
+    if major < _WEBVIEW2_MIN_MAJOR:
+        _log(f"WebView2 运行时版本较旧（{ver}）→ 直接加载兼容版界面")
+        return True
+    return False
+
+
 def _render_ok(w, timeout: float = 10.0) -> bool:
     """加载主界面后确认 React 真的挂载完成（防"页面加载/JS 执行失败"型白屏）。
 
@@ -380,17 +479,20 @@ def _render_ok(w, timeout: float = 10.0) -> bool:
     节点 —— 故"挂载完成"判据 = #root 有子节点且 #boot 已消失。据此可捕获：
       · 导航彻底失败（about:blank，取不到 #root）；
       · JS 模块加载失败 / 运行时异常导致 React 永不挂载（内核过旧等）。
+    兼容版界面（/legacy）是无构建产物的经典 DOM、没有 #root，故额外认
+    #main 存在即为渲染成功 —— 否则自愈链切到兼容版后会被误判成白屏。
     注意：GPU 合成型白屏（DOM 正常、只是没画出来）无法从脚本侧探知，
     那一类由启动前的禁 GPU 策略与托盘「兼容模式重启」兜底。
     evaluate_js 不可用（老 pywebview/降级路径）时不做误判，视为通过。
     """
-    # 返回：0=无 root/未导航，1=占位仍在(未挂载)，2=React 已挂载，-1=异常
+    # 返回：0=未导航/空文档，1=占位仍在(未挂载)，2=已渲染，-1=异常
     _JS = (
         "(function(){try{"
+        "if(document.getElementById('boot'))return 1;"        # 占位仍在 → 未挂载
         "var r=document.getElementById('root');"
-        "if(!r)return 0;"
-        "if(document.getElementById('boot'))return 1;"
-        "return r.children.length>0?2:1;"
+        "if(r)return r.children.length>0?2:1;"                # React 界面
+        "if(document.getElementById('main'))return 2;"        # 经典/兼容版界面
+        "return 0;"
         "}catch(e){return -1;}})()"
     )
     deadline = time.time() + timeout
@@ -484,6 +586,13 @@ def main() -> None:
     # 并按环境追加禁 GPU 的兼容参数（老/虚拟显卡、RDP 下的白屏规避）。
     os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
                           _webview2_args(data_dir))
+    # 升级自愈：版本变化时清一次 WebView2 缓存，避免旧 HTML 指向已删除的
+    # 哈希产物（"界面未能加载"的根因）。必须在开窗前做。
+    if not args.server_only:
+        _purge_cache_on_version_change(data_dir)
+        wv = _webview2_version()
+        if wv:
+            _log(f"WebView2 运行时版本：{wv}")
     server_thread = _start_server(port)
 
     if args.server_only:
@@ -582,13 +691,47 @@ def main() -> None:
                 win.events.closing += on_closing
 
             def _load_main(w) -> None:
-                """加载主界面并复核渲染；判定白屏则自愈 + 降级系统浏览器。"""
+                """加载主界面并复核渲染；失败则逐级自愈，最后降级系统浏览器。
+
+                自愈顺序（由轻到重，每级都比上一级更可能成功）：
+                  1. 内核已知过旧 → 直接上兼容版界面（无 ES 模块依赖）；
+                  2. 首次未挂载 → 清 WebView2 缓存后重试一次（陈旧 HTML 型）；
+                  3. 仍未挂载 → 换兼容版界面（内核/产物型）；
+                  4. 兼容版也不行 → 落禁 GPU 标记 + 降级系统浏览器（GPU 合成型）。
+                """
                 _write_instance(data_dir, port)
+                legacy_url = f"{url}/legacy"
+                if _webview2_too_old():
+                    w.load_url(legacy_url)
+                    return
                 w.load_url(url)
                 # 复核 React 是否真挂载（捕获导航/JS 执行型白屏，与是否禁 GPU 无关）
                 if _render_ok(w):
                     return
-                _log("!! 主界面渲染为空（疑似 WebView2 白屏）"
+
+                # ② 陈旧缓存型：清掉 HTTP 缓存再来一次（升级后最常见的一类）
+                n = _purge_webview_cache(data_dir)
+                _log(f"!! 主界面未挂载 → 已清理 WebView2 缓存 {n} 处，重试加载")
+                try:
+                    w.load_url(f"{url}/?_cb={int(time.time())}")
+                    if _render_ok(w):
+                        _log("清缓存后加载成功 ✓")
+                        return
+                except Exception as e:
+                    _log(f"清缓存后重试失败：{e}")
+
+                # ③ 内核/产物型：换成无构建产物依赖的经典界面
+                _log("!! 重试仍未挂载 → 切换兼容版界面（/legacy）")
+                try:
+                    w.load_url(legacy_url)
+                    if _render_ok(w):
+                        _log("兼容版界面加载成功 ✓")
+                        return
+                except Exception as e:
+                    _log(f"兼容版界面加载失败：{e}")
+
+                # ④ GPU 合成型（脚本侧探不到）：落自愈标记 + 降级系统浏览器
+                _log("!! 兼容版界面同样为空（疑似 GPU 合成型白屏）"
                      "→ 落自愈标记 + 降级系统浏览器")
                 _mark_blank_seen(data_dir)   # 下次启动自动禁 GPU
                 try:
