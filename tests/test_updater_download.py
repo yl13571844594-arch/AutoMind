@@ -24,8 +24,9 @@ REAL_URL = ("https://github.com/yl13571844594-arch/AutoMind/releases/download/"
 class FakeResp(io.BytesIO):
     """可控的 HTTP 响应桩：支持 206 续传语义与"传到一半断线"。"""
 
-    # 每次 read 只吐一小段（真实网络就是这样），否则 256KB 的读块会一口气
+    # 带长度的 read 只吐一小段（真实网络就是这样），否则 256KB 的读块会一口气
     # 把测试载荷读完，"传到一半断线"根本触发不了。
+    # 不带长度的 read()（check() 读 JSON 用）仍返回全部 —— 截断会让 JSON 解析失败。
     CHUNK = 256
 
     def __init__(self, body: bytes, status: int = 200, cut: int | None = None):
@@ -38,7 +39,7 @@ class FakeResp(io.BytesIO):
     def read(self, n: int = -1) -> bytes:
         if self._cut is not None and self._served >= self._cut:
             raise OSError("connection reset by peer")
-        chunk = super().read(self.CHUNK if n is None or n < 0 else min(n, self.CHUNK))
+        chunk = super().read() if n is None or n < 0 else super().read(min(n, self.CHUNK))
         self._served += len(chunk)
         return chunk
 
@@ -247,3 +248,31 @@ class TestPlatformAssets:
     def test_auto_install_requires_frozen(self, monkeypatch):
         monkeypatch.setattr(updater, "_is_frozen", lambda: False)
         assert not updater.can_auto_install()
+
+    @pytest.mark.parametrize("platform,suffix", [
+        ("win32", ".exe"), ("darwin", ".dmg"), ("linux", ".deb")])
+    def test_check_picks_current_platform_asset(self, tmp_path, monkeypatch,
+                                                platform, suffix):
+        """check() 必须按运行平台挑包 —— 在任一平台上跑都要挑对，不能只在
+        Windows 上正确（这正是本地全绿而 Linux CI 挂掉的那个缺口）。"""
+        import json
+
+        from automind.core import db as db_mod
+        db_mod.reset_for_tests(tmp_path / "t.db")
+        try:
+            payload = json.dumps({
+                "tag_name": "v99.0.0", "body": "", "html_url": "https://github.com/x",
+                "assets": [
+                    {"name": n, "size": 1,
+                     "browser_download_url": f"https://github.com/x/releases/download/v99.0.0/{n}"}
+                    for n in ("AutoMind-Setup-99.0.0.exe", "AutoMind-99.0.0.dmg",
+                              "automind_99.0.0_amd64.deb")],
+            }).encode()
+            monkeypatch.setattr(updater, "_platform_key", lambda: platform)
+            monkeypatch.setattr(updater, "_open", lambda *_a, **_k: FakeResp(payload))
+            r = updater.check(force=True)
+            assert r["asset_name"].endswith(suffix), \
+                f"{platform} 上应挑 {suffix}，实得 {r['asset_name']}"
+            assert r["asset_url"].startswith("https://github.com/")
+        finally:
+            db_mod.reset_for_tests(None)

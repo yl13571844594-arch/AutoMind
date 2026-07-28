@@ -39,13 +39,16 @@ class TestCheck:
             "tag_name": tag,
             "body": "更新说明",
             "html_url": f"https://github.com/{updater.GITHUB_REPO}/releases/{tag}",
-            "assets": [{
-                "name": f"AutoMind-Setup-{tag.lstrip('v')}.exe",
-                "size": 123,
-                "browser_download_url":
-                    f"https://github.com/{updater.GITHUB_REPO}/releases/download/"
-                    f"{tag}/AutoMind-Setup-{tag.lstrip('v')}.exe",
-            }],
+            # 三平台资产全给上（真实 Release 就是这样）：check() 按当前平台挑，
+            # 只放 .exe 会让这个用例在 Linux CI 上挑不到资产而失败。
+            "assets": [
+                {"name": name, "size": 123,
+                 "browser_download_url":
+                     f"https://github.com/{updater.GITHUB_REPO}/releases/download/{tag}/{name}"}
+                for name in (f"AutoMind-Setup-{tag.lstrip('v')}.exe",
+                             f"AutoMind-{tag.lstrip('v')}.dmg",
+                             f"automind_{tag.lstrip('v')}_amd64.deb")
+            ],
         }).encode()
 
         class _Resp(io.BytesIO):
@@ -66,6 +69,11 @@ class TestCheck:
             assert r["available"] and r["latest"] == "99.0.0"
             assert r["asset_url"].startswith("https://github.com/")
             assert r["current"] == __version__
+            # 必须挑到**当前平台**的那个包（Windows→.exe / macOS→.dmg / Linux→.deb）
+            import sys as _sys
+            expected = {"win32": ".exe", "darwin": ".dmg"}.get(_sys.platform, ".deb")
+            assert r["asset_name"].endswith(expected), \
+                f"{_sys.platform} 上应挑 {expected}，实得 {r['asset_name']}"
             # 二次调用命中缓存（无需再 mock 网络）
             monkeypatch.setattr(updater, "_open",
                                 lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError))
