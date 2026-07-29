@@ -1,5 +1,7 @@
 [build-system]
-requires = ["setuptools>=75.0", "wheel"]
+# >=77：PEP 639 的 license / license-files（SPDX 表达式 + 许可文件随包）自该版起支持；
+# 沿用旧的 >=75 会让干净环境里的构建在解析 license-files 时直接失败。
+requires = ["setuptools>=77.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -9,6 +11,8 @@ version = "1.3.2"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
+# 让 LICENSE 正文随包分发（PyPI 上 1.1.0 的 License 字段为空即因缺此项）
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 authors = [{name = "AutoMind Team"}]
 keywords = ["agent", "automation", "llm", "mcp", "planning"]
@@ -29,9 +33,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/automind/automind"
-Repository = "https://github.com/automind/automind"
-Issues = "https://github.com/automind/automind/issues"
+# 此前指向 github.com/automind/automind —— 该仓库不存在（实测 404），
+# PyPI 项目页上的主页/仓库/Issues 三个链接因此全是死链。改为真实仓库。
+Homepage = "https://github.com/yl13571844594-arch/AutoMind"
+Repository = "https://github.com/yl13571844594-arch/AutoMind"
+Issues = "https://github.com/yl13571844594-arch/AutoMind/issues"
+Changelog = "https://github.com/yl13571844594-arch/AutoMind/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 web = [
