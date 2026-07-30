@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.2.0</title>
+<title>AutoMind 使用手册 — v1.4.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -167,7 +167,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.2.0</div>
+  <div class="ver">使用手册 · v1.4.0</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -204,7 +204,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.2.0</b></span>
+    <span class="chip">版本 <b>v1.4.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -436,14 +436,41 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <div class="cap">图 3-1 · 界面三区布局：① 侧边栏导航 ② 顶部控制 + 聊天工作区 ③ 右侧实时观测面板</div>
   </div>
 
-  <h3>键盘快捷键</h3>
+  <h3>键盘快捷键<span class="tag">v1.4 起为完整快捷键系统</span></h3>
+  <p>macOS 上把下表的 <span class="kbd">Ctrl</span> 读作 <span class="kbd">⌘</span>。应用内按
+  <span class="kbd">?</span> 可随时调出这张表（侧栏「⚙ 设置 → ⌨ 键盘快捷键」也能打开），
+  内容与实际生效的按键同源，不会出现"文档写了却按不动"。</p>
   <div class="tbl-wrap"><table>
     <tr><th>快捷键</th><th>功能</th></tr>
     <tr><td><span class="kbd">Enter</span> / <span class="kbd">Shift+Enter</span></td><td>发送 / 换行</td></tr>
-    <tr><td><span class="kbd">Esc</span></td><td>关闭所有弹窗</td></tr>
-    <tr><td><span class="kbd">Ctrl + .</span></td><td>中断当前任务</td></tr>
-    <tr><td><span class="kbd">Ctrl + L</span></td><td>新会话（清空当前模式对话）</td></tr>
+    <tr><td><span class="kbd">Esc</span> 或 <span class="kbd">Ctrl + .</span></td><td>停止当前任务；有弹窗时先关弹窗</td></tr>
+    <tr><td><span class="kbd">Ctrl + N</span> 或 <span class="kbd">Ctrl + L</span></td><td>新会话（清空当前模式对话，会二次确认）</td></tr>
+    <tr><td><span class="kbd">Ctrl + K</span></td><td>打开模板库</td></tr>
+    <tr><td><span class="kbd">Ctrl + ,</span></td><td>打开通用设置</td></tr>
+    <tr><td><span class="kbd">Ctrl + Shift + W</span></td><td>切换工作区</td></tr>
+    <tr><td><span class="kbd">Ctrl + /</span></td><td>光标定位到输入框</td></tr>
+    <tr><td><span class="kbd">Ctrl + Shift + L</span></td><td>切换深色 / 浅色主题</td></tr>
+    <tr><td><span class="kbd">Ctrl + =</span> / <span class="kbd">Ctrl + -</span> / <span class="kbd">Ctrl + 0</span></td><td>增大 / 减小 / 复位字号</td></tr>
+    <tr><td><span class="kbd">?</span></td><td>显示快捷键帮助</td></tr>
+    <tr><td><span class="kbd">Ctrl + 1</span> ~ <span class="kbd">Ctrl + 3</span></td><td>切换模式：对话 / 工作 / 编程</td></tr>
+    <tr><td><span class="kbd">Alt + 1</span> ~ <span class="kbd">Alt + 4</span></td><td>切换视图：对话工作台 / 计划 / 工具 / 历史</td></tr>
   </table></div>
+  <div class="note">带修饰键的组合在输入框里照常生效，不会打断打字；<span class="kbd">?</span>
+  这类单字符快捷键只在非输入状态生效，否则你就打不出问号了。中文输入法组词过程中不会被抢键。</div>
+
+  <h3>界面偏好（字号 / 通知 / 动效）<span class="tag">v1.4 新增</span></h3>
+  <p>在「⚙ 设置 → ⚙ 通用设置 → 🎨 界面偏好」里，三项都是<strong>本机生效、立即生效、自动记住</strong>，
+  不改变任何功能，也不会同步到别的机器。</p>
+  <div class="tbl-wrap"><table>
+    <tr><th>项目</th><th>说明</th></tr>
+    <tr><td><b>字号</b></td><td>85% ~ 130% 无级调节，界面整体等比缩放（含 antd 组件）。也可用
+      <span class="kbd">Ctrl + =</span> / <span class="kbd">Ctrl + -</span> / <span class="kbd">Ctrl + 0</span></td></tr>
+    <tr><td><b>任务完成通知</b></td><td>任务跑完发系统通知，<strong>只在窗口不可见时</strong>提醒；
+      点通知直接跳回应用。解决"发个 5 分钟的任务切走干别的，回来才发现早跑完了"</td></tr>
+    <tr><td><b>减少动效</b></td><td>关闭淡入等动画，老机器上更跟手；系统级「减少动态效果」也会被自动尊重</td></tr>
+  </table></div>
+  <div class="note"><b>关于通知权限：</b>首次勾选时浏览器/系统会询问授权，必须允许才会收到提醒。
+  若曾误点"拒绝"，需先到浏览器或系统的通知设置里放行 AutoMind，再回来重新勾选。桌面版直接使用系统通知中心。</div>
 
   <div class="note"><b>会话隔离：</b>五种模式的聊天内容<strong>互相独立</strong>，切换模式不丢各自记录；
   每个浏览器也持有独立会话 ID，多人共用一台服务互不可见。</div>
@@ -876,7 +903,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.2.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.4.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -991,7 +1018,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.2.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.4.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

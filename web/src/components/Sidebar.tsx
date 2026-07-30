@@ -60,6 +60,7 @@ export default function Sidebar() {
     { key: 'workspaces', label: '🗂 工作区管理', onClick: () => openModal('workspaces') },
     { type: 'divider' as const },
     { key: 'update', label: '🔄 检查更新', onClick: () => openModal('update') },
+    { key: 'shortcuts', label: '⌨ 键盘快捷键', onClick: () => openModal('shortcuts') },
     { key: 'tour', label: '🧭 新手引导', onClick: () => openModal('tour') },
     { key: 'manual', label: '📖 使用手册', onClick: () => window.open('/manual', '_blank') },
   ];

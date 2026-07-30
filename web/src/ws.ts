@@ -7,7 +7,9 @@ import {
 } from './store/chat';
 import { useObserve } from './store/observe';
 import { usePanel } from './store/panel';
+import { usePrefs } from './store/prefs';
 import { esc, renderMarkdown } from './lib/markdown';
+import { fmtDuration, notifyTask } from './lib/notify';
 
 let ws: WebSocket | null = null;
 let retry = 0;
@@ -17,6 +19,27 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 const live: { stream?: string; exec?: string; multi?: string; loop?: string } = {};
 let streamBuf = '';
 let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * 任务终态时发系统通知 —— 解决"跑 5 分钟的任务切走干别的，回来才发现早完了"。
+ * 只在窗口不可见时发（用户正看着界面时，界面本身已经把结果摆在眼前了）。
+ */
+function notifyDone(kind: 'ok' | 'fail' | 'stop', mode: Mode, data: any): void {
+  if (!usePrefs.getState().notifyOnDone) return;
+  const label = MODE_LABELS[mode] || '任务';
+  const dur = fmtDuration(data?.duration_ms || 0);
+  if (kind === 'ok') {
+    const bits = [dur && `耗时 ${dur}`, data?.steps ? `${data.steps} 个步骤` : ''].filter(Boolean);
+    notifyTask({
+      title: `✅ ${label}任务已完成`,
+      body: bits.length ? bits.join(' · ') : '点击回到 AutoMind 查看结果',
+    });
+  } else if (kind === 'fail') {
+    notifyTask({ title: `❌ ${label}任务失败`, body: String(data?.error || '点击回到 AutoMind 查看详情') });
+  } else {
+    notifyTask({ title: `⏹ ${label}任务已中断`, body: '点击回到 AutoMind 查看详情' });
+  }
+}
 
 function app() { return useApp.getState(); }
 function chat() { return useChat.getState(); }
@@ -289,6 +312,7 @@ function handle(data: any) {
       panel().setStats({ steps: 0, backtracks: 0, tokens: data.tokens || 0, duration_ms: data.duration_ms || 0 });
       panel().bumpRefresh();
       setRunning(false);
+      notifyDone('ok', mode, data);
       break;
 
     case 'task_complete':
@@ -304,6 +328,7 @@ function handle(data: any) {
       chat().setLastTask(null);
       chat().persist();
       setRunning(false);
+      notifyDone('ok', mode, data);
       break;
 
     case 'task_error':
@@ -314,6 +339,7 @@ function handle(data: any) {
       offerResume(mode, '出错');
       panel().bumpRefresh();
       setRunning(false);
+      notifyDone('fail', mode, data);
       break;
 
     case 'task_cancelled':
@@ -324,6 +350,7 @@ function handle(data: any) {
       offerResume(mode, '中断');
       panel().bumpRefresh();
       setRunning(false);
+      notifyDone('stop', mode, data);
       break;
   }
 }

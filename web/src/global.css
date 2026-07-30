@@ -262,3 +262,36 @@ body.light .input-bar { background: rgba(255, 255, 255, .74); }
 /* 通用工具类 */
 .hint-text { font-size: .78em; color: var(--text3); }
 .mono { font-family: var(--mono); }
+
+/* ── v1.4 视觉平滑 ─────────────────────────────────────
+   黑屏闪烁的成因与对策见 App.tsx 里 .view-slot 处的注释：ChatPanel 常驻挂载、
+   只切显示，不再卸载重建。这里补两件事：
+   1) .view-slot 隐藏时必须彻底退出布局与绘制（display:none 已足够），
+      避免常驻的 DOM 仍参与 layout 拖慢切换；
+   2) 视图切入时给一个极短的淡入，把"瞬间换内容"的生硬感抹平。 */
+.view-slot { flex: 1; min-height: 0; flex-direction: column; }
+.view-fade { animation: viewIn .16s ease-out; }
+@keyframes viewIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* 深色主题下窗口/画布底色与页面一致，WebView2 在重绘间隙露出的也是同一颜色，
+   不会闪出与界面反差极大的纯黑。 */
+html { background: var(--bg0); }
+
+/* 「减少动效」偏好：晕动症敏感用户，或老机器上动画反而更卡的场景。
+   全站动画与过渡压到近乎瞬时，但不改变任何布局与功能。 */
+.reduce-motion *,
+.reduce-motion *::before,
+.reduce-motion *::after {
+  animation-duration: .01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: .01ms !important;
+  scroll-behavior: auto !important;
+}
+/* 系统级「减少动态效果」同样尊重 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+  }
+}

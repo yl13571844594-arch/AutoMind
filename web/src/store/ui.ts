@@ -3,7 +3,7 @@ import { create } from 'zustand';
 
 export type ModalName =
   | 'model' | 'apikeys' | 'general' | 'integrations'
-  | 'workspaces' | 'templates' | 'tour' | 'update' | null;
+  | 'workspaces' | 'templates' | 'tour' | 'update' | 'shortcuts' | null;
 
 interface UiState {
   modal: ModalName;

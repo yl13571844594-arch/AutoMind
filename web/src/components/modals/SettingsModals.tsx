@@ -4,7 +4,10 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../../api/client';
+import { prettyCombo } from '../../lib/hotkeys';
+import { notifyPermission, notifySupported, notifyTask, requestNotifyPermission } from '../../lib/notify';
 import { MODE_LABELS, useApp } from '../../store/app';
+import { FONT_MARKS, FONT_MAX, FONT_MIN, usePrefs } from '../../store/prefs';
 import { useUi } from '../../store/ui';
 
 const { Text, Paragraph } = Typography;
@@ -323,6 +326,72 @@ function ApiKeysModal() {
   );
 }
 
+// ── 界面偏好（字号 / 通知 / 动效）───────────────────────
+// 纯本地设置，不落服务端配置：换台机器该重新按自己的眼睛调，而不是被同步过去。
+function InterfacePrefs() {
+  const { message } = App.useApp();
+  const fontScale = usePrefs((s) => s.fontScale);
+  const notifyOnDone = usePrefs((s) => s.notifyOnDone);
+  const reduceMotion = usePrefs((s) => s.reduceMotion);
+  const [perm, setPerm] = useState<string>(notifyPermission());
+
+  const toggleNotify = async (on: boolean) => {
+    if (!on) { usePrefs.getState().setNotifyOnDone(false); return; }
+    if (!notifySupported()) { message.warning('当前环境不支持系统通知'); return; }
+    // 权限申请必须由用户手势触发，所以放在这个开关里，不在启动时偷偷弹
+    const p = await requestNotifyPermission();
+    setPerm(p);
+    if (p === 'granted') {
+      usePrefs.getState().setNotifyOnDone(true);
+      notifyTask({ title: '🔔 通知已开启', body: '任务完成后会在这里提醒你', force: true });
+    } else {
+      usePrefs.getState().setNotifyOnDone(false);
+      message.warning('系统通知权限被拒绝 —— 请在浏览器/系统的通知设置里放行 AutoMind 后重试');
+    }
+  };
+
+  return (
+    <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
+      <Text strong>🎨 界面偏好</Text>
+      <Paragraph type="secondary" style={{ fontSize: '.76em', margin: '4px 0 10px' }}>
+        仅影响本机显示，立即生效并自动记住，不改变任何功能。
+      </Paragraph>
+
+      <div style={{ marginBottom: 6 }}>
+        <Text>字号：<b>{Math.round(fontScale * 100)}%</b></Text>
+        <span className="hint-text" style={{ marginLeft: 8, fontSize: '.78em' }}>
+          （{prettyCombo('mod+=')} 放大 / {prettyCombo('mod+-')} 缩小 / {prettyCombo('mod+0')} 复位）
+        </span>
+      </div>
+      <Slider
+        min={FONT_MIN} max={FONT_MAX} step={0.05} value={fontScale}
+        marks={FONT_MARKS} tooltip={{ formatter: (v) => `${Math.round((v || 1) * 100)}%` }}
+        onChange={(v) => usePrefs.getState().setFontScale(v)}
+      />
+
+      <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <Checkbox checked={notifyOnDone} onChange={(e) => toggleNotify(e.target.checked)}>
+          任务完成后发送系统通知
+          <span className="hint-text" style={{ marginLeft: 6, fontSize: '.78em' }}>
+            —— 长任务切走干别的，跑完立刻知道；只在窗口不可见时提醒
+          </span>
+        </Checkbox>
+        {perm === 'denied' && (
+          <Text type="warning" style={{ fontSize: '.76em', paddingLeft: 24 }}>
+            系统通知权限已被拒绝，需先在浏览器/系统设置里放行本站再开启。
+          </Text>
+        )}
+        <Checkbox checked={reduceMotion} onChange={(e) => usePrefs.getState().setReduceMotion(e.target.checked)}>
+          减少动效
+          <span className="hint-text" style={{ marginLeft: 6, fontSize: '.78em' }}>
+            —— 关闭淡入等动画，老机器上更跟手
+          </span>
+        </Checkbox>
+      </div>
+    </div>
+  );
+}
+
 // ── ⚙ 通用设置 ──────────────────────────────────────────
 const AUTOPILOT_LABELS: Record<string, [string, string]> = {
   auto_review: ['🧐 多Agent审查', '工作模式完成后由审阅者角色复核'],
@@ -413,6 +482,7 @@ function GeneralModal() {
             close(); message.success('设置已保存');
           }}>保存采样参数</Button>
         </Space>
+        <InterfacePrefs />
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
           <Text strong>🔄 自主任务闭环（工作 / 编程模式）</Text>
           <Paragraph type="secondary" style={{ fontSize: '.76em', margin: '4px 0 8px' }}>

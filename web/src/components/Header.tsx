@@ -1,7 +1,7 @@
 // 顶栏：模式切换（3 主模式 + 高级折叠）、审批模式、状态/模型/项目/工作区徽标、
 // 模板 / 引导 / 新会话；下方模式提示条（含激活专家 chip + 每日限额提示）。
 import { App, Select, Tooltip } from 'antd';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { apiDelete, apiPost } from '../api/client';
 import { chatSid, EDITION_LABELS, MODE_FEATURE, MODE_LABELS, useApp, type Mode } from '../store/app';
 import { useChat } from '../store/chat';
@@ -87,6 +87,13 @@ export default function Header() {
     ? badge(`📅 ${quota.daily_used}/${quota.daily_limit}`, quota.daily_used >= quota.daily_limit ? 'err' : 'plain',
       `今日任务 ${quota.daily_used}/${quota.daily_limit} 次（社区版限额，专业版不限）`)
     : null;
+
+  // 快捷键（mod+N）与顶栏按钮共用这一份实现，见 App.tsx 的 newSession
+  useEffect(() => {
+    const fn = () => handleClear();
+    window.addEventListener('automind:new-session', fn);
+    return () => window.removeEventListener('automind:new-session', fn);
+  });
 
   const handleClear = () => {
     modal.confirm({

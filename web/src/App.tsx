@@ -23,9 +23,12 @@ import ScheduleView from './components/views/ScheduleView';
 import StatsView from './components/views/StatsView';
 import TeamView from './components/views/TeamView';
 import ToolsView from './components/views/ToolsView';
+import ShortcutsModal from './components/modals/ShortcutsModal';
+import { installHotkeys } from './lib/hotkeys';
 import { useApp } from './store/app';
+import { ANTD_BASE_FONT, initPrefs, usePrefs } from './store/prefs';
 import { useUi } from './store/ui';
-import { connectWS } from './ws';
+import { connectWS, sendStop } from './ws';
 
 const VIEWS: Record<string, React.ComponentType> = {
   plan: PlanView, tools: ToolsView, experts: ExpertsView, team: TeamView,
@@ -61,12 +64,14 @@ function UpdateNotifier() { useUpdateNotify(); return null; }
 export default function App() {
   const theme = useApp((s) => s.theme);
   const view = useApp((s) => s.view);
+  const fontScale = usePrefs((s) => s.fontScale);
 
   useEffect(() => {
     document.body.classList.toggle('light', theme === 'light');
   }, [theme]);
 
   useEffect(() => {
+    initPrefs();                       // 字号/动效偏好尽早生效，避免首屏跳字号
     const app = useApp.getState();
     app.loadStatus();
     app.loadHealth();
@@ -76,6 +81,49 @@ export default function App() {
     if (!localStorage.getItem('automind_onboarded')) {
       setTimeout(() => useUi.getState().openModal('tour'), 600);
     }
+  }, []);
+
+  // ── 全局快捷键 ──
+  useEffect(() => {
+    const ui = () => useUi.getState();
+    const app = () => useApp.getState();
+    const prefs = () => usePrefs.getState();
+    const step = (d: number) => prefs().setFontScale(
+      +(prefs().fontScale + d).toFixed(2));
+
+    return installHotkeys({
+      // 复用顶栏「🔄 新会话」那一份实现（带确认弹窗 + 清服务端历史 + 重置面板），
+      // 不在这里另写一份 —— 清会话是破坏性操作，两处实现迟早会走样。
+      newSession: () => window.dispatchEvent(new CustomEvent('automind:new-session')),
+      templates: () => ui().openModal('templates'),
+      settings: () => ui().openModal('general'),
+      workspaces: () => ui().openModal('workspaces'),
+      help: () => ui().openModal('shortcuts'),
+      toggleTheme: () => app().toggleTheme(),
+      fontUp: () => step(0.05),
+      fontDown: () => step(-0.05),
+      fontReset: () => prefs().setFontScale(1),
+      focusInput: () => {
+        const el = document.querySelector<HTMLTextAreaElement>('.chat-input textarea, #user-input');
+        el?.focus();
+      },
+      stop: () => {
+        // Esc 双职责：有弹窗先关弹窗，否则停任务 —— 符合直觉的"退一步"
+        if (ui().modal || ui().preview) { ui().closeModal(); ui().closePreview(); return; }
+        // 中断走 WebSocket（后端没有 /api/stop 这个路由，走 HTTP 会静默 404）
+        if (app().running) sendStop();
+      },
+      mode1: () => app().setMode('chat'),
+      mode2: () => app().setMode('work'),
+      mode3: () => app().setMode('coding'),
+      viewChat: () => app().setView('chat'),
+      viewPlan: () => app().setView('plan'),
+      viewTools: () => app().setView('tools'),
+      viewHistory: () => app().setView('history'),
+    }, {
+      // Esc 之外的快捷键在弹窗打开时让位，避免叠加触发
+      modalOpen: () => !!(useUi.getState().modal || useUi.getState().preview),
+    });
   }, []);
 
   const ViewComp = view !== 'chat' ? VIEWS[view] : null;
@@ -88,6 +136,9 @@ export default function App() {
         token: {
           colorPrimary: theme === 'dark' ? '#7b9fff' : '#4a6fe8',
           borderRadius: 9,
+          // antd 用 px token，不随根字号缩放，必须显式跟上，否则调字号时
+          // 自有样式变大、antd 组件纹丝不动，界面会割裂
+          fontSize: Math.round(ANTD_BASE_FONT * fontScale),
           fontFamily: "'Inter','Segoe UI',system-ui,-apple-system,'Microsoft YaHei',sans-serif",
           ...(theme === 'dark' ? {
             colorBgContainer: '#0e1220', colorBgElevated: '#161c2e',
@@ -104,10 +155,16 @@ export default function App() {
           <div className="app-main">
             <Header />
             <div className="app-body">
-              {ViewComp ? (
-                <div className="messages" style={{ flex: 1 }}><ViewComp /></div>
-              ) : (
+              {/* 黑屏闪烁的根因修复：此处原本是 `ViewComp ? <View/> : <ChatPanel/>`，
+                  每次切视图都会把整个 ChatPanel 卸载再重建。会话一长，这次同步
+                  卸载+重建要占掉好几帧，期间浏览器没有内容可画，露出近黑的
+                  --bg0 底色 —— 用户看到的就是"黑屏闪几下"。
+                  改为**始终挂载**、只切显示：DOM 不重建，滚动位置也不再丢。 */}
+              <div className="view-slot" style={{ display: ViewComp ? 'none' : 'flex' }}>
                 <ChatPanel />
+              </div>
+              {ViewComp && (
+                <div className="messages view-fade" style={{ flex: 1 }}><ViewComp /></div>
               )}
               <RightPanel />
             </div>
@@ -118,6 +175,7 @@ export default function App() {
         <TemplatesModal />
         <TourModal />
         <UpdateModal />
+        <ShortcutsModal />
         <ApprovalModal />
         <PreviewModal />
       </AntApp>
