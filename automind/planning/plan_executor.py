@@ -247,14 +247,31 @@ class PlanExecutor:
                     success=False,
                     error=f"Permission denied: {reason}",
                 )
-            if decision.value == "ask_user" and on_approval_needed:
-                approved = await on_approval_needed(goal, action)
+            if decision.value == "ask_user":
+                # 安全修复（v1.4.5）：原条件是 `ask_user and on_approval_needed` ——
+                # 没接审批回调时整个判断被**整体跳过**，需要人工确认的操作直接执行了。
+                # 现在没有回调就等于问不到人，按拒绝处理。
+                # （要无人值守跑，应把审批模式设为「自动」/「全批准」——那样
+                #   permissions.check() 不会返回 ask_user，根本走不到这里。）
+                if on_approval_needed is None:
+                    return StepResult(
+                        goal_id=goal.id,
+                        goal_description=goal.description,
+                        success=False,
+                        error=(f"{reason}；当前没有可用的审批通道，已按拒绝处理"
+                               "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）"),
+                    )
+                try:
+                    approved = await on_approval_needed(goal, action)
+                except Exception as e:
+                    approved = False   # 审批通道异常一律视为未批准
+                    reason = f"审批通道异常（{type(e).__name__}）"
                 if not approved:
                     return StepResult(
                         goal_id=goal.id,
                         goal_description=goal.description,
                         success=False,
-                        error="User denied the action",
+                        error=f"User denied the action: {reason}",
                     )
 
         # 子任务缓存：SAFE 级只读工具（file_read/web_fetch 等）同参调用直接复用结果，

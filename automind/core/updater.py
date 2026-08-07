@@ -471,29 +471,105 @@ def _verify_integrity(setup: Path, info: dict) -> tuple[bool, str]:
 def _install_script(tmp: Path, setup: Path, exe: str, pid: str) -> Path:
     """生成升级批处理。
 
-    相较早期版本的两个要紧改动：
-      · 安装器**失败也要把旧版本拉起来** —— 否则用户点了升级，应用就此再也
-        没回来，比不升级严重得多；
-      · 写 Inno 安装日志并保留退出码，失败可追溯。
+    "点了升级，应用就再也没回来"的**真凶不在这个函数里**，而在
+    :func:`_apply_worker` 启动本脚本的方式上（未显式给标准流句柄，详见那里的注释）。
+
+    此处以 ``newline=""`` 写入属于顺带修的隐患：``Path.write_text()`` 是文本模式，
+    会把源串 ``\\r\\n`` 里的 ``\\n`` 再转成 ``\\r\\n``，落盘变成 ``\\r\\r\\n``。
+    实测 cmd 能容忍这种行尾（不是本次故障的原因），但没有理由留着 ——
+    同类换行转换在本仓库已经坑过一次（SHA256SUMS）。
+
+    另把这个脚本做成"无论如何都不会把用户晾在没有应用可用的状态"：
+      · 等旧进程退出设上限，卡住也会继续，不会无限等；
+      · ``timeout`` 需要控制台，而本批处理是以 DETACHED_PROCESS 启动的（无控制台），
+        改用 ``ping`` 延时，否则那行每次都报错、循环空转烧 CPU；
+      · 静默安装失败时**自动改用可见模式重试一次** —— 装在 Program Files 的用户
+        需要 UAC 提权，而 ``/VERYSILENT`` 下提权界面出不来，必然静默失败；
+      · 最后无论成败都拉起应用（新版或旧版），并保留安装日志便于追溯。
     """
     bat = tmp / "apply_update.bat"
     log = tmp / "install.log"
-    bat.write_text(
-        "@echo off\r\n"
-        ":wait\r\n"
-        f"tasklist /FI \"PID eq {pid}\" 2>nul | find \"{pid}\" >nul && "
-        "(timeout /t 1 /nobreak >nul & goto wait)\r\n"
-        f"\"{setup}\" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /LOG=\"{log}\"\r\n"
-        "set RC=%ERRORLEVEL%\r\n"
-        f"echo exit_code=%RC% >> \"{log}\"\r\n"
+    lines = [
+        "@echo off",
+        "setlocal",
+        f'set "SETUP={setup}"',
+        f'set "APPEXE={exe}"',
+        f'set "APPNAME={Path(exe).name}"',
+        f'set "LOG={log}"',
+        "set RC=0",
+        "set /a N=0",
+        ":wait",
+        # 旧进程还在就等；等不到也不能无限卡着（上限约 120 秒）
+        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul || goto run',
+        "set /a N+=1",
+        "if %N% GEQ 120 goto run",
+        "ping -n 2 127.0.0.1 >nul",
+        "goto wait",
+        ":run",
+        # 主进程 PID 退出不等于文件不再被占用：托盘/子进程、用户另开的第二个窗口
+        # 都会让 Inno 装不进去。而 /SUPPRESSMSGBOXES 下"请先关闭应用"的提示弹不出来，
+        # Inno 只能以退出码 5（已取消）放弃 —— 表现就是"点了升级却什么也没装上"。
+        # 故安装前先确保没有残留实例，再交给 Inno 的 Restart Manager 兜底。
+        'taskkill /IM "%APPNAME%" /F /T >nul 2>&1',
+        "ping -n 3 127.0.0.1 >nul",
+        '"%SETUP%" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /FORCECLOSEAPPLICATIONS /LOG="%LOG%"',
+        "set RC=%ERRORLEVEL%",
+        # 静默失败多半是需要提权（装在 Program Files）；可见模式才能弹 UAC
+        "if not %RC%==0 (",
+        '  echo silent_failed rc=%RC%, retry visible >>"%LOG%"',
+        '  "%SETUP%" /SILENT /NORESTART /FORCECLOSEAPPLICATIONS /LOG="%LOG%.retry"',
+        ")",
+        # 取重试的退出码**必须在块外**：cmd 是把整个 `( ... )` 块一次性解析完再执行的，
+        # 写在块里的 `set RC=%ERRORLEVEL%` 中的 %ERRORLEVEL% 在解析那一刻就被展开成
+        # "重试之前"的旧值 —— 重试的真实结果根本没被记录下来，日志里的 exit_code
+        # 永远是静默安装那次的失败码，装成了也显示失败，排障时直接把人带偏。
+        # （另一种解法是 setlocal enabledelayedexpansion + !ERRORLEVEL!，但那会让
+        #  路径里的 `!` 被吃掉；块外取值没有这个副作用。）
+        "set RC2=%ERRORLEVEL%",
+        "if not %RC%==0 set RC=%RC2%",
+        # %RC% 与 >> 之间必须留空格：`echo x=0>>f` 里紧挨 > 的数字会被 cmd
+        # 当成文件句柄号（0=stdin），结果写出来的是空值而不是退出码。
+        'echo exit_code=%RC% >>"%LOG%"',
         # 无论装成没装成都把应用拉回来：装成了是新版，没装成是旧版，
         # 用户至少不会面对一个"点了升级就消失"的程序。
-        f"start \"\" \"{exe}\"\r\n"
-        "del \"%~f0\"\r\n",
-        # cmd.exe 按系统 ANSI 代码页读批处理；用当前区域的首选编码写，
-        # 非中文 Windows 上的路径才不会被写坏（早期硬编码 gbk 会）。
-        encoding=locale.getpreferredencoding(False) or "utf-8", errors="replace")
+        'if exist "%APPEXE%" start "" "%APPEXE%"',
+        # 自删的标准安全写法：先跳出脚本再删，否则 cmd 会继续去读已被删除的
+        # 文件而报"找不到批处理文件"并以非零码退出。
+        '(goto) 2>nul & del "%~f0"',
+    ]
+    # newline="" 关掉换行转换；encoding 用当前区域首选（cmd 按系统 ANSI 代码页读，
+    # 非中文 Windows 上的路径才不会被写坏 —— 早期硬编码 gbk 会）。
+    with open(bat, "w", encoding=locale.getpreferredencoding(False) or "utf-8",
+              errors="replace", newline="") as f:
+        f.write("\r\n".join(lines) + "\r\n")
     return bat
+
+
+def _spawn_installer(bat: Path, tmp: Path) -> None:
+    """脱离本进程启动升级批处理。
+
+    **必须显式给出 stdin/stdout/stderr** —— 这就是"升级后应用消失"的真凶。
+    桌面版是无控制台的 GUI 进程，再加 ``DETACHED_PROCESS``，子进程拿不到任何标准
+    句柄；不显式指定时 cmd 继承到的是无效句柄，脚本里的 ``2>nul``、``>>"%LOG%"``、
+    ``tasklist | find`` 这些重定向和管道全部失败，批处理立刻以退出码 1 夭折 ——
+    安装器根本没被执行到，更走不到最后那句"重新拉起应用"。
+
+    复现（父进程 pythonw.exe，脚本含一次管道 + 一次重定向）：
+      · 不给句柄 → cmd rc=1，日志和结束标记文件都没生成；
+      · 给了句柄 → cmd rc=0，脚本跑到最后一行。
+
+    顺带把输出留到 ``trace.txt``，升级出问题时有据可查。
+    """
+    import subprocess as sp
+    trace = open(tmp / "trace.txt", "wb")  # noqa: SIM115 - 交给子进程，不能用 with
+    try:
+        sp.Popen(["cmd", "/c", str(bat)],
+                 stdin=sp.DEVNULL, stdout=trace, stderr=trace,
+                 creationflags=(sp.CREATE_NO_WINDOW | sp.DETACHED_PROCESS
+                                | sp.CREATE_NEW_PROCESS_GROUP),
+                 close_fds=True)
+    finally:
+        trace.close()   # 句柄已复制给子进程，父进程这份可以关
 
 
 def _apply_worker(info: dict) -> None:
@@ -529,11 +605,7 @@ def _apply_worker(info: dict) -> None:
 
         # 4) 升级批处理：等本进程退出 → 静默安装 → 重启
         bat = _install_script(tmp, setup, sys.executable, str(os.getpid()))
-        import subprocess as sp
-        sp.Popen(["cmd", "/c", str(bat)],
-                 creationflags=(sp.CREATE_NO_WINDOW | sp.DETACHED_PROCESS
-                                | sp.CREATE_NEW_PROCESS_GROUP),
-                 close_fds=True)
+        _spawn_installer(bat, tmp)
         _set("installing", 100)
 
         # 5) 给前端留出展示时间后退出（批处理接管）

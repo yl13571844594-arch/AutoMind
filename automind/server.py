@@ -45,7 +45,20 @@ if STATIC_DIR.exists():
 
 # 商用安全：可选鉴权 + CORS 收紧（默认本地放开，配置后生效）
 _AUTH_TOKEN = os.environ.get("AUTOMIND_AUTH_TOKEN", "")
-_cors_origins = os.environ.get("AUTOMIND_CORS_ORIGINS", "*").split(",")
+
+# CORS（v1.4.5 收紧）—— 此前默认 `*` 且 allow_credentials=True。
+# 这个组合比看上去危险得多：Starlette 在 credentials 打开时**不会**回 `*`，
+# 而是把请求方的 Origin 原样回显。实测任意站点（如 https://evil.example.com）
+# 发来的请求都会拿到 `Access-Control-Allow-Origin: <该站点>` +
+# `Allow-Credentials: true` —— 即用户浏览的任何网页都能跨站调用本机 AutoMind
+# 并读取响应；本地默认又不开鉴权，等于把 /api/run 之类的接口交了出去。
+#
+# 现在的默认：只信任本机来源（同源页面本就不需要 CORS，这里放开主要是给
+# 本地开发的 vite dev server 用）。显式配置 AUTOMIND_CORS_ORIGINS 才放行其它来源；
+# 若其中含 `*`，则强制关闭 credentials（浏览器规范本就不允许两者并用）。
+_LOCAL_ORIGIN_RE = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+_cors_origins = [o.strip() for o in
+                 os.environ.get("AUTOMIND_CORS_ORIGINS", "").split(",") if o.strip()]
 
 # 安全深度加固（§14.11）— 均默认关闭，配置环境变量后生效，不改变既有行为
 #   AUTOMIND_RATE_LIMIT      : /api/run 每分钟每客户端允许次数（0=关闭）
@@ -70,13 +83,22 @@ def _maybe_redact(text: Any) -> Any:
     from automind.core.redact import redact_secrets
     return redact_secrets(text)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[o.strip() for o in _cors_origins] or ["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if "*" in _cors_origins:
+    # 用户明确要求通配：允许，但绝不与 credentials 并用
+    app.add_middleware(
+        CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+        allow_methods=["*"], allow_headers=["*"],
+    )
+elif _cors_origins:
+    app.add_middleware(
+        CORSMiddleware, allow_origins=_cors_origins, allow_credentials=True,
+        allow_methods=["*"], allow_headers=["*"],
+    )
+else:
+    app.add_middleware(
+        CORSMiddleware, allow_origin_regex=_LOCAL_ORIGIN_RE, allow_credentials=True,
+        allow_methods=["*"], allow_headers=["*"],
+    )
 
 
 def _auth_token() -> str:
@@ -966,26 +988,134 @@ def _list_drives() -> list[str]:
     return drives
 
 
-@app.get("/api/fs/list")
-async def api_fs_list(path: str = ""):
-    """浏览本地目录（仅返回子目录），用于项目目录选择器。"""
+_LOOPBACK = ("127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1")
+
+
+def _is_local_request(request) -> bool:
+    return ((request.client.host if request.client else "") or "") in _LOOPBACK
+
+
+def _fs_browse_denied(request) -> str | None:
+    """目录浏览的准入判断；返回拒绝原因，None 表示放行。
+
+    安全修复（v1.4.4）：此前任何人都能用绝对路径列举服务器上的任意目录。
+    本地单机使用时这不算问题（调用方本来就是这台机器的用户，权限一样大），
+    但一旦绑到 0.0.0.0 又没配 auth_token，局域网内任何人都能拿它枚举整个磁盘。
+    因此：**配了令牌 → 已鉴权，放行；没配令牌 → 只允许来自本机的请求。**
+    """
+    if _auth_token():
+        return None
+    if _is_local_request(request):
+        return None
+    return ("目录浏览仅限本机访问。若确需远程使用，请先配置 auth_token "
+            "（设置 → 安全）后携带令牌访问。")
+
+
+def _fs_roots() -> list[Path]:
+    """允许浏览的锚点根目录。
+
+    v1.4.5：此前只要通过了来源检查，就能用绝对路径漫游整块磁盘（`C:\\`、`/`
+    都能列）。目录选择器的真实用途只是"挑一个放项目的地方"，没必要给到全盘。
+    锚定到：用户主目录、当前项目根、已配置的工作区目录、以及显式配置的额外根
+    （AUTOMIND_FS_ROOTS，冒号/分号分隔）。路径必须落在某个锚点之内。
+    """
+    roots: list[Path] = []
+
+    def _add(p: Any) -> None:
+        try:
+            rp = Path(str(p)).expanduser().resolve()
+            if rp.is_dir() and rp not in roots:
+                roots.append(rp)
+        except Exception:
+            pass
+
+    _add(Path.home())
+    _add(Path.cwd())
     try:
-        base = Path(path).expanduser() if path else Path.cwd()
-        base = base.resolve()
+        agent = get_agent()
+        if agent:
+            _add(agent.config.project_root)
+    except Exception:
+        pass
+    try:
+        for w in (_read_config().get("workspaces") or {}).values():
+            _add(w.get("path") if isinstance(w, dict) else w)
+    except Exception:
+        pass
+    for extra in os.environ.get("AUTOMIND_FS_ROOTS", "").replace(";", os.pathsep).split(os.pathsep):
+        if extra.strip():
+            _add(extra.strip())
+    return roots
+
+
+def _fs_within_roots(target: Path, roots: list[Path]) -> bool:
+    """target 是否落在任一锚点之内（或本身就是锚点/锚点的父级）。
+
+    允许"锚点的父级"是为了让选择器能向上导航到锚点 —— 但向上只会看到
+    通往锚点的路径，列出的子目录仍会被逐一过滤，不会因此漫游到别处。
+    """
+    for r in roots:
+        if target == r or r in target.parents or target in r.parents:
+            return True
+    return False
+
+
+# 无论本地还是远程都不给列的系统目录 —— 目录选择器没有任何理由进这些地方，
+# 挡一道可以降低"浏览器被诱导发起本机请求"这类场景的信息泄露面。
+_FS_DENY_PARTS: tuple[str, ...] = (
+    "windows\\system32", "windows\\syswow64", "/etc", "/root", "/proc", "/sys",
+    "/var/lib", "\\appdata\\roaming\\microsoft\\crypto", "/.ssh", "\\.ssh",
+)
+
+
+def _fs_path_denied(p: Path) -> bool:
+    s = str(p).lower().replace("/", os.sep).replace("\\", os.sep)
+    return any(part.replace("/", os.sep).replace("\\", os.sep) in s
+               for part in _FS_DENY_PARTS)
+
+
+@app.get("/api/fs/list")
+async def api_fs_list(request: Request, path: str = ""):
+    """浏览本地目录（仅返回子目录），用于项目目录选择器。"""
+    denied = _fs_browse_denied(request)
+    if denied:
+        logger.warning("fs_list_denied", path=path,
+                       client=request.client.host if request.client else "?")
+        return JSONResponse({"error": denied}, status_code=403)
+    try:
+        roots = _fs_roots()
+        base = (Path(path).expanduser() if path else Path.home()).resolve()
+        if _fs_path_denied(base):
+            return JSONResponse({"error": "该目录不允许浏览"}, status_code=403)
+        # 根锚定：路径必须与某个锚点根相关联，不能拿绝对路径漫游全盘
+        if not _fs_within_roots(base, roots):
+            return JSONResponse(
+                {"error": "该目录不在允许浏览的范围内（仅限主目录、项目目录与已配置的工作区）",
+                 "roots": [str(r) for r in roots]}, status_code=403)
         if not base.is_dir():
             return JSONResponse({"error": f"非目录: {base}"}, status_code=400)
         dirs = []
         try:
             for e in sorted(base.iterdir(), key=lambda p: p.name.lower()):
-                if e.is_dir() and not e.name.startswith("."):
+                # 子项同样要过锚点与黑名单：向上导航到锚点父级时，
+                # 只应看到通往锚点的那条路，而不是该层的所有目录
+                if (e.is_dir() and not e.name.startswith(".")
+                        and not _fs_path_denied(e) and _fs_within_roots(e, roots)):
                     dirs.append(e.name)
         except PermissionError:
             pass
+        parent = str(base.parent) if base.parent != base else ""
+        # 已经在最外层锚点上时不再给 parent，避免界面诱导用户往上点却总是 403
+        if parent and not _fs_within_roots(Path(parent), roots):
+            parent = ""
         return {
             "path": str(base),
-            "parent": str(base.parent) if base.parent != base else "",
+            "parent": parent,
             "dirs": dirs,
-            "drives": _list_drives(),
+            "roots": [str(r) for r in roots],
+            # drives 仅在确实有锚点落在该盘符下时才给出
+            "drives": [d for d in _list_drives()
+                       if any(str(r).upper().startswith(d.upper()) for r in roots)],
         }
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -3038,7 +3168,19 @@ async def v1_chat_completions(data: dict):
 
 @app.get("/api/integrations/continue")
 async def api_integration_continue(request: Request):
-    """生成 Continue.dev（VS Code / JetBrains）即贴即用的接入配置。"""
+    """生成 Continue.dev（VS Code / JetBrains）即贴即用的接入配置。
+
+    这个端点会把**明文访问令牌**写进返回的 YAML 里（Continue.dev 需要它）。
+    因此按"泄密端点"对待（v1.4.5）：
+      · 未配置令牌时，只接受本机请求 —— 否则局域网内任何人都能拿它探明
+        服务地址、模型名与"当前未开启鉴权"这一事实；
+      · 响应标注 no-store，不进任何缓存/代理；
+      · 令牌只对本机或已鉴权的调用者给出。
+    """
+    if not _auth_token() and not _is_local_request(request):
+        return JSONResponse(
+            {"error": "该接口仅限本机访问；如需远程使用请先配置 auth_token。"},
+            status_code=403)
     base = str(request.base_url).rstrip("/")
     agent = get_agent()
     model = agent.config.llm.model if agent else "automind"
@@ -3053,8 +3195,10 @@ async def api_integration_continue(request: Request):
         f"{key_line}\n"
         "    roles:\n      - chat\n      - edit\n      - apply\n"
     )
-    return {"base_url": f"{base}/v1", "model": model,
-            "auth_required": bool(token), "yaml": yaml_cfg}
+    return JSONResponse(
+        {"base_url": f"{base}/v1", "model": model,
+         "auth_required": bool(token), "yaml": yaml_cfg},
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
 
 
 @app.get("/manual")
@@ -3125,6 +3269,42 @@ def _fallback_html() -> str:
 <p>启动: <code>python -m automind.server --port 8765</code></p></body></html>"""
 
 
+def _bootstrap_auth(host: str) -> str:
+    """按绑定地址决定鉴权策略；返回要展示给用户的提示行。
+
+    v1.4.5：此前 AUTOMIND_AUTH_TOKEN 默认空 = 完全不鉴权，而 --host 0.0.0.0
+    又是一句话的事 —— 一旦这么起，局域网内任何人都能直接驱动这台机器上的 Agent
+    （跑命令、读写文件）。默认值不该让"图省事"直接等于"裸奔"。
+
+    现在：
+      · 绑本机（默认）—— 不强制令牌，只提示一句，保持零摩擦；
+      · 绑非本机且未配令牌 —— **自动生成并持久化一个随机令牌**，醒目打印出来。
+        宁可让用户多复制一次令牌，也不要静默地把机器暴露出去。
+    """
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+    if _auth_token():
+        return "  🔐 鉴权: 已启用（请求需携带访问令牌）"
+    if loopback:
+        return "  🔓 鉴权: 未启用（仅监听本机，外部无法访问）"
+
+    import secrets
+    token = secrets.token_urlsafe(24)
+    global _AUTH_TOKEN
+    _AUTH_TOKEN = token
+    try:
+        cfg = _read_config()
+        cfg["auth_token"] = token
+        _write_config(cfg)
+        saved = "已保存到配置文件，下次启动继续有效"
+    except Exception as e:
+        saved = f"保存配置失败（{e}），本次运行有效"
+    return ("  ⚠️  检测到绑定了非本机地址且未设置访问令牌。\n"
+            "  为避免局域网内任何人都能直接操作这台机器，已自动生成访问令牌：\n"
+            f"\n      {token}\n\n"
+            f"  （{saved}；也可用 AUTOMIND_AUTH_TOKEN 环境变量自行指定）\n"
+            "  浏览器访问时在地址后加 ?token=<令牌>，API 调用用 Authorization: Bearer <令牌>")
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser(description="AutoMind Web Server")
@@ -3132,6 +3312,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
+    auth_note = _bootstrap_auth(args.host)
     print(f"""
 ╔══════════════════════════════════════════════════╗
 ║         AutoMind Web UI v{__version__:<24}║
@@ -3141,6 +3322,7 @@ def main():
 ║                                                  ║
 ║  按 Ctrl+C 停止服务器                             ║
 ╚══════════════════════════════════════════════════╝
+{auth_note}
 """)
     import uvicorn
     uvicorn.run("automind.server:app", host=args.host, port=args.port,

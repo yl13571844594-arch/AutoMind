@@ -650,6 +650,14 @@ class AutoMindAgent:
                           "reason": str(reason)[:300]})
 
     async def _on_approval_needed(self, goal: Any, action: Any) -> bool:
+        """请求人工批准；**任何异常一律按"拒绝"处理**。
+
+        安全修复（v1.4.4）：此前 `except Exception: return True` —— 回调一出错就
+        默认放行。而回调最常见的出错原因恰恰是前端断开（`ws.send_json` 抛异常），
+        于是"用户关掉页面"反而变成"后续所有敏感操作自动获批"，「询问」模式在
+        最需要它的时候等同于「全批准」。审批是安全控制，只能 fail-closed：
+        问不到人，就当作没批准。
+        """
         tool_name = getattr(action, "tool_name", "unknown")
         params = getattr(action, "parameters", {}) or {}
         # 优先走 Web 注入的审批回调
@@ -658,10 +666,19 @@ class AutoMindAgent:
                 return bool(await self.approval_callback(
                     tool_name, params, "sensitive",
                     f"步骤需要批准：{getattr(goal, 'description', '')}"))
-            except Exception:
-                return True
+            except Exception as e:
+                logger.warning("approval_callback_failed", tool=tool_name,
+                               error=str(e), decision="denied")
+                # 让用户在界面上看到"为什么这一步没做"，而不是默默跳过
+                await self._emit({
+                    "type": "approval_failed", "tool": tool_name,
+                    "reason": f"审批通道异常（{type(e).__name__}），按拒绝处理",
+                })
+                return False
+        # 没有回调：交给 human_loop（CLI 交互）；非交互环境下它会拒绝，
+        # 绝不会因为"没人可问"就自动放行。
         request = ApprovalRequest(
-            goal=goal, action=action, risk_level=tool_name,
+            goal=goal, action=action, risk_level="sensitive",
             reason="Manual approval required",
         )
         response = await self.human_loop.request_approval(request)

@@ -147,7 +147,9 @@ export default function Header() {
 
         {wsState === 'connected' && badge('● 已连接', 'ok')}
         {wsState === 'running' && badge('◉ 执行中', 'warn')}
-        {wsState === 'disconnected' && badge('○ 未连接', 'plain')}
+        {/* 断线要用醒目色（原来是灰 plain，和"正常"几乎没区别） */}
+        {wsState === 'reconnecting' && badge('⟳ 重连中', 'warn', '与服务器断开，正在自动重连')}
+        {wsState === 'disconnected' && badge('○ 未连接', 'err', '与服务器断开')}
         {modelBadge()}
         {badge('📁 ' + projectName, 'plain', '项目目录: ' + (status?.project || ''), () => openModal('general'))}
         {badge('🗂 ' + (wsActive || '默认'), 'plain', '工作区（独立目录 + 独立上下文）', () => openModal('workspaces'))}

@@ -52,8 +52,14 @@ export function connectWS() {
   try {
     ws = new WebSocket(`${proto}://${location.host}/ws`);
   } catch { scheduleReconnect(); return; }
-  ws.onopen = () => { retry = 0; useApp.setState({ wsState: 'connected' }); };
-  ws.onclose = () => { useApp.setState({ wsState: 'disconnected' }); scheduleReconnect(); };
+  ws.onopen = () => {
+    const wasDown = useApp.getState().wsAttempt > 0;
+    retry = 0;
+    useApp.setState({ wsState: 'connected', wsAttempt: 0, wsNextRetryAt: 0 });
+    // 断过再连上要说一声：用户刚才看到的是"正在重连"，得有个收尾
+    if (wasDown) message.success('已重新连接到服务器');
+  };
+  ws.onclose = () => { scheduleReconnect(); };
   ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
   ws.onmessage = (e) => { try { handle(JSON.parse(e.data)); } catch { /* ignore */ } };
 }
@@ -61,7 +67,35 @@ export function connectWS() {
 function scheduleReconnect() {
   if (timer) return;
   const base = Math.min(30000, 1000 * 2 ** retry++);
-  timer = setTimeout(() => { timer = null; connectWS(); }, base * (0.5 + Math.random() * 0.5));
+  const delay = base * (0.5 + Math.random() * 0.5);
+
+  // 任务跑到一半断线：后端把这次执行绑在这条 socket 上，事件再也送不回来了。
+  // 若不复位 running，输入框会一直是 disabled，用户既看不到结果也没法重发 ——
+  // 表现为"卡在执行中不动"。故落一张失败卡片（带重跑入口）并解锁界面。
+  if (app().running) {
+    const mode = taskMode();
+    removeTyping(mode);
+    finalizeStream(mode, null);
+    finalizeAll(mode);
+    appendFailure(mode, '中断', '与服务器的连接已断开，本次执行的结果无法送回。'
+      + '连接恢复后可用下方按钮重跑。');
+    setRunning(false);
+  }
+
+  // 把"第几次重连"和"下次何时重试"发布出去，界面据此显示倒计时
+  useApp.setState({
+    wsState: 'reconnecting', wsAttempt: retry, wsNextRetryAt: Date.now() + delay,
+  });
+  timer = setTimeout(() => { timer = null; connectWS(); }, delay);
+}
+
+/** 用户点「立即重连」——跳过剩余退避时间马上试一次。 */
+export function reconnectNow() {
+  if (timer) { clearTimeout(timer); timer = null; }
+  retry = 0;
+  try { ws?.close(); } catch { /* ignore */ }
+  useApp.setState({ wsNextRetryAt: Date.now() });
+  connectWS();
 }
 
 export function wsReady(): boolean { return !!ws && ws.readyState === WebSocket.OPEN; }
@@ -137,6 +171,21 @@ function startLoop(mode: Mode) {
   chat().append(mode, { kind: 'loop', id, iters: [], done: false, traces: [] });
 }
 
+const MA_ROLE_CN: Record<string, string> = {
+  planner: '规划', researcher: '研究', coder: '编程', writer: '写作', reviewer: '审阅',
+};
+
+/** 按 goal_id 从进行中的执行面板反查"这是第几步、步骤文案是什么"，供进度条显示。 */
+function planStepInfo(goalId: any): { idx: number; text: string } {
+  if (!live.exec) return { idx: 0, text: '' };
+  const item: any = chat().items(taskMode()).find((i) => i.id === live.exec);
+  const rows: PlanRow[] = item?.plan || [];
+  const at = rows.findIndex((r) => r.goalId && r.goalId === String(goalId || ''));
+  // 计划文案本身带了"1. "序号前缀，进度条另有"第 x / y 步"，去掉以免重复
+  return at < 0 ? { idx: 0, text: '' }
+    : { idx: at + 1, text: (rows[at].text || '').replace(/^\d+\.\s*/, '') };
+}
+
 function execTrace(mode: Mode, label: string, body: string, kind: string) {
   const t: TraceItem = { label, body, kind };
   if (live.loop) {
@@ -171,19 +220,26 @@ function appendResult(mode: Mode, data: any) {
   });
 }
 
-function offerResume(mode: Mode, why: string) {
+// 失败/中断一律落成一张带恢复入口的卡片（而不是一行红字 + 一个可能不出现的
+// 续跑气泡）。任务原文直接写进卡片，重启后依然能续跑。
+function appendFailure(mode: Mode, why: '出错' | '中断', error: string) {
   const last = chat().lastTask;
-  if (!last || !last.text) return;
-  if (app().view === 'chat' && app().mode === mode) {
-    chat().append(mode, { kind: 'resume', id: uid(), why });
-  } else {
-    message.info(`任务已${why}。回到${MODE_LABELS[mode]}模式可点「继续此任务」续跑`);
+  chat().append(mode, {
+    kind: 'error', id: uid(), why, error,
+    task: last?.text, taskMode: last?.mode ?? mode,
+    at: new Date().toLocaleTimeString(),
+  });
+  // 用户不在这个模式/视图时看不到卡片，补一句提示指路
+  if (!(app().view === 'chat' && app().mode === mode)) {
+    message.info(`${MODE_LABELS[mode]}任务已${why}。回到该模式可「继续此任务」或「重新执行」`);
   }
 }
 
 function setRunning(on: boolean) {
   app().setRunning(on);
-  if (!on) { chat().setTaskMode(null); chat().persist(); }
+  // 完成/失败/中断/断线都会走到这里，进度条统一在此收掉，
+  // 免得漏了某条终态路径，进度指示永远停在"第 3/7 步"不动。
+  if (!on) { chat().setTaskMode(null); chat().persist(); panel().clearProgress(); }
 }
 
 // ── 事件分发 ───────────────────────────────────────────
@@ -195,6 +251,11 @@ function handle(data: any) {
     case 'task_start':
       removeTyping(mode);
       chat().setTaskMode(mode);
+      panel().startProgress(
+        data.interaction === 'multi' ? '协同中'
+          : data.interaction === 'loop' ? '迭代中'
+            : data.interaction === 'chat' ? '正在回答' : '正在执行',
+        data.interaction === 'chat' ? '' : '准备中…');
       if (data.interaction === 'chat') startStream(mode);
       else if (data.interaction === 'multi') startMulti(mode);
       else if (data.interaction === 'loop') startLoop(mode);
@@ -207,8 +268,13 @@ function handle(data: any) {
         ...i,
         steps: (data.plan || []).map((s: any): MaStep => ({ role: s.role, subtask: s.subtask, state: 'pending' })),
       }));
+      panel().patchProgress({ total: (data.plan || []).length, label: '分工已确定' });
       break;
     case 'ma_step_start':
+      panel().patchProgress({
+        cur: (data.index ?? 0) + 1,
+        label: `${MA_ROLE_CN[data.role] || data.role || ''}：${data.subtask || ''}`.slice(0, 60),
+      });
       if (live.multi) chat().update(mode, live.multi, (i: any) => ({
         ...i, steps: i.steps.map((s: MaStep, k: number) => (k === data.index ? { ...s, state: 'run' } : s)),
       }));
@@ -222,6 +288,7 @@ function handle(data: any) {
       break;
 
     case 'loop_iter_start':
+      panel().patchProgress({ cur: data.iter || 0, total: data.max || 0, label: '本轮执行中…' });
       if (!live.loop) startLoop(mode);
       chat().update(mode, live.loop!, (i: any) => ({
         ...i, iters: [...i.iters, { iter: data.iter, max: data.max } as LoopIter],
@@ -267,19 +334,25 @@ function handle(data: any) {
         text: `${i + 1}. ${s.description}${s.tool ? ` [${s.tool}]` : ''}`,
         goalId: String(s.goal_id || ''), state: 'pending',
       }));
+      panel().patchProgress({ total: rows.length, label: '计划已生成' });
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({ ...i, plan: rows }));
       else if (live.loop) execTrace(mode, `📋 已生成计划（${rows.length} 步）`,
         rows.map((r) => `<div>${esc(r.text)}</div>`).join(''), 'plan');
       break;
     }
     // 按 goal_id 匹配（后端事件不含 index —— 早期按下标匹配导致进度从不更新）
-    case 'plan_step_start':
+    case 'plan_step_start': {
+      const st = planStepInfo(data.goal_id);
+      panel().patchProgress(st.idx > 0
+        ? { cur: st.idx, label: st.text }
+        : { label: '执行中…' });
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({
         ...i,
         plan: i.plan.map((r: PlanRow) => (r.goalId && r.goalId === String(data.goal_id || '')
           ? { ...r, state: 'run' } : r)),
       }));
       break;
+    }
     case 'plan_step_end':
       if (live.exec) chat().update(mode, live.exec, (i: any) => ({
         ...i,
@@ -291,9 +364,11 @@ function handle(data: any) {
       execTrace(mode, '↺ 回溯', esc(data.reason), 'warn');
       break;
     case 'step_thought':
+      panel().patchProgress({ label: '思考中…' });
       execTrace(mode, '🧠 思考' + (data.iter ? ` · 第${data.iter}轮` : ''), renderMarkdown(data.text || ''), 'think');
       break;
     case 'step_action': {
+      panel().patchProgress({ label: (data.tool ? `调用 ${data.tool}` : '执行动作') });
       const args = Object.keys(data.args || {}).length
         ? `<div class="trace-args">${esc(JSON.stringify(data.args))}</div>` : '';
       const out = data.output
@@ -335,8 +410,7 @@ function handle(data: any) {
       removeTyping(mode);
       finalizeStream(mode, null);
       finalizeAll(mode);
-      chat().append(mode, { kind: 'msg', id: uid(), role: 'agent', md: '❌ **错误**: ' + (data.error || '') });
-      offerResume(mode, '出错');
+      appendFailure(mode, '出错', String(data.error || '未知错误'));
       panel().bumpRefresh();
       setRunning(false);
       notifyDone('fail', mode, data);
@@ -346,8 +420,7 @@ function handle(data: any) {
       finalizeStream(mode, null);
       removeTyping(mode);
       finalizeAll(mode);
-      chat().append(mode, { kind: 'msg', id: uid(), role: 'agent', md: '⏹ 任务已中断' });
-      offerResume(mode, '中断');
+      appendFailure(mode, '中断', String(data.error || '任务被手动停止'));
       panel().bumpRefresh();
       setRunning(false);
       notifyDone('stop', mode, data);

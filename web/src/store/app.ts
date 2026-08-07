@@ -30,7 +30,11 @@ interface AppState {
   mode: Mode;
   view: View;
   running: boolean;
-  wsState: 'connected' | 'disconnected' | 'running';
+  // reconnecting：已断开且退避重连计时中。与 disconnected 分开，是为了让界面
+  // 能明确告诉用户"正在自动重连"，而不是丢下一个静悄悄的"未连接"让人以为坏了。
+  wsState: 'connected' | 'disconnected' | 'running' | 'reconnecting';
+  wsAttempt: number;      // 已重连次数（0 = 尚未重连过）
+  wsNextRetryAt: number;  // 下次重连的时间戳（ms），用于界面倒计时
   status: StatusInfo | null;
   theme: 'dark' | 'light';
   wsActive: string;       // 当前工作区名（'' = 默认）
@@ -62,6 +66,8 @@ export const useApp = create<AppState>((set, get) => ({
   view: 'chat',
   running: false,
   wsState: 'disconnected',
+  wsAttempt: 0,
+  wsNextRetryAt: 0,
   status: null,
   theme: savedTheme,
   wsActive: localStorage.getItem('automind_ws_active') || '',
@@ -80,9 +86,12 @@ export const useApp = create<AppState>((set, get) => ({
     apiPost('/config', { interaction: m }).catch(() => {});
   },
 
+  // 任务跑完回到 connected 时，不能把"已断开/重连中"覆盖成"已连接"——
+  // 那会在链路其实还断着的时候谎报连上了。
   setRunning: (on) => set((s) => ({
     running: on,
-    wsState: on ? 'running' : (s.wsState === 'disconnected' ? 'disconnected' : 'connected'),
+    wsState: on ? 'running'
+      : (s.wsState === 'disconnected' || s.wsState === 'reconnecting' ? s.wsState : 'connected'),
   })),
 
   loadStatus: async (forMode?: string) => {

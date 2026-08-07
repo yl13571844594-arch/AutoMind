@@ -1,6 +1,7 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { useEffect } from 'react';
+import ConnectionBanner from './components/ConnectionBanner';
 import Header from './components/Header';
 import ChatPanel from './components/chat/ChatPanel';
 import ApprovalModal from './components/modals/ApprovalModal';
@@ -154,6 +155,7 @@ export default function App() {
           <Sidebar />
           <div className="app-main">
             <Header />
+            <ConnectionBanner />
             <div className="app-body">
               {/* 黑屏闪烁的根因修复：此处原本是 `ViewComp ? <View/> : <ChatPanel/>`，
                   每次切视图都会把整个 ChatPanel 卸载再重建。会话一长，这次同步

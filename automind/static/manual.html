@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.4.0</title>
+<title>AutoMind 使用手册 — v1.4.5</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -116,6 +116,23 @@ pre .st{color:var(--green)}
 .kbd{font-family:var(--mono);font-size:.8em;background:var(--bg3);border:1px solid var(--border);
   border-bottom-width:2.5px;border-radius:7px;padding:2px 9px;color:var(--text)}
 
+/* ── 更新日志时间线 ── */
+.cl-item{position:relative;padding:0 0 4px 26px;margin:0 0 26px}
+.cl-item::before{content:'';position:absolute;left:5px;top:9px;width:9px;height:9px;
+  border-radius:50%;background:var(--grad);box-shadow:0 0 0 3px rgba(123,159,255,.14)}
+.cl-item::after{content:'';position:absolute;left:9px;top:22px;bottom:-26px;width:1px;
+  background:linear-gradient(180deg,var(--border),transparent)}
+.cl-item:last-child::after{display:none}
+.cl-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.cl-ver{font-weight:800;font-size:1.06em}
+.cl-date{color:var(--text3);font-size:.8em}
+.cl-badge{padding:1px 9px;border-radius:99px;font-size:.7em;font-weight:700;
+  background:rgba(60,230,138,.15);color:var(--green)}
+.cl-sum{color:var(--text2);font-size:.9em;margin:6px 0 8px}
+.cl-item ul{margin:6px 0 0;padding-left:20px}
+.cl-item li{color:var(--text2);font-size:.88em;margin:5px 0;line-height:1.7}
+.cl-item li b{color:var(--text)}
+
 /* ── 步骤条 ── */
 .steps{display:flex;gap:0;margin:26px 0;flex-wrap:wrap}
 .step{flex:1;min-width:190px;position:relative;padding:0 14px 0 0}
@@ -167,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.4.0</div>
+  <div class="ver">使用手册 · v1.4.5</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -195,6 +212,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <a class="sub" href="#storage">🗄 数据与存储</a>
   <a href="#faq">11 · 常见问题</a>
   <a href="#appendix">12 · 附录速查</a>
+  <a href="#changelog">13 · 更新日志</a>
 </nav>
 
 <main>
@@ -204,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.4.0</b></span>
+    <span class="chip">版本 <b>v1.4.5</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -903,7 +921,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.4.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.4.5</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1017,8 +1035,175 @@ automind --list-skills    automind --list-providers</code></pre>
   </table></div>
 </section>
 
+<section id="changelog">
+  <h2><span class="num">13</span>更新日志</h2>
+  <p class="lead">每次升级带来了什么，按版本倒序。完整记录见仓库 <code>CHANGELOG.md</code>。</p>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.5</span><span class="cl-date">2026-08-06</span>
+      <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">安全加固第二轮 — 承接 v1.4.4，建议一并升级</div>
+    <ul>
+      <li><b>✅ 「询问」模式的最后两个漏口</b>：上一版只补了一处，另外两条执行路径
+        （编程模式的 ReAct 循环、工作模式的计划执行）仍会在<b>没有审批通道</b>或
+        <b>审批出错</b>时直接放行 —— 需要你点「批准」的操作被悄悄执行了。现已全部改为
+        <b>问不到人就不做</b>，并在界面上说明原因。
+        <br><span style="color:#8a94ab">若你希望无人值守运行，请把审批模式设为「自动」或「全批准」——
+        这是明确的授权表达，而不是靠配置疏漏放权。</span></li>
+      <li><b>🌐 收紧跨站访问（重要）</b>：此前的配置会让<b>你浏览的任何网页</b>都能在后台
+        调用本机 AutoMind 并读取结果 —— 包括让它执行任务。而本地默认又不开鉴权。
+        现在默认只信任本机页面；需要其它来源请显式配置。</li>
+      <li><b>📁 目录浏览限定范围</b>：选择项目目录时不再能浏览整块磁盘，只限
+        <b>主目录、当前项目与已配置的工作区</b>。实测 <code>C:\</code> 下可见目录从 22 个收敛到 1 个。</li>
+      <li><b>🔑 开放到局域网时自动开启鉴权</b>：以 <code>--host 0.0.0.0</code> 启动而又没设访问令牌时，
+        系统会<b>自动生成一个随机令牌</b>并在启动信息里醒目打印（同时保存下来）。
+        只在本机使用则完全不受影响，无需任何额外操作。</li>
+      <li><b>🔒 IDE 接入配置接口</b>：该接口会返回<b>明文访问令牌</b>，现在未设令牌时只允许
+        本机读取，并禁止被缓存。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.4</span><span class="cl-date">2026-08-06</span>
+    </div>
+    <div class="cl-sum">安全加固专版 — 强烈建议升级</div>
+    <ul>
+      <li><b>🔒 代码沙箱重写（最高危）</b>：此前 Agent 执行的「Python 代码」<b>能跑出沙箱</b>，
+        读写你机器上的任意文件、甚至执行任意系统命令。已重写为<b>三层防御</b>：
+        执行前静态检查、受限运行环境、并放到<b>独立子进程</b>里跑。
+        另外修复了「超时不生效」——死循环代码此前会把程序卡住无法恢复，现在会被真正终止。
+        <br><span style="color:#8a94ab">说明：沙箱防的是"AI 写出的代码越权"，不等于可以放心执行来路不明的代码；
+        确有此需要请在容器/虚拟机中部署。</span></li>
+      <li><b>💉 修复测试技能的命令注入</b>：运行测试时的文件匹配参数由 AI 填写，
+        此前会被当成系统命令的一部分执行，构造特殊内容可执行任意命令。现在改为
+        <b>参数化调用</b>（不经过命令行解释器）并做严格字符校验。</li>
+      <li><b>✅ 修复「询问」模式可能被静默跳过</b>：审批通道出错时（最常见的是<b>你关掉了页面</b>），
+        系统此前会<b>默认放行</b>，等于「询问」模式悄悄变成了「全批准」。现在一律按
+        <b>拒绝</b>处理，并在界面上说明原因。命令行审批里「直接回车」也不再等于同意。</li>
+      <li><b>📁 收紧目录浏览接口</b>：此前任何人都能通过接口列举本机任意目录。
+        若你把服务开放到局域网又没设访问令牌，等于把磁盘目录结构公开了。现在
+        <b>未设令牌时只允许本机访问</b>，并禁止浏览系统敏感目录。本机选择项目目录不受影响。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.3</span><span class="cl-date">2026-08-05</span>
+    </div>
+    <div class="cl-sum">修复输入框被挤出界面 · 任务历史可搜索 · 执行进度看得见</div>
+    <ul>
+      <li><b>🩹 修复长会话把输入框挤出界面</b>：消息一多，对话面板会被内容撑破容器，
+        消息区不再滚动、输入框被顶到视口之外彻底看不见。实测 80 条消息时面板高度
+        被撑到 <b>11821 像素</b>（可用高度仅 648）。已修复：同样 80 条消息下消息区
+        正常滚动、输入框稳定停在底部。</li>
+      <li><b>🔍 任务历史可搜索、可翻页</b>：新增<b>关键词搜索</b>（任务内容与产出一起匹配，
+        命中处高亮）、<b>模式筛选</b>与<b>成功/未完成筛选</b>；列表改为<b>分页</b>（每页 20 条），
+        不再一次性把全部记录铺出来。另外，此前界面只能看到最近 <b>50</b> 条，而系统实际
+        保留 <b>200</b> 条 —— 剩下的记录够不着，现在都能搜到了。</li>
+      <li><b>⏱ 执行进度看得见</b>：输入框上方新增一条轻量进度指示 ——
+        <b>当前阶段 · 第 X / N 步 · 正在做什么 · 已耗时</b>，右侧「查看详情」可直接跳到
+        观测中心看完整执行过程。解决"长任务跑着跑着，界面看起来像卡住了"。
+        对话与编程模式没有预先生成的计划，此时<b>不显示编造的百分比</b>，
+        改用流动条表示"正在进行、总量未知"。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.2</span><span class="cl-date">2026-08-05</span>
+    </div>
+    <div class="cl-sum">消息可编辑/删除 · 断线可视化 · 恢复语义纠正 · 界面精修</div>
+    <ul>
+      <li><b>✎ 消息编辑与删除</b>：把鼠标移到任意气泡上，右上角会浮出操作条 ——
+        <b>复制 / 编辑 / 删除</b>。此前发错问题只能"复制原文 → 手动改 → 重发"。
+        编辑用内联输入框（<span class="kbd">Enter</span> 发送、
+        <span class="kbd">Esc</span> 取消），重发时会自动移除该条及其之后的消息，
+        因为问题都改了、基于旧问题的回答留着只会让上下文自相矛盾。删除有二次确认，
+        且只影响本地会话记录，<b>不会回滚已产生的文件改动</b>。</li>
+      <li><b>🔌 断线时看得见"正在重连"</b>：新增顶部横幅，显示<b>重连倒计时</b>与已尝试
+        次数，并可点「立即重连」跳过等待；顶栏状态徽标区分「⟳ 重连中」与「○ 未连接」；
+        重连成功会给出提示。此前断线只有一个不起眼的灰色「未连接」，
+        用户常常是发消息没反应才发现。</li>
+      <li><b>⚠ 任务执行中断线不再卡死</b>：连接一断，本次执行的结果就送不回来了，
+        而界面此前会一直停在"执行中"、输入框永久禁用。现在会落一张失败卡片
+        （带重跑入口）并解锁界面。</li>
+      <li><b>🩹 「继续此任务」改名，避免误导</b>：经核对，本软件<b>没有真正的断点续传</b>——
+        检查点只在任务成功结束后才写，任务失败时并不会留下检查点。所以按钮改为
+        <b>「▶ 检查现状后接着做」</b>（重发任务并要求模型先核对已完成的部分）与
+        <b>「↻ 从头重跑」</b>，并注明：两者都会重新执行一次任务，已写出的文件不会被回滚。</li>
+      <li><b>🔢 修复升级日志里的退出码记错</b>：可见模式重试安装成功时，安装日志却仍记录
+        为失败码，排查升级问题时会被带偏。现已修正。</li>
+      <li><b>🎨 界面精修</b>：气泡改用双层阴影、悬停轻微抬起，头像加内描边，滚动条静止时
+        隐入，输入区聚焦时整条底栏提亮，数字统一等宽字形；并补上全局键盘焦点环，
+        纯键盘操作时能看清焦点位置。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.1</span><span class="cl-date">2026-08-05</span>
+    </div>
+    <div class="cl-sum">修复"点升级后应用消失" · 输入框草稿保护 · 任务失败可一键恢复</div>
+    <ul>
+      <li><b>🛠 修复升级后应用不再启动</b>：桌面版是无控制台的 GUI 进程，升级脚本又以
+        分离方式启动，此前没有显式指定标准输入输出句柄 —— 脚本里的重定向和管道
+        全部失效，批处理在装之前就退出了，于是"应用退出、再也没回来"。现已修复，
+        并给脚本加了三重兜底：静默安装失败自动改用可见模式重试（装在
+        <code>Program Files</code> 需要 UAC 提权）、安装前清理残留实例、
+        <b>无论成败最后都把应用拉起来</b>。安装日志与执行轨迹留在临时目录便于追查。</li>
+      <li><b>✍ 输入框草稿自动保存</b>：打到一半切模式、切视图、关窗口，内容不再丢失，
+        重新打开自动回填（按会话与工作区隔离）。语音听写与模板填入的内容一并保护。</li>
+      <li><b>🎯 打开即聚焦</b>：进入对话区、切换模式、任务跑完后自动把光标交还输入框，
+        省掉"先点一下输入框"这步；有弹窗时不抢焦点。</li>
+      <li><b>⧉ 自己发的提问也能复制</b>：此前复制按钮只挂在 AI 回复上。同时改为复制
+        <b>Markdown 原文</b>（旧实现取气泡可见文本，会把复制按钮自己的图标一起带走），
+        并在非 HTTPS 环境下自动回退，局域网访问时复制不再失灵。</li>
+      <li><b>🚑 任务失败有了恢复入口</b>：失败/中断从"一行红字"改为一张卡片 ——
+        可展开完整报错、<b>▶ 继续此任务</b>（从中断处续跑，不重做已完成部分）、
+        <b>↻ 重新执行</b>、<b>⧉ 复制错误</b>，并针对 Key 失效、限流、超时、网络不通、
+        上下文超长等常见原因给出下一步建议。任务原文随卡片一起留存，
+        <b>重启应用后依然能续跑</b>。</li>
+      <li><b>📖 手册新增本章</b>：更新日志现可在手册内直接查阅。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head"><span class="cl-ver">v1.4.0</span><span class="cl-date">2026-07-30</span></div>
+    <div class="cl-sum">四项体验增强：字号调节 · 无闪烁切换 · 完整快捷键系统 · 任务完成通知</div>
+    <ul>
+      <li><b>🔤 字号调节</b>：85%~130% 无级调节，<span class="kbd">Ctrl</span> +
+        <span class="kbd">=</span> / <span class="kbd">-</span> / <span class="kbd">0</span>
+        可直接调，"标准"档与升级前像素级一致。</li>
+      <li><b>✨ 消除切换时的黑屏闪烁</b>：对话面板改为常驻挂载、只切显示，DOM 不再重建，
+        顺带修复切回对话时滚动位置丢失；新增「减少动效」开关。</li>
+      <li><b>⌨ 完整快捷键系统</b>：新增 19 项全局快捷键，按 <span class="kbd">?</span> 查看；
+        帮助弹窗内容由注册表直接生成，与实际生效的按键同源。</li>
+      <li><b>🔔 任务完成桌面通知</b>：仅在窗口不可见时提醒，点通知跳回应用，
+        完成/失败/中断三种终态都会通知。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head"><span class="cl-ver">v1.3.2</span><span class="cl-date">2026-07-29</span></div>
+    <div class="cl-sum">三平台安装包 · 兼容版界面补齐升级提示</div>
+    <ul>
+      <li>首个三平台同时发布的版本：Windows（代码签名）/ macOS（通用二进制 DMG）/ Linux。</li>
+      <li>修复 PyPI 元数据死链与许可字段。</li>
+      <li>兼容版界面补齐升级提示与检查更新入口。</li>
+    </ul>
+  </div>
+
+  <div class="note" style="margin-top:26px">
+    💡 应用内点击左下角 <b>「⚙ 设置 → 检查更新」</b> 可查看是否有新版本并一键升级；
+    升级过程中应用会短暂退出，安装完成后<b>自动重新启动</b>。
+  </div>
+</section>
+
 <footer>
-  AutoMind 使用手册 · 与软件 v1.4.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.4.5 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

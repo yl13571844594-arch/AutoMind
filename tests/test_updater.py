@@ -132,3 +132,84 @@ class TestServerRoutes:
         paths = {getattr(r, "path", "") for r in server.app.routes}
         assert {"/api/update/check", "/api/update/apply",
                 "/api/update/state"} <= paths
+
+
+class TestInstallScript:
+    """升级批处理的回归护栏 —— 这些点错一个，用户就会"点了升级应用再没回来"。"""
+
+    def _script(self, tmp_path):
+        from pathlib import Path
+        bat = updater._install_script(
+            tmp_path, Path(r"C:\tmp\AutoMind-Setup-9.9.9.exe"),
+            r"C:\Program Files\AutoMind\AutoMind.exe", "4242")
+        return bat, bat.read_bytes()
+
+    def test_no_stray_carriage_returns(self, tmp_path):
+        """必须是干净的 CRLF：write_text 的换行转换会写成 \r\r\n。"""
+        _, raw = self._script(tmp_path)
+        assert b"\r\r\n" not in raw
+        assert raw.count(b"\r\n") == raw.count(b"\n")
+
+    def test_always_relaunches_the_app(self, tmp_path):
+        """无论安装成没成，最后都要把应用拉起来 —— 这是"不让用户没得用"的底线。"""
+        _, raw = self._script(tmp_path)
+        text = raw.decode(errors="replace")
+        start = text.index("start ")
+        # 拉起应用必须在安装命令之后，且不能被包在任何条件分支里（除了 exist 判断）
+        assert start > text.index("/VERYSILENT")
+        assert "if exist" in text[text.rindex("\n", 0, start):start]
+
+    def test_silent_failure_retries_visibly(self, tmp_path):
+        """装在 Program Files 需要 UAC，/VERYSILENT 下提权界面出不来必然失败。"""
+        _, raw = self._script(tmp_path)
+        text = raw.decode(errors="replace")
+        assert "/VERYSILENT" in text and "/SILENT " in text.replace("/VERYSILENT", "")
+
+    def test_wait_loop_is_bounded_and_console_free(self, tmp_path):
+        """等待要有上限；且不能用 timeout（无控制台时它每次都报错、空转烧 CPU）。"""
+        _, raw = self._script(tmp_path)
+        text = raw.decode(errors="replace")
+        assert "GEQ" in text                      # 有次数上限
+        assert "ping " in text                    # 用 ping 延时
+        assert "timeout /t" not in text
+
+    def test_retry_exit_code_captured_outside_block(self, tmp_path):
+        """`(...)` 块整体解析，块内的 %ERRORLEVEL% 展开的是"重试之前"的旧值。
+
+        实测：静默失败 rc=5、可见重试成功 rc=0 时，块内写法记成 5（装成了却
+        报失败），块外 RC2 回写才记成 0。
+        """
+        _, raw = self._script(tmp_path)
+        text = raw.decode(errors="replace")
+        retry = text.index("/SILENT ") if "/SILENT " in text else text.index(".retry")
+        close = text.index(")", retry)          # 重试所在块的右括号
+        # 块内不许再出现 set RC=%ERRORLEVEL%（那是失效写法）
+        assert "set RC=%ERRORLEVEL%" not in text[retry:close]
+        # 块外必须先取 RC2 再有条件回写
+        assert "set RC2=%ERRORLEVEL%" in text[close:]
+        assert "if not %RC%==0 set RC=%RC2%" in text[close:]
+
+    def test_exit_code_is_recorded_with_space(self, tmp_path):
+        """`echo x=%RC%>>f` 里紧挨 > 的数字会被 cmd 当成文件句柄号，必须留空格。"""
+        _, raw = self._script(tmp_path)
+        assert "exit_code=%RC% >>" in raw.decode(errors="replace")
+
+    def test_spawn_passes_std_handles(self, tmp_path, monkeypatch):
+        """真凶回归护栏：分离启动时不显式给标准流，cmd 会因无效句柄立刻夭折。"""
+        import subprocess as sp
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            seen["cmd"] = cmd
+            return object()
+
+        monkeypatch.setattr(sp, "Popen", fake_popen)
+        updater._spawn_installer(tmp_path / "apply_update.bat", tmp_path)
+
+        assert seen["stdin"] == sp.DEVNULL
+        # stdout/stderr 必须是真实文件对象（有 fileno），不能是 None
+        assert seen["stdout"] is not None and seen["stderr"] is not None
+        assert hasattr(seen["stdout"], "fileno")
+        # 且确实是分离启动（否则父进程一退，子进程会被一起带走）
+        assert seen["creationflags"] & sp.DETACHED_PROCESS

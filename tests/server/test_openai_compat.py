@@ -37,7 +37,10 @@ def client(monkeypatch):
     from automind import server
     # 防御性清零（既有约定）：避免前序测试文件的令牌赋值泄漏进来
     monkeypatch.setattr(server, "_AUTH_TOKEN", "")
-    return TestClient(server.app)
+    # 显式用回环地址作为来源：TestClient 默认的 client.host 是 "testclient"，
+    # 而 v1.4.5 起 /api/integrations/continue 这类"会吐出明文令牌"的端点
+    # 在未配置令牌时只接受本机请求。用真实的 127.0.0.1 才反映真实调用场景。
+    return TestClient(server.app, client=("127.0.0.1", 50000))
 
 
 @pytest.fixture()
@@ -128,3 +131,18 @@ class TestContinueConfig:
         assert body["base_url"].endswith("/v1")
         assert "provider: openai" in body["yaml"]
         assert "apiBase:" in body["yaml"] and "fake-model" in body["yaml"]
+
+
+class TestContinueConfigBoundary:
+    """该端点会返回明文访问令牌，按"泄密端点"对待（v1.4.5）。"""
+
+    def test_remote_without_token_denied(self, monkeypatch, stub_agent):
+        from automind import server
+        monkeypatch.setattr(server, "_AUTH_TOKEN", "")
+        c = TestClient(server.app, client=("192.168.1.50", 50000))
+        assert c.get("/api/integrations/continue").status_code == 403
+
+    def test_response_is_not_cacheable(self, client, stub_agent):
+        r = client.get("/api/integrations/continue")
+        assert r.status_code == 200
+        assert "no-store" in r.headers.get("cache-control", "")

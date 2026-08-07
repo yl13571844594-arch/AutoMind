@@ -1,6 +1,7 @@
 // 各类消息气泡：普通消息 / 流式 / 打字 / 执行过程 / 协同 / 循环 / 续跑按钮 / 欢迎页。
 import { App } from 'antd';
-import { memo } from 'react';
+import { memo, useState } from 'react';
+import { copyText } from '../../lib/clipboard';
 import { isSafeUrl, renderMarkdown } from '../../lib/markdown';
 import { MODE_LABELS, useApp } from '../../store/app';
 import type { ChatItem, LoopIter, MaStep, PlanRow, TraceItem } from '../../store/chat';
@@ -11,20 +12,31 @@ function Avatar({ role, icon }: { role: 'user' | 'agent'; icon?: string }) {
   return <div className="avatar">{icon || (role === 'user' ? '我' : 'AM')}</div>;
 }
 
-export const MsgBubble = memo(function MsgBubble({ item }: { item: Extract<ChatItem, { kind: 'msg' }> }) {
-  const { message } = App.useApp();
-  const copy = (e: React.MouseEvent<HTMLDivElement>) => {
+export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
+  item: Extract<ChatItem, { kind: 'msg' }>;
+  onDelete?: (id: string) => void;
+  onResend?: (id: string, text: string) => void;
+}) {
+  const { message, modal } = App.useApp();
+  const [editing, setEditing] = useState(false);
+  const [text, setText] = useState(item.md);
+  const copy = async (e: React.MouseEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     const codeBtn = target.closest('.copy-code');
     if (codeBtn) {
       const pre = codeBtn.closest('.code-block')?.querySelector('pre');
-      if (pre) navigator.clipboard?.writeText(pre.textContent || '').then(() => message.success('已复制代码'));
+      if (pre) {
+        const ok = await copyText(pre.textContent || '');
+        ok ? message.success('已复制代码') : message.error('复制失败');
+      }
       return;
     }
     const msgBtn = target.closest('.copy-msg');
     if (msgBtn) {
-      const bubble = msgBtn.closest('.bubble');
-      if (bubble) navigator.clipboard?.writeText((bubble as HTMLElement).innerText).then(() => message.success('已复制'));
+      // 复制 Markdown 原文而不是气泡的 innerText：后者会把复制按钮自己的
+      // "⧉" 字形一并带上，也会丢掉代码块的原始格式。
+      const ok = await copyText(item.md);
+      ok ? message.success('已复制') : message.error('复制失败');
       return;
     }
     const hb = target.closest('.hb-preview') as HTMLElement | null;
@@ -35,18 +47,68 @@ export const MsgBubble = memo(function MsgBubble({ item }: { item: Extract<ChatI
       } catch { /* ignore */ }
     }
   };
+  const del = () => modal.confirm({
+    title: '删除这条消息？',
+    content: '仅从本地会话记录中移除，不影响已产生的文件改动。',
+    okText: '删除', okButtonProps: { danger: true }, cancelText: '取消',
+    onOk: () => onDelete?.(item.id),
+  });
+
+  const submitEdit = () => {
+    const t = text.trim();
+    if (!t) { message.error('内容不能为空'); return; }
+    setEditing(false);
+    onResend?.(item.id, t);
+  };
+
   return (
     <div className={`msg ${item.role === 'user' ? 'user' : 'agent'}`}>
       <Avatar role={item.role} />
-      <div className="col">
+      {/* 编辑态放宽气泡宽度：默认 82% 的气泡装不下输入框+两个按钮，会挤到换行 */}
+      <div className={`col${editing ? ' editing' : ''}`}>
         <div className="bubble" onClick={copy}>
-          {item.role === 'agent' && <button className="copy-msg" title="复制此条">⧉</button>}
+          {/* 悬停浮出的操作条。自己发出去的提问同样要能复制/编辑/删除 ——
+              早期只给 agent 消息挂了复制按钮，发错问题只能靠"复制+重发"。 */}
+          {!editing && (
+            <div className="msg-acts">
+              <button className="copy-msg" title="复制此条">⧉</button>
+              {item.role === 'user' && onResend && (
+                <button
+                  className="msg-act"
+                  title="编辑并重新发送（会移除这条之后的消息）"
+                  onClick={() => { setText(item.md); setEditing(true); }}
+                >✎</button>
+              )}
+              {onDelete && <button className="msg-act danger" title="删除此条" onClick={del}>🗑</button>}
+            </div>
+          )}
           {item.images && item.images.length > 0 && (
             <div className="mm-thumbs">
               {item.images.filter(isSafeUrl).map((u, i) => <img key={i} src={u} alt="img" />)}
             </div>
           )}
-          <span dangerouslySetInnerHTML={{ __html: renderMarkdown(item.md) }} />
+          {editing ? (
+            <div className="msg-edit">
+              <textarea
+                value={text}
+                autoFocus
+                rows={Math.min(10, text.split('\n').length + 1)}
+                onChange={(e) => setText(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitEdit(); }
+                  if (e.key === 'Escape') setEditing(false);
+                }}
+              />
+              <div className="msg-edit-acts">
+                <span className="hint-text">Enter 发送 · Esc 取消</span>
+                <span style={{ flex: 1 }} />
+                <button className="err-btn" onClick={() => setEditing(false)}>取消</button>
+                <button className="err-btn primary" onClick={submitEdit}>重新发送</button>
+              </div>
+            </div>
+          ) : (
+            <span dangerouslySetInnerHTML={{ __html: renderMarkdown(item.md) }} />
+          )}
         </div>
         <div className="time">{item.meta || ''}</div>
       </div>
@@ -190,10 +252,97 @@ export function ResumeBubble({ item, onResume }: {
       <Avatar role="agent" />
       <div className="col">
         <div className="bubble">
-          <button className="hb-preview" onClick={onResume}>▶ 继续此任务</button>
+          <button className="hb-preview" onClick={onResume}>▶ 检查现状后接着做</button>
           <span className="hint-text" style={{ marginLeft: 8 }}>
-            从{item.why}处继续，不重做已完成的部分（已产出的文件仍保留）
+            重发该任务并要求先查看当前进度、尽量跳过已完成的部分（已产出的文件保留）
           </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// 常见失败给一句"该怎么办"，而不是把原始报错甩给用户就完事
+function diagnose(err: string): string | null {
+  const e = err.toLowerCase();
+  if (/api[_ ]?key|unauthorized|401|invalid.*key/.test(e))
+    return '多半是 API Key 未配置或已失效 —— 打开「⚙ 设置 → 🔑 API Keys」检查。';
+  if (/quota|insufficient|余额|欠费|429|rate.?limit/.test(e))
+    return '模型侧限流或额度不足 —— 稍等片刻再重试，或在设置里换一个模型。';
+  if (/timeout|timed out|超时/.test(e))
+    return '请求超时 —— 网络或模型侧较慢，可直接重试；长任务建议拆小。';
+  if (/connect|network|dns|ssl|proxy|econn/.test(e))
+    return '网络连不通 —— 检查代理/中转地址是否可达，再重试。';
+  if (/context length|maximum context|too many tokens/.test(e))
+    return '上下文超长 —— 新开会话或精简输入后重试。';
+  return null;
+}
+
+export function ErrorBubble({ item, onResume, onRetry }: {
+  item: Extract<ChatItem, { kind: 'error' }>;
+  onResume: (item: Extract<ChatItem, { kind: 'error' }>) => void;
+  onRetry: (item: Extract<ChatItem, { kind: 'error' }>) => void;
+}) {
+  const { message } = App.useApp();
+  const [open, setOpen] = useState(false);
+  const hint = diagnose(item.error || '');
+  const long = (item.error || '').length > 160;
+  const shown = long && !open ? item.error.slice(0, 160) + ' …' : item.error;
+
+  return (
+    <div className="msg agent">
+      <div className="avatar err">!</div>
+      <div className="col" style={{ maxWidth: '92%' }}>
+        <div className="bubble err-card">
+          <div className="err-head">
+            {item.why === '中断' ? '⏹ 任务已中断' : '❌ 任务失败'}
+            {item.at && <span className="err-at">{item.at}</span>}
+          </div>
+          {item.error && <div className="err-body">{shown}</div>}
+          {long && (
+            <button className="err-more" onClick={() => setOpen(!open)}>
+              {open ? '收起' : '展开完整报错'}
+            </button>
+          )}
+          {hint && <div className="err-hint">💡 {hint}</div>}
+          <div className="err-actions">
+            {item.task && (
+              <>
+                {/* 措辞刻意不写"从断点继续"：后端并没有把执行进度传回来，这里能做的
+                    只是重发原任务、并额外要求模型先查看现状。说成"断点续传"会让用户
+                    以为已完成的步骤一定不会重做 —— 那是做不到的承诺。 */}
+                <button
+                  className="err-btn primary"
+                  title="重发原任务，并要求先检查当前进度、尽量跳过已完成的部分。这是给模型的附加提示，不是断点续传。"
+                  onClick={() => onResume(item)}
+                >▶ 检查现状后接着做</button>
+                <button
+                  className="err-btn"
+                  title="原样重发这条任务，不附加任何提示（从头开始）"
+                  onClick={() => onRetry(item)}
+                >↻ 从头重跑</button>
+              </>
+            )}
+            <button
+              className="err-btn"
+              onClick={async () => {
+                const ok = await copyText(
+                  `【${item.why}】${item.at || ''}\n${item.error}` +
+                  (item.task ? `\n\n原任务：\n${item.task}` : ''));
+                ok ? message.success('已复制错误详情') : message.error('复制失败');
+              }}
+            >⧉ 复制错误</button>
+          </div>
+          {item.task && (
+            <>
+              <div className="err-task" title={item.task}>
+                原任务：{item.task.length > 90 ? item.task.slice(0, 90) + '…' : item.task}
+              </div>
+              <div className="err-fineprint">
+                两者都会重新执行一次任务；已写出的文件不会被回滚。
+              </div>
+            </>
+          )}
         </div>
       </div>
     </div>

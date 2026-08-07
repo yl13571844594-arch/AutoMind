@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -137,12 +138,21 @@ class HumanInTheLoop:
             print(f"  Preview:\n{request.preview}")
         print("=" * 60)
 
+        # 非交互环境（服务端 / 桌面 GUI / CI）根本没有人在终端前面。
+        # 此时不能去 input()，更不能"没人回答就放行"——直接拒绝并说明原因。
+        if not (sys.stdin and sys.stdin.isatty()):
+            return ApprovalResponse(
+                action=ApprovalAction.DENY,
+                comment="无交互终端，无法获得人工批准（按拒绝处理）")
+
         try:
             choice = input("[A]pprove / [D]eny / [S]kip / [Q]uit: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
+        except (EOFError, KeyboardInterrupt, OSError):
             return ApprovalResponse(action=ApprovalAction.DENY, comment="User interrupted")
 
-        if choice in ("a", "approve", ""):
+        # 直接回车**不再等于批准**：安全提示的默认值只能是"不批准"，
+        # 否则一路回车就把所有敏感操作放行了。
+        if choice in ("a", "approve"):
             return ApprovalResponse(action=ApprovalAction.APPROVE)
         elif choice in ("d", "deny"):
             return ApprovalResponse(action=ApprovalAction.DENY)

@@ -32,15 +32,17 @@ class TestPythonSandbox:
 
     @pytest.mark.asyncio
     async def test_dangerous_import_blocked(self):
+        # 断言"被拦住"本身，不绑定具体文案：v1.4.4 起拒绝原因改为中文，
+        # 且在静态校验阶段就返回，不再等到运行时抛 ImportError
         r = await PythonSandboxTool().execute(code="import os\nprint(os.getcwd())")
         assert not r.success
-        assert "not allowed" in (r.error or "")
+        assert "禁止" in (r.error or "") and "os" in (r.error or "")
 
     @pytest.mark.asyncio
     async def test_dunder_import_blocked(self):
         r = await PythonSandboxTool().execute(code="__import__('subprocess')")
         assert not r.success
-        assert "not allowed" in (r.error or "")
+        assert "禁止" in (r.error or "")
 
 
 class TestRootGuard:

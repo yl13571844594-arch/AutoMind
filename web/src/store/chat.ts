@@ -20,7 +20,14 @@ export type ChatItem =
   | { kind: 'exec'; id: string; traces: TraceItem[]; plan: PlanRow[]; done: boolean }
   | { kind: 'multi'; id: string; steps: MaStep[]; done: boolean }
   | { kind: 'loop'; id: string; iters: LoopIter[]; stopReason?: string; done: boolean; traces: TraceItem[] }
-  | { kind: 'resume'; id: string; why: string };
+  | { kind: 'resume'; id: string; why: string }
+  // 任务失败/中断。**自带任务快照**（task/taskMode）而不是只指向易失的 lastTask：
+  // 这样重启应用后历史里的失败卡片仍然能续跑，不会变成一个点了报
+  // "没有可继续的任务"的死按钮。
+  | {
+      kind: 'error'; id: string; why: '出错' | '中断'; error: string;
+      task?: string; taskMode?: Mode; at?: string;
+    };
 
 let seq = 0;
 export const uid = () => 'i' + (++seq) + '_' + Date.now().toString(36);
@@ -40,6 +47,27 @@ function loadPersisted(): Partial<Record<Mode, ChatItem[]>> {
   } catch { return {}; }
 }
 
+// 草稿与"上次任务"另存一个键：它们体积很小，不该参与消息列表那套按体积截断的
+// 逻辑（否则消息一多就会把它们一起丢掉）。
+function sideKey(): string {
+  return storageKey() + '_side';
+}
+
+interface SideState {
+  draft: string;
+  lastTask: { text: string; mode: Mode } | null;
+}
+
+function loadSide(): SideState {
+  try {
+    const raw = JSON.parse(localStorage.getItem(sideKey()) || '{}') || {};
+    return {
+      draft: typeof raw.draft === 'string' ? raw.draft : '',
+      lastTask: raw.lastTask && typeof raw.lastTask.text === 'string' ? raw.lastTask : null,
+    };
+  } catch { return { draft: '', lastTask: null }; }
+}
+
 function persistable(items: ChatItem[]): ChatItem[] {
   // 剥离进行中的流式/打字中间态；执行面板保留（已定格内容可回看）
   return items.filter((i) => i.kind !== 'stream' && i.kind !== 'typing');
@@ -56,6 +84,7 @@ interface ChatState {
   append: (mode: Mode, item: ChatItem) => void;
   update: (mode: Mode, id: string, patch: (item: ChatItem) => ChatItem) => void;
   remove: (mode: Mode, id: string) => void;
+  truncateFrom: (mode: Mode, id: string) => void;
   removeKind: (mode: Mode, kinds: string[]) => void;
   clearMode: (mode: Mode) => void;
   setMessages: (mode: Mode, items: ChatItem[]) => void;
@@ -65,14 +94,17 @@ interface ChatState {
   setPendingImages: (imgs: string[]) => void;
   setInputDraft: (s: string) => void;
   persist: () => void;
+  persistSide: () => void;
 }
+
+const SIDE0 = loadSide();
 
 export const useChat = create<ChatState>((set, get) => ({
   messages: loadPersisted(),
   taskMode: null,
-  lastTask: null,
+  lastTask: SIDE0.lastTask,
   pendingImages: [],
-  inputDraft: '',
+  inputDraft: SIDE0.draft,
 
   items: (mode) => get().messages[mode] || [],
 
@@ -90,10 +122,23 @@ export const useChat = create<ChatState>((set, get) => ({
     }));
   },
 
+  // 用户手动删除的必须落盘，否则刷新一下被删的消息又回来了
   remove: (mode, id) => {
     set((s) => ({
       messages: { ...s.messages, [mode]: (s.messages[mode] || []).filter((i) => i.id !== id) },
     }));
+    get().persist();
+  },
+
+  // 删掉该条及其之后的全部消息 —— 编辑重发时用：改了问题，后面基于旧问题
+  // 产生的回答就都失效了，留着只会让上下文自相矛盾。
+  truncateFrom: (mode, id) => {
+    set((s) => {
+      const items = s.messages[mode] || [];
+      const at = items.findIndex((i) => i.id === id);
+      return at < 0 ? s : { messages: { ...s.messages, [mode]: items.slice(0, at) } };
+    });
+    get().persist();
   },
 
   removeKind: (mode, kinds) => {
@@ -112,12 +157,16 @@ export const useChat = create<ChatState>((set, get) => ({
     get().persist();
   },
 
-  reload: () => set({ messages: loadPersisted() }),
+  // 切会话/工作区后除消息外，草稿与"上次任务"也要跟着换成该会话的
+  reload: () => {
+    const side = loadSide();
+    set({ messages: loadPersisted(), inputDraft: side.draft, lastTask: side.lastTask });
+  },
 
   setTaskMode: (m) => set({ taskMode: m }),
-  setLastTask: (t) => set({ lastTask: t }),
+  setLastTask: (t) => { set({ lastTask: t }); get().persistSide(); },
   setPendingImages: (imgs) => set({ pendingImages: imgs }),
-  setInputDraft: (v) => set({ inputDraft: v }),
+  setInputDraft: (v) => { set({ inputDraft: v }); get().persistSide(); },
 
   persist: () => {
     try {
@@ -139,6 +188,16 @@ export const useChat = create<ChatState>((set, get) => ({
         payload = JSON.stringify(out);
       }
       localStorage.setItem(storageKey(), payload);
+    } catch { /* 配额溢出等：忽略 */ }
+  },
+
+  persistSide: () => {
+    try {
+      const { inputDraft, lastTask } = get();
+      // 超长草稿（粘了一大段日志）没必要整段留着，截断保底避免撑爆配额
+      localStorage.setItem(sideKey(), JSON.stringify({
+        draft: inputDraft.slice(0, 200 * 1024), lastTask,
+      }));
     } catch { /* 配额溢出等：忽略 */ }
   },
 }));

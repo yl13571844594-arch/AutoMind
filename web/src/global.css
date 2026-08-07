@@ -95,11 +95,147 @@ body.light .msg.user .bubble {
 .msg .time { font-size: .7em; color: var(--text3); margin-top: 5px; padding: 0 4px; }
 .msg .bubble .cursor { animation: blink 1s steps(1) infinite; color: var(--accent); }
 @keyframes blink { 50% { opacity: 0; } }
-.copy-msg {
-  position: absolute; top: 6px; right: 8px; border: none; background: none; color: var(--text3);
-  cursor: pointer; font-size: .9em; opacity: 0; transition: opacity .15s;
+/* ── 气泡悬停操作条（复制 / 编辑 / 删除） ──
+   浮在气泡右上角外沿的胶囊；不占文档流，不会把气泡内容顶开。 */
+.msg-acts {
+  position: absolute; top: -13px; right: 10px; z-index: 2;
+  display: flex; gap: 2px; padding: 2px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 10px; box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+  opacity: 0; transform: translateY(4px); pointer-events: none;
+  transition: opacity .16s ease, transform .16s ease;
 }
-.msg .bubble:hover .copy-msg { opacity: 1; }
+body.light .msg-acts { box-shadow: 0 4px 14px rgba(30, 45, 90, .12); }
+/* 操作条浮在气泡上沿之外，鼠标从气泡移过去的途中会离开气泡的 :hover 区域 ——
+   不补这一手，操作条会在够到之前就消失，根本点不中。故：
+   ①「悬停操作条自身」也算触发；② 用一个透明伪元素把两者之间的缝隙桥接起来，
+   让指针全程不脱离可触发区。 */
+.msg-acts::before {
+  content: ''; position: absolute; left: -6px; right: -6px; top: 100%; height: 16px;
+}
+.msg .bubble:hover .msg-acts,
+.msg .bubble:focus-within .msg-acts,
+.msg .msg-acts:hover { opacity: 1; transform: none; pointer-events: auto; }
+.msg-acts button {
+  border: none; background: none; color: var(--text3); cursor: pointer;
+  width: 26px; height: 23px; border-radius: 7px;
+  font-size: .82em; line-height: 1; display: flex; align-items: center; justify-content: center;
+}
+.msg-acts button:hover { background: var(--bg3); color: var(--text); }
+.msg-acts button.danger:hover { background: var(--red-bg); color: var(--red); }
+
+/* ── 消息内联编辑 ── */
+.msg-edit textarea {
+  width: 100%; resize: vertical; min-height: 62px;
+  background: var(--bg0); color: var(--text);
+  font-family: var(--font); font-size: 1em; line-height: 1.7;
+  padding: 9px 12px; border: 1px solid var(--border-focus);
+  border-radius: 10px; outline: none;
+}
+.msg-edit textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-glow); }
+.msg-edit-acts { display: flex; align-items: center; gap: 8px; margin-top: 9px; }
+/* 按钮文字不许折行（"取 消"被拆成两行很难看），提示语窄了就让它先省略 */
+.msg-edit-acts .err-btn { white-space: nowrap; }
+.msg-edit-acts .hint-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.msg .col.editing { width: 100%; max-width: 100%; }
+
+/* 历史搜索命中高亮 */
+.hist-hit {
+  background: var(--yellow-bg); color: var(--yellow);
+  border-radius: 3px; padding: 0 2px; font-weight: 600;
+}
+
+/* ── 执行进度条（输入框上方） ── */
+.task-progress {
+  max-width: 980px; margin: 0 auto; padding: 8px 18px 0;
+  animation: bannerIn .2s cubic-bezier(.2, .9, .3, 1);
+}
+.tp-row { display: flex; align-items: center; gap: 8px; font-size: .78em; color: var(--text2); }
+.tp-phase { color: var(--accent); font-weight: 700; }
+.tp-step { color: var(--text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-label {
+  color: var(--text3); overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; max-width: 42%;
+}
+.tp-time { color: var(--text3); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.tp-link {
+  border: none; background: none; color: var(--accent); cursor: pointer;
+  font-size: 1em; font-family: var(--font); padding: 0 2px; white-space: nowrap;
+}
+.tp-link:hover { text-decoration: underline; }
+.tp-spin {
+  width: 10px; height: 10px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid var(--accent); border-right-color: transparent;
+  animation: tpSpin .7s linear infinite;
+}
+@keyframes tpSpin { to { transform: rotate(360deg); } }
+.tp-bar {
+  margin-top: 6px; height: 3px; border-radius: 99px;
+  background: var(--bg3); overflow: hidden;
+}
+.tp-fill {
+  height: 100%; border-radius: 99px; background: var(--accent-grad);
+  transition: width .35s cubic-bezier(.3, .8, .4, 1);
+}
+/* 步数未知时用来回流动的短条表示"在动"，而不是画一个编出来的百分比 */
+.tp-bar.indeterminate .tp-fill { width: 32%; animation: tpSlide 1.5s ease-in-out infinite; }
+@keyframes tpSlide {
+  0% { transform: translateX(-110%); } 100% { transform: translateX(320%); }
+}
+
+/* ── 断线横幅 ── */
+.conn-banner {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 18px; font-size: .84em;
+  background: var(--yellow-bg); border-bottom: 1px solid var(--border);
+  animation: bannerIn .22s cubic-bezier(.2, .9, .3, 1);
+}
+@keyframes bannerIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: none; } }
+.conn-banner b { color: var(--text); font-weight: 700; }
+.conn-sub { color: var(--text2); }
+.conn-dot {
+  width: 8px; height: 8px; border-radius: 50%; background: var(--yellow);
+  flex-shrink: 0; animation: connPulse 1.5s ease-in-out infinite;
+}
+@keyframes connPulse { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: .3; transform: scale(.72); } }
+.conn-btn {
+  border: 1px solid var(--yellow); background: transparent; color: var(--yellow);
+  border-radius: 8px; padding: 4px 13px; cursor: pointer;
+  font-size: .95em; font-family: var(--font); font-weight: 600; white-space: nowrap;
+}
+.conn-btn:hover { background: var(--yellow); color: #1d2433; }
+
+/* ── 失败卡片（带恢复入口） ── */
+.avatar.err { background: var(--red); color: #fff; }
+.bubble.err-card { border-left: 3px solid var(--red); }
+.err-head { font-weight: 700; color: var(--red); }
+.err-at { font-weight: 400; color: var(--text3); font-size: .85em; margin-left: 8px; }
+.err-body {
+  margin-top: 6px; white-space: pre-wrap; word-break: break-word;
+  font-family: var(--mono, monospace); font-size: .88em; color: var(--text2);
+  background: var(--bg0); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px;
+  max-height: 320px; overflow: auto;
+}
+.err-more {
+  margin-top: 4px; border: none; background: none; padding: 0;
+  color: var(--accent); cursor: pointer; font-size: .85em;
+}
+.err-hint { margin-top: 8px; font-size: .9em; color: var(--text2); }
+.err-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.err-btn {
+  border: 1px solid var(--border); background: var(--bg0); color: var(--text);
+  border-radius: 8px; padding: 5px 12px; cursor: pointer; font-size: .88em;
+  font-family: var(--font); transition: border-color .15s, color .15s;
+}
+.err-btn:hover { border-color: var(--accent); color: var(--accent); }
+.err-btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.err-btn.primary:hover { opacity: .88; color: #fff; }
+.err-task {
+  margin-top: 8px; font-size: .82em; color: var(--text3);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 说明两个按钮的实际语义，避免"继续"被理解成断点续传 */
+.err-fineprint { margin-top: 4px; font-size: .78em; color: var(--text3); }
 .mm-thumbs { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
 .mm-thumbs img, img.mm { max-width: 220px; max-height: 160px; border-radius: 8px; border: 1px solid var(--border); }
 
@@ -270,12 +406,63 @@ body.light .input-bar { background: rgba(255, 255, 255, .74); }
       避免常驻的 DOM 仍参与 layout 拖慢切换；
    2) 视图切入时给一个极短的淡入，把"瞬间换内容"的生硬感抹平。 */
 .view-slot { flex: 1; min-height: 0; flex-direction: column; }
+/* 兜底：槽内直接子项（对话面板）必须允许被压缩到内容高度以下。
+   flex 子项默认 min-height:auto = "不小于内容"，会话一长就会把面板撑到上万像素、
+   顶穿父容器，消息区拿不到受限高度而不触发滚动，输入框被挤出视口。 */
+.view-slot > * { min-height: 0; }
 .view-fade { animation: viewIn .16s ease-out; }
 @keyframes viewIn { from { opacity: 0; } to { opacity: 1; } }
 
 /* 深色主题下窗口/画布底色与页面一致，WebView2 在重绘间隙露出的也是同一颜色，
    不会闪出与界面反差极大的纯黑。 */
 html { background: var(--bg0); }
+
+/* ══════════════════════════════════════════════════════════════
+   v1.4.2 界面精修 —— 沿用既有设计语言（深色玻璃拟态 + 双色渐变），
+   只在质感层面收紧：更克制的层次、更清晰的焦点、更稳的排版节奏。
+   ══════════════════════════════════════════════════════════════ */
+
+/* 1) 气泡：双层阴影替代单层平铺阴影，边缘更利落、体积感更真实 */
+.msg .bubble {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .16), 0 8px 24px -12px rgba(0, 0, 0, .5);
+}
+body.light .msg .bubble {
+  box-shadow: 0 1px 2px rgba(30, 45, 90, .05), 0 8px 22px -14px rgba(30, 45, 90, .22);
+}
+/* 悬停时极轻微抬起 —— 幅度刻意压到 1px，长列表滚动时不会显得躁动 */
+.msg .bubble { transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease; }
+.msg .bubble:hover { transform: translateY(-1px); }
+
+/* 2) 头像：加一圈内描边，深浅主题下都不会与气泡糊在一起 */
+.msg .avatar {
+  box-shadow: 0 3px 12px var(--accent-glow), inset 0 0 0 1px rgba(255, 255, 255, .14);
+  letter-spacing: 0;
+}
+.msg.user .avatar { box-shadow: inset 0 0 0 1px var(--border); }
+
+/* 3) 全局焦点可见性：键盘导航时必须看得出焦点在哪（原来多处 outline:none） */
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+/* 4) 滚动条收细，并只在容器悬停时提高对比 —— 静止时不抢视线 */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { border: 3px solid transparent; }
+.messages::-webkit-scrollbar-thumb { background: transparent; background-clip: padding-box; }
+.messages:hover::-webkit-scrollbar-thumb { background: var(--bg3); background-clip: padding-box; }
+
+/* 5) 输入区：聚焦时整条底栏轻微提亮，强化"这里是主操作区"的层级 */
+.input-bar { transition: background .2s ease, border-color .2s ease; }
+.input-bar:focus-within { border-top-color: var(--border-focus); }
+
+/* 6) 发送按钮：渐变加一层高光，按下反馈更明确 */
+.send-btn { position: relative; overflow: hidden; }
+.send-btn::after {
+  content: ''; position: absolute; inset: 0;
+  background: linear-gradient(180deg, rgba(255, 255, 255, .18), transparent 55%);
+  pointer-events: none;
+}
+
+/* 7) 数字与代码统一用等宽字形对齐，表格/统计列不再左右跳动 */
+.err-at, .time, code, pre, .mono { font-variant-numeric: tabular-nums; }
 
 /* 「减少动效」偏好：晕动症敏感用户，或老机器上动画反而更卡的场景。
    全站动画与过渡压到近乎瞬时，但不改变任何布局与功能。 */

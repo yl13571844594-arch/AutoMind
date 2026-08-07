@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import os
+import re
+import shlex
+import subprocess
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
 from automind.skills.skill_base import AbstractSkill, SkillResult
+
+# pattern 由模型填写，此前被直接拼进 shell 字符串并以 shell=True 执行 ——
+# 传 `x; rm -rf ~` 即可注入任意命令，且因为拼出来的整条命令不长得像危险命令，
+# terminal 工具的高危正则也拦不住。这里只放行"看起来确实是文件通配符"的内容：
+# 字母数字与 . _ - * ? [ ] /，不含空格、引号、分号、管道、$、反引号等任何
+# 具有 shell 语义的字符。命令一律以 argv 列表构造，不再经过 shell。
+_SAFE_PATTERN = re.compile(r"^[A-Za-z0-9_.\-*?\[\]/]{1,120}$")
+
+
+class UnsafePatternError(ValueError):
+    """pattern 含 shell 元字符或过长，拒绝构造命令。"""
 
 
 class TestRunInput(BaseModel):
@@ -36,7 +51,12 @@ class TestRunnerSkill(AbstractSkill):
         if framework == "auto":
             framework = self._detect_framework(inp.directory)
 
-        cmd = self._build_command(framework, inp)
+        # pattern 非法时**不执行任何命令**，直接把原因回给模型
+        try:
+            argv = self._build_argv(framework, inp)
+        except UnsafePatternError as e:
+            return SkillResult(success=False, error=str(e))
+        cmd = self._quote(argv)
 
         try:
             if agent and agent.tool_registry:
@@ -56,9 +76,10 @@ class TestRunnerSkill(AbstractSkill):
                     error=result.error,
                 )
             else:
-                import subprocess
+                # shell=False + argv 列表：即便 pattern 校验被绕过，
+                # 参数也只会被当作 pytest 的一个参数，而不是新的一条命令。
                 proc = subprocess.run(
-                    cmd, shell=True, cwd=inp.directory,
+                    argv, shell=False, cwd=inp.directory,
                     capture_output=True, text=True, timeout=120,
                     encoding="utf-8", errors="replace",
                 )
@@ -91,18 +112,28 @@ class TestRunnerSkill(AbstractSkill):
         return "pytest"  # 默认
 
     @staticmethod
-    def _build_command(framework: str, inp: TestRunInput) -> str:
-        if framework == "pytest":
-            cmd = f"python -m pytest {inp.pattern}"
-            if inp.verbose:
-                cmd += " -v"
-            if inp.fail_fast:
-                cmd += " -x"
-            return cmd
-        elif framework == "unittest":
-            return f"python -m unittest discover -p '{inp.pattern}'"
-        elif framework == "jest":
-            return "npx jest" + (" --verbose" if inp.verbose else "")
-        elif framework == "go_test":
-            return "go test ./..."
-        return f"python -m pytest {inp.pattern} -v"
+    def _build_argv(framework: str, inp: TestRunInput) -> list[str]:
+        """构造 argv 列表 —— 不拼 shell 字符串，从根上消灭命令注入。"""
+        pattern = inp.pattern or "test_*.py"
+        if not _SAFE_PATTERN.match(pattern):
+            raise UnsafePatternError(
+                f"pattern 含非法字符或过长，已拒绝：{pattern!r}（只允许字母数字与 . _ - * ? [ ] /）")
+
+        if framework == "unittest":
+            return ["python", "-m", "unittest", "discover", "-p", pattern]
+        if framework == "jest":
+            return ["npx", "jest"] + (["--verbose"] if inp.verbose else [])
+        if framework == "go_test":
+            return ["go", "test", "./..."]
+        # pytest 与兜底分支
+        argv = ["python", "-m", "pytest", pattern]
+        if inp.verbose:
+            argv.append("-v")
+        if inp.fail_fast:
+            argv.append("-x")
+        return argv
+
+    @staticmethod
+    def _quote(argv: list[str]) -> str:
+        """仅用于必须传字符串的 terminal 工具；各段已经过白名单校验。"""
+        return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)

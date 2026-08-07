@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from automind.core.logging import get_logger
 from automind.core.types import (
     LLMResponse,
     ToolCall,
@@ -11,6 +12,8 @@ from automind.core.types import (
 )
 from automind.tools.base import ToolRegistry
 from automind.tools.function_calling import FunctionCallHandler
+
+logger = get_logger("automind.react")
 
 
 class ReActExecutor:
@@ -246,14 +249,26 @@ class ReActExecutor:
             return True, reason
         if decision.value == "deny":
             return False, reason
-        # ask_user
+        # ask_user —— 走到这里说明**权限策略明确要求人工确认**
+        # （"询问"模式下的非只读操作，或"自动"模式下的高危操作）。
+        #
+        # 安全修复（v1.4.5）：这两条分支此前都 `return True`：
+        #   · 没有审批通道就直接放行 —— 注释写的是"自主运行不阻塞"，但真正表达
+        #     "我要自主运行"的方式是把 approval_mode 设成 auto/approve_all，
+        #     那样 permissions.check() 根本不会返回 ask_user，压根到不了这里。
+        #     靠"回调恰好没接"来放行，等于让配置疏漏静默变成放权。
+        #   · 回调抛异常就直接放行 —— 而最常见的异常正是前端断开。
+        # 审批是安全控制，两种情形一律 fail-closed：问不到人 = 没批准。
         if self.approval_cb is None:
-            return True, reason  # 无审批通道时不阻塞（自主运行）
+            return False, (f"{reason}；当前没有可用的审批通道，已按拒绝处理"
+                           "（若需无人值守运行，请将审批模式设为「自动」或「全批准」）")
         try:
             approved = await self.approval_cb(tc.name, tc.arguments, tier.value, reason)
             return bool(approved), reason if approved else f"用户拒绝：{reason}"
-        except Exception:
-            return True, reason
+        except Exception as e:
+            logger.warning("react_approval_failed", tool=tc.name,
+                           error=str(e), decision="denied")
+            return False, f"审批通道异常（{type(e).__name__}），已按拒绝处理"
 
     def get_trace(self) -> str:
         """获取执行跟踪。"""
