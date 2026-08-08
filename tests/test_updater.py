@@ -213,3 +213,56 @@ class TestInstallScript:
         assert hasattr(seen["stdout"], "fileno")
         # 且确实是分离启动（否则父进程一退，子进程会被一起带走）
         assert seen["creationflags"] & sp.DETACHED_PROCESS
+
+
+class TestSpawnCrossPlatform:
+    """升级流程只在 Windows 走，但代码必须在其它平台可导入可测试。
+
+    回归背景：CREATE_NO_WINDOW / DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP
+    都是 Windows 独有的 subprocess 属性。直接引用它们时本机全绿、CI 一到
+    ubuntu 就 AttributeError（实测 3.11/3.12 双双失败）。
+    """
+
+    def test_no_crash_when_windows_flags_absent(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from automind.core import updater
+
+        for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+            monkeypatch.delattr(sp, name, raising=False)
+
+        seen = {}
+
+        def fake_popen(cmd, **kw):
+            seen.update(kw)
+            return object()
+
+        monkeypatch.setattr(sp, "Popen", fake_popen)
+        updater._spawn_installer(tmp_path / "apply_update.bat", tmp_path)
+
+        assert seen["creationflags"] == 0, "缺失标志时应退化为 0 而不是报错"
+        # 关键点不能因为跨平台适配而丢失：标准流仍必须显式给出
+        assert seen["stdin"] is not None
+        assert seen["stdout"] is not None
+        assert seen["stderr"] is not None
+
+    def test_windows_flags_all_applied_when_present(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        from automind.core import updater
+
+        # 在非 Windows 上补出这三个常量，保证断言在任何平台都成立
+        for name, val in (("CREATE_NO_WINDOW", 0x08000000),
+                          ("DETACHED_PROCESS", 0x00000008),
+                          ("CREATE_NEW_PROCESS_GROUP", 0x00000200)):
+            monkeypatch.setattr(sp, name, getattr(sp, name, val), raising=False)
+        want = sp.CREATE_NO_WINDOW | sp.DETACHED_PROCESS | sp.CREATE_NEW_PROCESS_GROUP
+
+        seen = {}
+        def fake_popen(cmd, **kw):  # noqa: ARG001 - 签名需与 Popen 一致
+            seen.update(kw)
+            return object()
+
+        monkeypatch.setattr(sp, "Popen", fake_popen)
+        updater._spawn_installer(tmp_path / "apply_update.bat", tmp_path)
+        assert seen["creationflags"] == want

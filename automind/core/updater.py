@@ -561,13 +561,19 @@ def _spawn_installer(bat: Path, tmp: Path) -> None:
     顺带把输出留到 ``trace.txt``，升级出问题时有据可查。
     """
     import subprocess as sp
+    # CREATE_NO_WINDOW / DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP 都是
+    # **Windows 独有**的 subprocess 属性，Linux/macOS 上根本不存在 —— 直接引用会
+    # AttributeError。升级流程本身只在 Windows 走（装的是 Inno 的 .exe），但本函数
+    # 仍要在其它平台可被导入、可被测试，否则 CI 一到 Linux 就红（实测 3.11/3.12
+    # 双双失败）。用 getattr 取值、缺失时退化为 0（= 不加任何标志）。
+    flags = 0
+    for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
+        flags |= getattr(sp, name, 0)
     trace = open(tmp / "trace.txt", "wb")  # noqa: SIM115 - 交给子进程，不能用 with
     try:
         sp.Popen(["cmd", "/c", str(bat)],
                  stdin=sp.DEVNULL, stdout=trace, stderr=trace,
-                 creationflags=(sp.CREATE_NO_WINDOW | sp.DETACHED_PROCESS
-                                | sp.CREATE_NEW_PROCESS_GROUP),
-                 close_fds=True)
+                 creationflags=flags, close_fds=True)
     finally:
         trace.close()   # 句柄已复制给子进程，父进程这份可以关
 
