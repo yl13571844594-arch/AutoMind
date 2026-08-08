@@ -48,17 +48,50 @@ function Find-SignTool {
             if ($found) { return $found.FullName }
         }
     }
-    throw ("找不到 signtool.exe — 设 AUTOMIND_SIGNTOOL 指向它，或安装 Windows SDK，" +
-           "或从 NuGet 包 Microsoft.Windows.SDK.BuildTools 抽取")
+    return $null   # 交由调用方回退到 Set-AuthenticodeSignature
+}
+
+# ── signtool 缺席时的回退：PowerShell 内建 Authenticode ────────────────
+# 本机没装 Windows SDK 时（常见：只做 Python 打包的开发机），signtool 根本不
+# 存在。此前脚本直接抛错中断，等于"证书明明可用却签不了"。
+# Set-AuthenticodeSignature 是 PowerShell 自带的，走同一套 CryptoAPI，
+# 对 Certum SimplySign 这类云证书同样有效（私钥留在云端 HSM，PIN 由
+# SimplySign Desktop 会话处理，本脚本依旧从不经手）。
+# 实测：签 AutoMind.exe 返回 Status=Valid 且带 RFC3161 时间戳。
+# 差异：signtool 支持双签名(SHA1+SHA256)与更细的 /ph 页哈希控制，
+# 回退路径只做 SHA256 单签 —— 对 Win10+ 完全够用。
+# 注意：**不会**去用系统里搜到的任何第三方 signtool（曾在某银行客户端目录下
+# 发现一个来路不明的同名程序）—— 生产签名只用官方 SDK 版或本回退。
+function Invoke-PsSign($file, $cert, $tsList) {
+    foreach ($ts in $tsList) {
+        $r = Set-AuthenticodeSignature -FilePath $file -Certificate $cert `
+            -HashAlgorithm SHA256 -TimestampServer $ts -ErrorAction SilentlyContinue
+        if ($r -and $r.Status -eq "Valid") {
+            Write-Host "  已签名（时间戳: $ts）"
+            return $true
+        }
+        Write-Warning "  时间戳 $ts 失败：$($r.StatusMessage)"
+    }
+    return $false
 }
 
 $signtool = Find-SignTool
-Write-Host "signtool: $signtool"
+if ($signtool) {
+    Write-Host "signtool: $signtool"
+} else {
+    Write-Host "未找到 signtool.exe —— 回退到 PowerShell 内建 Authenticode 签名"
+}
 
 if ($VerifyOnly) {
     foreach ($f in $Path) {
-        & $signtool verify /pa /v $f
-        if ($LASTEXITCODE -ne 0) { throw "签名验证失败: $f" }
+        if ($signtool) {
+            & $signtool verify /pa /v $f
+            if ($LASTEXITCODE -ne 0) { throw "签名验证失败: $f" }
+        } else {
+            $s = Get-AuthenticodeSignature -FilePath $f
+            Write-Host ("$f → " + $s.Status + " | " + $s.SignerCertificate.Subject)
+            if ($s.Status -ne "Valid") { throw "签名验证失败: $f（$($s.Status)）" }
+        }
     }
     Write-Host "全部签名验证通过 ✓" -ForegroundColor Green
     exit 0
@@ -107,6 +140,16 @@ function Set-IEProxyEnabled([int]$v) {
 }
 
 function Invoke-SignAttempts($file) {
+    # 回退路径：没有 signtool 时用内建 Authenticode（证书对象取自证书库指纹）
+    if (-not $signtool) {
+        if (-not $thumb) {
+            throw "回退签名仅支持证书库指纹（AUTOMIND_CERT_THUMBPRINT）；PFX 请安装 Windows SDK 后用 signtool"
+        }
+        $cert = Get-ChildItem Cert:\CurrentUser\My, Cert:\LocalMachine\My -CodeSigningCert `
+            -ErrorAction SilentlyContinue | Where-Object { $_.Thumbprint -eq $thumb } | Select-Object -First 1
+        if (-not $cert) { throw "证书库中找不到指纹为 $thumb 的代码签名证书" }
+        return (Invoke-PsSign $file $cert $tsServers)
+    }
     foreach ($ts in $tsServers) {
         foreach ($try in 1..2) {
             Write-Host "签名 $file（时间戳: $ts，第 $try 次）…"
@@ -143,8 +186,14 @@ try {
                    "signtool 会采用它，而非只看 netsh winhttp；`n" +
                    "  3) 确认 SimplySign Desktop 会话未过期（私钥不可用也会签不上）")
         }
-        & $signtool verify /pa $f
-        if ($LASTEXITCODE -ne 0) { throw "签名后验证失败: $f" }
+        # 签完立刻复验：signtool 与回退路径各用各的校验方式
+        if ($signtool) {
+            & $signtool verify /pa $f
+            if ($LASTEXITCODE -ne 0) { throw "签名后验证失败: $f" }
+        } else {
+            $vs = Get-AuthenticodeSignature -FilePath $f
+            if ($vs.Status -ne "Valid") { throw "签名后验证失败: $f（$($vs.Status)）" }
+        }
         Write-Host "已签名 ✓ $f" -ForegroundColor Green
     }
 }
