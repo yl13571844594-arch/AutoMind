@@ -211,8 +211,14 @@ class TestInstallScript:
         # stdout/stderr 必须是真实文件对象（有 fileno），不能是 None
         assert seen["stdout"] is not None and seen["stderr"] is not None
         assert hasattr(seen["stdout"], "fileno")
-        # 且确实是分离启动（否则父进程一退，子进程会被一起带走）
-        assert seen["creationflags"] & sp.DETACHED_PROCESS
+        # 且确实是分离启动（否则父进程一退，子进程会被一起带走）。
+        # DETACHED_PROCESS 是 Windows 专有属性，Linux 上不存在 —— 直接引用会让
+        # 这条断言本身在 CI 上抛 AttributeError（本机 Windows 全绿，ubuntu 双挂）。
+        # 取不到就说明当前平台压根没有"分离启动"这个概念，跳过该项即可；
+        # 真正的回归点（标准流必须显式给出）在上面几行，与平台无关。
+        detached = getattr(sp, "DETACHED_PROCESS", None)
+        if detached is not None:
+            assert seen["creationflags"] & detached
 
 
 class TestSpawnCrossPlatform:
