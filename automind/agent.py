@@ -780,6 +780,44 @@ class AutoMindAgent:
         # 以工具形式暴露给 ReAct 循环，编程模式可直接调用
         self.tool_registry.register(_CodeGenerateTool(self))
 
+        # 办公自动化与集成工具（v1.5.0）
+        #
+        # 这些工具的第三方依赖是**可选**的（openpyxl / python-docx / pypdf /
+        # icalendar / pywin32），故一律注册、按需导入：模型始终能看到这些能力并
+        # 规划到它们，真正调用时若缺库，返回的是一句可照抄的 pip 命令，
+        # 而不是让整个工具凭空消失、模型只能干瞪眼。
+        # 逐组 try：某一组导入失败（比如残缺安装）不该连累其余工具。
+        for _loader in (self._register_office_tools,
+                        self._register_net_tools,
+                        self._register_data_tools,
+                        self._register_collab_tools):
+            try:
+                _loader()
+            except Exception as e:                        # pragma: no cover - 防御性
+                logger.warning("optional_tools_register_failed",
+                               group=_loader.__name__, error=str(e))
+
+    def _register_office_tools(self) -> None:
+        from automind.tools.office import EmailTool, ExcelTool, PdfTool, WordTool
+        for tool in (ExcelTool(), WordTool(), PdfTool(), EmailTool()):
+            self.tool_registry.register(tool)
+
+    def _register_net_tools(self) -> None:
+        from automind.tools.net_tools import HttpRequestTool, WebSearchTool
+        self.tool_registry.register(HttpRequestTool())
+        self.tool_registry.register(WebSearchTool())
+
+    def _register_data_tools(self) -> None:
+        from automind.tools.data_tools import ArchiveTool, DbQueryTool, FileSearchTool
+        self.tool_registry.register(DbQueryTool())
+        self.tool_registry.register(FileSearchTool(project_root=self.config.project_root))
+        self.tool_registry.register(ArchiveTool())
+
+    def _register_collab_tools(self) -> None:
+        from automind.tools.collab_tools import CalendarTool, ImIntegrationTool, NotifyTool
+        for tool in (NotifyTool(), CalendarTool(), ImIntegrationTool()):
+            self.tool_registry.register(tool)
+
     async def close(self) -> None:
         """释放全部持有资源 — MCP 连接 / 记忆系统（ChromaDB）/ LLM 连接池。
 

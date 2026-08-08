@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.4.5</title>
+<title>AutoMind 使用手册 — v1.5.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.4.5</div>
+  <div class="ver">使用手册 · v1.5.0</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.4.5</b></span>
+    <span class="chip">版本 <b>v1.5.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -921,7 +921,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.4.5</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.5.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1041,8 +1041,57 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.4.5</span><span class="cl-date">2026-08-06</span>
+      <span class="cl-ver">v1.5.0</span><span class="cl-date">2026-08-07</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">新增 12 个办公与集成工具 — AI 现在能直接帮你处理表格、文档、邮件</div>
+    <ul>
+      <li><b>📊 办公四件套</b>：
+        <b>Excel</b>（读写表格、增删行、和 CSV 互转）、
+        <b>Word</b>（读取内容、生成文档、插入表格）、
+        <b>PDF</b>（提取文字、合并、拆分、旋转）、
+        <b>邮件</b>（发送邮件、收取和查看收件箱）。
+        直接说"把这个表格里的数据汇总成一份 Word 报告"就行。</li>
+      <li><b>🔧 通用五件套</b>：<b>联网搜索</b>、<b>网页/接口请求</b>、
+        <b>数据库查询</b>、<b>文件检索</b>（按文件名或内容找）、
+        <b>压缩解压</b>（zip / tar.gz）。</li>
+      <li><b>🤝 协同三件套</b>：<b>桌面通知</b>（长任务跑完弹窗提醒）、
+        <b>日历</b>（ICS 日程文件，Windows 上还能直接写进 Outlook）、
+        <b>群机器人</b>（钉钉 / 企业微信 / 飞书 / Slack）。</li>
+      <li><b>📦 按需安装，不臃肿</b>：办公功能依赖的库<b>不会</b>随主程序一起装。
+        桌面版已内置；用 pip 安装的用户，第一次用到时会提示一行安装命令，
+        照抄即可（<code>pip install "automind-agent[office]"</code>）。</li>
+      <li><b>🔐 外发动作一律需要你点确认</b>：发邮件、发群消息属于「发出去就收不回」的操作，
+        默认每次都要经过审批。另外<b>刻意不提供群发功能</b>（收件人上限 20 人）——
+        能被 AI 驱动的无限群发就是垃圾邮件工具，专业版同样不会解锁。
+        邮箱密码只从环境变量读取，不会出现在任何记录里。</li>
+      <li><b>🛡 联网与解压的安全防护</b>：网络请求默认<b>禁止访问内网地址</b>
+        （防止 AI 被网页内容诱导去读取你的内网服务或云端凭据）；
+        解压会校验压缩包内的路径，防止文件被释放到目录之外。</li>
+      <li><b>⭐ 社区版与专业版的分界</b>：分界线划在<b>具体动作</b>上，不是整个工具 ——
+        社区版能真正把表格读出来、把报告写出去。
+        进阶动作（Excel 样式美化、Word 模板套打、PDF 加水印与加密、
+        企业数据库读写）属专业版。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.6</span><span class="cl-date">2026-08-07</span>
+    </div>
+    <div class="cl-sum">堵上一条上版没能覆盖到的跨站通道 — 建议立即升级</div>
+    <ul>
+      <li><b>🚨 阻止外部网页通过 WebSocket 操纵本机</b>：上一版收紧了跨站访问，但
+        <b>WebSocket 走的是另一条路，不受那套规则约束</b> —— 也就是说，你访问的任何网页
+        仍可能在后台连上本机 AutoMind，让它执行任务、读写文件。现已改为
+        <b>默认只接受本机页面的连接</b>，外部来源一律拒绝并记录日志。
+        命令行与 SDK 调用不受影响；只在本机使用无需任何额外设置。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.4.5</span><span class="cl-date">2026-08-06</span>
     </div>
     <div class="cl-sum">安全加固第二轮 — 承接 v1.4.4，建议一并升级</div>
     <ul>
@@ -1203,7 +1252,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.4.5 同步 ·
+  AutoMind 使用手册 · 与软件 v1.5.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

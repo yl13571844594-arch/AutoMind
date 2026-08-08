@@ -57,6 +57,12 @@ _AUTH_TOKEN = os.environ.get("AUTOMIND_AUTH_TOKEN", "")
 # 本地开发的 vite dev server 用）。显式配置 AUTOMIND_CORS_ORIGINS 才放行其它来源；
 # 若其中含 `*`，则强制关闭 credentials（浏览器规范本就不允许两者并用）。
 _LOCAL_ORIGIN_RE = r"^https?://(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$"
+
+
+def _ws_origin_ok(origin: str) -> bool:
+    """WebSocket 的 Origin 是否属于本机页面（与 CORS 用同一套判断）。"""
+    import re as _re
+    return bool(_re.match(_LOCAL_ORIGIN_RE, origin))
 _cors_origins = [o.strip() for o in
                  os.environ.get("AUTOMIND_CORS_ORIGINS", "").split(",") if o.strip()]
 
@@ -2591,13 +2597,28 @@ _ws_approvals: dict[str, asyncio.Future] = {}
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
-    # WebSocket 源校验（§14.11-5）：配置 AUTOMIND_ALLOWED_ORIGINS 后，
-    # 拒绝来源不在白名单的连接，防止跨站 WS 劫持。默认不校验。
-    if _WS_ALLOWED_ORIGINS:
-        origin = ws.headers.get("origin", "")
-        if origin not in _WS_ALLOWED_ORIGINS:
-            await ws.close(code=4403)
-            return
+    # WebSocket 源校验 —— v1.4.6 起**默认开启**。
+    #
+    # 这里此前是"配置了 AUTOMIND_ALLOWED_ORIGINS 才校验，默认不校验"，
+    # 而这条通道恰恰是任务执行主入口（{"action":"run"}）。关键在于
+    # **WebSocket 不受同源策略约束**：浏览器对 ws:// 不做 CORS 预检，
+    # 任何网页都能直接 new WebSocket("ws://127.0.0.1:8765/ws")。
+    # 也就是说 v1.4.5 收紧 CORS 并**拦不住这条路** —— 用户只要访问一个
+    # 恶意页面，那个页面就能驱动本机 Agent 跑命令、读写文件，
+    # 而本地默认又不开鉴权。
+    #
+    # 策略与 CORS 保持一致：
+    #   · 没有 Origin 头 —— 非浏览器客户端（CLI/SDK/curl），放行；
+    #     浏览器发起 WS 时**一定**会带 Origin，伪造不了（受浏览器控制）。
+    #   · Origin 为本机地址 —— 应用自身的界面，放行。
+    #   · 显式配置 AUTOMIND_ALLOWED_ORIGINS —— 按配置放行。
+    #   · 其余一律拒绝。
+    origin = ws.headers.get("origin", "")
+    if origin and not (_ws_origin_ok(origin) or origin in _WS_ALLOWED_ORIGINS):
+        logger.warning("ws_origin_denied", origin=origin[:120],
+                       client=ws.client.host if ws.client else "?")
+        await ws.close(code=4403)
+        return
     # 商用鉴权：配置令牌后，WS 需带 ?token=（静态令牌或 SSO 会话令牌均可）
     token = _auth_token()
     if token and not _token_ok(ws.query_params.get("token", ""), token):

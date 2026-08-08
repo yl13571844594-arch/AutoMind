@@ -134,6 +134,31 @@ _CHILD = r'''
 import ast, builtins, json, sys, types
 from io import StringIO
 
+def _apply_limits():
+    """POSIX 资源限额 —— 在子进程自己身上设，单线程、无 fork 隐患。
+
+    每条独立 try：某条不被内核支持（容器/BSD 差异）不能连累其余。
+    刻意**不设** RLIMIT_NPROC —— 它按"用户"而非"进程"计数，置 0 会波及
+    该用户的其它进程，且在容器里常导致子进程直接起不来；限制 fork 的目的
+    已由 AST 层禁止 os/subprocess 达成。
+    RLIMIT_FSIZE 也不设死为 0：stdout 是管道不受影响，但 Python 写
+    __pycache__ 时会触发 SIGXFSZ，收益不抵风险。
+    """
+    try:
+        import resource
+    except ImportError:
+        return
+    for name, limit in (("RLIMIT_CPU", (30, 30)),
+                        ("RLIMIT_AS", (1024 * 1024 * 1024,) * 2),
+                        ("RLIMIT_CORE", (0, 0))):
+        try:
+            resource.setrlimit(getattr(resource, name), limit)
+        except (ValueError, OSError, AttributeError):
+            pass
+
+
+_apply_limits()
+
 payload = json.loads(sys.stdin.read())
 code = payload["code"]
 ALLOWED = frozenset(payload["allowed"])
@@ -273,11 +298,14 @@ class PythonSandboxTool(AbstractTool):
         # -S：不自动 import site，减少可达对象
         argv = [sys.executable, "-I", "-S", "-c", _CHILD]
         kw: dict[str, Any] = {}
-        if os.name == "posix":
-            kw["preexec_fn"] = _posix_limits          # noqa: PLW1509 - 仅子进程内生效
-        else:
+        if os.name == "nt":
             # Windows：新建进程组，超时时能连同其子孙一起结束
             kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            # POSIX：另起会话，kill 时不会波及父进程所在的进程组。
+            # 资源限额由子进程自己设（见 _CHILD），不用 preexec_fn —— 那在
+            # 多线程进程里不安全，而这里正是从线程池线程发起的。
+            kw["start_new_session"] = True
 
         proc = subprocess.Popen(
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -322,13 +350,13 @@ class PythonSandboxTool(AbstractTool):
         )
 
 
-def _posix_limits() -> None:  # pragma: no cover - 仅 POSIX 子进程内执行
-    """POSIX 下给子进程加 CPU / 内存 / 文件大小硬限制。"""
-    try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_CPU, (30, 30))
-        resource.setrlimit(resource.RLIMIT_AS, (512 * 1024 * 1024,) * 2)
-        resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))   # 禁止写文件
-        resource.setrlimit(resource.RLIMIT_NPROC, (0, 0))   # 禁止再 fork
-    except Exception:
-        pass
+"""POSIX 资源限额已移入子进程引导脚本（_CHILD 顶部的 _apply_limits）。
+
+原先走 `subprocess(preexec_fn=...)`，有两个问题：
+  · **preexec_fn 在有线程的进程里不安全**（Python 文档明确警告：fork 与 exec
+    之间只能调用 async-signal-safe 的函数，否则可能死锁）。而这里的
+    `_run_child` 正是经 `asyncio.to_thread` 在线程池线程中调用的 —— 属于
+    文档点名的危险用法。
+  · 四条 setrlimit 共用一个 try，第一条失败会静默跳过其余三条。
+移到子进程自己 exec 之后再设：那时是单线程、无 fork 顾虑，且每条独立容错。
+"""

@@ -60,9 +60,28 @@ class EnvironmentDetector:
         info.cwd = str(Path(project_root).resolve())
 
         # OS 信息
-        info.os_name = platform.system()
-        info.os_version = platform.release()
-        info.architecture = platform.machine()
+        # 注意：不要用 platform.system()/platform.release()/platform.machine() ——
+        # Python 3.12 在 Windows 上它们会走 WMI 查询（wmic），而 WMI 在部分环境
+        # （安全软件拦截、WMI 服务异常、精简系统）会**无限阻塞**，导致 Agent 构建/
+        # 服务启动永久挂起（曾实测卡死 2 分钟+）。改用纯本地 API，零外部调用：
+        #   · os.name / sys.platform —— 纯常量
+        #   · sys.getwindowsversion() —— 纯 API，不走 WMI
+        #   · PROCESSOR_ARCHITECTURE 环境变量 —— 纯读取（注意：3.12 的
+        #     platform.machine() 在该变量缺失时也会 fallback 到 WMI，故不可用）
+        if os.name == "nt":
+            info.os_name = "Windows"
+            try:
+                wv = sys.getwindowsversion()
+                info.os_version = f"{wv.major}.{wv.minor}.{wv.build}"
+            except Exception:
+                info.os_version = ""
+        else:
+            info.os_name = platform.system()
+            info.os_version = platform.release()
+        info.architecture = (
+            os.environ.get("PROCESSOR_ARCHITECTURE")
+            or os.environ.get("PROCESSOR_ARCHITEW6432")
+            or "")
 
         # Shell
         info.shell = os.environ.get("SHELL", os.environ.get("COMSPEC", "unknown"))

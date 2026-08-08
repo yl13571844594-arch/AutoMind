@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "1.4.5"
+version = "1.5.0"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
@@ -47,6 +47,16 @@ web = [
     "openai>=1.30.0",
     "httpx>=0.27.0",
 ]
+# 办公自动化工具（excel/word/pdf/calendar）。这些库不进核心依赖 ——
+# 只用对话功能的用户没道理被拖上一堆 Office 解析库；工具照常注册，
+# 缺库时返回可照抄的安装命令（见 automind/tools/_toolkit.py）。
+office = [
+    "openpyxl>=3.1",         # Excel 读写
+    "python-docx>=1.1",      # Word 读写
+    "pypdf>=4.0",            # PDF 解析与合并
+    "icalendar>=5.0",        # ICS 日历
+    "httpx>=0.27.0",         # web_search / http_request / im_integration
+]
 full = [
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
@@ -56,10 +66,19 @@ full = [
     "openai>=1.30.0",
     "anthropic>=0.30.0",
     "google-generativeai>=0.7.0",
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "pypdf>=4.0",
+    "icalendar>=5.0",
 ]
 dev = [
     "automind-agent[web]",   # 测试需 Web 栈（fastapi/uvicorn/httpx/openai）
     "pypdf>=4.0",            # RAG 知识库 PDF 解析测试
+    # 办公工具的依赖也进 dev：否则 CI 上 excel/word/calendar 的往返用例
+    # 只会走"缺库时给安装提示"那条分支，真正的读写逻辑一行都没被跑到。
+    "openpyxl>=3.1",
+    "python-docx>=1.1",
+    "icalendar>=5.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
 ]

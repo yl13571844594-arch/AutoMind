@@ -314,3 +314,44 @@ class TestFsRootAnchoring:
         with TestClient(srv.app, client=("127.0.0.1", 5555)) as c:
             r = c.get("/api/fs/list", params={"path": target})
         assert r.status_code == 403
+
+
+class TestWebSocketOriginGuard:
+    """WS 是任务执行主通道，且**不受同源策略约束** —— CORS 拦不住它。
+
+    v1.4.6 前：只有配置了 AUTOMIND_ALLOWED_ORIGINS 才校验，默认完全不校验，
+    任何网页都能 new WebSocket("ws://127.0.0.1:8765/ws") 驱动本机 Agent。
+    """
+
+    def _ok(self, origin: str) -> bool:
+        from automind import server as srv
+        return (not origin) or srv._ws_origin_ok(origin) or origin in srv._WS_ALLOWED_ORIGINS
+
+    @pytest.mark.parametrize("origin", [
+        "https://evil.example.com",
+        "http://localhost.evil.com",      # 前缀伪装
+        "http://127.0.0.1.evil.com",
+        "http://192.168.1.9:8765",        # 局域网页面
+        "null",
+    ])
+    def test_cross_origin_rejected_by_default(self, origin):
+        assert not self._ok(origin), f"默认配置放行了跨源 WS：{origin}"
+
+    @pytest.mark.parametrize("origin", [
+        "http://localhost:8765", "http://127.0.0.1:5173", "https://localhost", "http://[::1]:8765",
+    ])
+    def test_local_origins_allowed(self, origin):
+        assert self._ok(origin), f"本机来源被误拒：{origin}"
+
+    def test_no_origin_header_allowed(self):
+        """CLI / SDK / curl 不发 Origin；浏览器发起 WS 时一定会带且无法伪造。"""
+        assert self._ok("")
+
+    def test_guard_is_not_conditional_on_env(self):
+        """回归：不能再退回"配了环境变量才校验"。"""
+        import inspect
+
+        from automind import server as srv
+        src = inspect.getsource(srv.ws_endpoint)
+        assert "if _WS_ALLOWED_ORIGINS:" not in src, "来源校验不能再以环境变量为前提"
+        assert "_ws_origin_ok" in src

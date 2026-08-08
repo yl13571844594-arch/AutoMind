@@ -84,6 +84,14 @@ COMMERCIAL_FEATURES: dict[str, tuple[str, str]] = {
     "model_router": (EDITION_PRO, "模型智能路由（按任务复杂度分级选模型）"),
     "cost_dashboard": (EDITION_ENTERPRISE, "成本仪表盘（模型成本/缓存节省分析）"),
     "observability": (EDITION_PRO, "观测中心（执行流程可视化 + 实时看板）"),
+    # ── 内置工具的进阶能力（v1.5.0）──
+    # 分级粒度是"动作"而非整个工具：社区版能真正用起 Excel/Word/PDF 等基础读写，
+    # 只有少数进阶动作留给商业版。社区版**不实现**这些动作，运行时委派给
+    # automind_pro 的特性对象 —— 因此这里列出的每一项都对应真实现，
+    # 不存在"买了却提示不支持"的占位卖点。
+    "office_pro": (EDITION_PRO, "办公进阶（Excel 样式 / Word 模板套打 / PDF 水印加密）"),
+    "data_pro": (EDITION_PRO, "数据进阶（非 SQLite 数据库、写操作、批量导出）"),
+    "integration_pro": (EDITION_PRO, "集成进阶（富文本模板消息）"),
 }
 
 _EDITION_LABELS = {
