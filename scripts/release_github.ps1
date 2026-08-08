@@ -35,6 +35,13 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $repoRoot
 
+# 本机走本地代理（HTTPS_PROXY=127.0.0.1:22307），但它对 GitHub 会
+# **TLS handshake timeout**，而直连 api.github.com:443 完全可达 —— 与代码签名
+# 时间戳服务器踩的是同一个坑（见 desktop/sign.ps1 的注释）。
+# 故对 GitHub 相关域名绕过代理；其它目标仍按原代理走，不影响别的用途。
+$env:NO_PROXY = "github.com,.github.com,api.github.com,codeload.github.com," +
+                "objects.githubusercontent.com,uploads.github.com"
+
 function Fail($msg) { Write-Host "✗ $msg" -ForegroundColor Red; exit 1 }
 function Step($msg) { Write-Host "`n== $msg ==" -ForegroundColor Cyan }
 
