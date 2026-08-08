@@ -38,15 +38,19 @@ function Find-SignTool {
     }
     $cached = Get-Command signtool -ErrorAction SilentlyContinue
     if ($cached) { return $cached.Source }
-    foreach ($root in @("${env:ProgramFiles(x86)}\Windows Kits\10\bin",
-                        "$env:ProgramFiles\Windows Kits\10\bin",
-                        "$env:LOCALAPPDATA\AutoMindBuildTools")) {
-        if (Test-Path $root) {
-            $found = Get-ChildItem $root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-                Where-Object { $_.FullName -like "*x64*" } |
-                Sort-Object FullName -Descending | Select-Object -First 1
-            if ($found) { return $found.FullName }
-        }
+    foreach ($root in @("$env:LOCALAPPDATA\AutoMindBuildTools",
+                        "${env:ProgramFiles(x86)}\Windows Kits\10\bin",
+                        "$env:ProgramFiles\Windows Kits\10\bin")) {
+        if (-not (Test-Path $root)) { continue }
+        $all = @(Get-ChildItem $root -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue)
+        if ($all.Count -eq 0) { continue }
+        # 优先 x64（Windows Kits 按架构分目录：10.0.x\x64\signtool.exe），
+        # 但**没有 x64 目录时不能直接放弃** —— 从 NuGet 抽出来固定在
+        # AutoMindBuildTools\bin\ 的那份路径里就不含 "x64"，此前被这条过滤
+        # 一并排除，导致"signtool 明明在却报找不到"，进而产出未签名包。
+        $x64 = @($all | Where-Object { $_.FullName -like "*x64*" })
+        $pick = if ($x64.Count -gt 0) { $x64 } else { $all }
+        return ($pick | Sort-Object FullName -Descending | Select-Object -First 1).FullName
     }
     return $null   # 交由调用方回退到 Set-AuthenticodeSignature
 }

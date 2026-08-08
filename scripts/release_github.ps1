@@ -74,6 +74,12 @@ Write-Host ("✓ Windows 包已签名：" + $sig.SignerCertificate.Subject.Split
 # ── 1) 推送社区版 ──────────────────────────────────────────
 if (-not $SkipPush) {
     Step "推送 main（仅社区版）"
+    # gh auth login 只让 gh 自己拿到凭据，**不会**自动配好 git 的 credential
+    # helper —— 此时 gh api 能用，git push 却仍会去问用户名密码然后失败
+    # （本机实测：凭据管理器里没有 git:https://github.com 条目时就是这个现象）。
+    # setup-git 把 gh 注册成 https 的凭据助手，幂等，重复执行无副作用。
+    gh auth setup-git
+    if ($LASTEXITCODE -ne 0) { Fail "gh auth setup-git 失败" }
     $proTracked = (git ls-files pro/ | Measure-Object -Line).Lines
     if ($proTracked -ne 0) {
         Fail "pro/ 下有 $proTracked 个被跟踪的文件 —— 商业包不得同步，请先从索引移除"
