@@ -63,7 +63,14 @@ class ExcelTool(AbstractTool):
             if action in PRO_ACTIONS:
                 need("openpyxl")
                 return ok(self.name, **delegate_pro("office_pro", self.name, action, kwargs))
-            openpyxl = need("openpyxl")
+            need("openpyxl")                  # 依赖检查（给缺库时的友好提示）
+            # 这行看似多余，其实是**打包必需**：上面的 need() 走的是
+            # __import__("字符串")，PyInstaller 的静态分析看不见，openpyxl 就不会
+            # 被收进冻结包 —— 桌面版用户点"读表格"只会得到一句"请 pip install"，
+            # 而冻结应用根本没法 pip。改成真正的 import 语句让打包器能发现它。
+            # （word/pdf/calendar 一直是这个写法，唯独 excel 漏了，实测只有
+            #  openpyxl 没进 PYZ。spec 里另加了 hiddenimports 作双保险。）
+            import openpyxl  # noqa: PLC0415 - 懒加载，见 _toolkit 说明
 
             if action == "create":
                 return self._create(openpyxl, path, kwargs)

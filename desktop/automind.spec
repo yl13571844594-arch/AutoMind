@@ -27,6 +27,11 @@ hiddenimports = (
     collect_submodules("automind")
     + collect_submodules("uvicorn")
     + ["PIL.Image", "PIL.ImageDraw"]
+    # 办公工具的可选依赖：这些库靠 _toolkit.need() 动态导入（__import__("字符串")），
+    # PyInstaller 静态分析看不见。不显式声明就会漏进冻结包 —— 桌面版用户点
+    # "读表格"只会得到"请 pip install openpyxl"，而冻结应用没法 pip。
+    # v1.5.0 实测：excel 因缺静态 import 语句，openpyxl 确实没被打进去。
+    + ["openpyxl", "docx", "pypdf", "icalendar", "httpx"]
 )
 # 托盘后端按平台收集（win32 / AppIndicator / Cocoa）
 if IS_WIN:
