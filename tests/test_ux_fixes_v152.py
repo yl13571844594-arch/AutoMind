@@ -304,3 +304,93 @@ class TestAsyncEndpointsOffloadIO:
         assert "to_thread" in src, f"{endpoint} 仍在事件循环上直接读写磁盘"
         for blocking in ("read_text(", "write_text(", "iterdir("):
             assert blocking not in src, f"{endpoint} 里仍有裸的 {blocking}"
+
+
+# ── 6. 端口被占用时必须说清楚"你看到的是谁" ────────────────────
+
+class TestPortConflict:
+    """"代码改了、浏览器里版本没变"的真凶。
+
+    端口被别的 AutoMind（多为桌面版安装包）占着时，uvicorn 只在日志里留一行
+    英文 bind 错误就**静默退出且返回码为 0**，而屏幕上最后停留的是
+    "打开浏览器访问 http://127.0.0.1:8765" —— 用户照做，打开的是那个一直在跑的
+    旧实例，于是得出"新版本没生效"的结论。
+    """
+
+    def test_free_port_probes_as_available(self):
+        import socket
+
+        import automind.server as srv
+
+        with socket.socket() as sk:      # 先要一个确定空闲的端口号
+            sk.bind(("127.0.0.1", 0))
+            free = sk.getsockname()[1]
+        assert srv._probe_port("127.0.0.1", free) is None
+
+    def test_occupied_port_is_detected(self):
+        import socket
+
+        import automind.server as srv
+
+        sk = socket.socket()
+        sk.bind(("127.0.0.1", 0))
+        sk.listen(1)
+        port = sk.getsockname()[1]
+        try:
+            info = srv._probe_port("127.0.0.1", port)
+            assert info is not None, "端口被占用却报告空闲 —— 启动仍会静默失败"
+            assert info["port"] == port
+            # 占用者不是 AutoMind → 版本为空，措辞要如实说"未知程序"
+            assert info["version"] == ""
+            msg = srv._port_conflict_message(info)
+            assert "未知程序" in msg and str(port) in msg
+        finally:
+            sk.close()
+
+    def test_unbindable_address_is_not_reported_as_a_port_conflict(self):
+        """本机没有这个 IP ≠ 端口被占 —— 误报会把用户引到完全错误的方向。"""
+        import automind.server as srv
+
+        assert srv._probe_port("203.0.113.7", 8765) is None
+
+    def test_message_names_the_version_you_will_actually_see(self):
+        import automind.server as srv
+
+        msg = srv._port_conflict_message({
+            "host": "127.0.0.1", "port": 8765, "version": "1.5.0", "frozen": True})
+        assert "v1.5.0" in msg, "必须点名占用者的版本"
+        assert srv.__version__ in msg, "也要点名用户以为自己启动的版本"
+        assert "http://127.0.0.1:8765" in msg
+        assert "--port 8766" in msg, "要给出可直接照抄的换端口命令"
+
+    def test_same_version_occupant_skips_the_confusing_warning(self):
+        """占用者版本一致时不该吓唬用户说"你看到的不是你启动的那个"。"""
+        import automind.server as srv
+
+        msg = srv._port_conflict_message({
+            "host": "0.0.0.0", "port": 8765,
+            "version": srv.__version__, "frozen": False})
+        assert "而不是你刚启动的" not in msg
+        assert "另一个 AutoMind 实例" in msg
+
+    def test_main_aborts_before_printing_the_open_browser_banner(self, monkeypatch,
+                                                                capsys):
+        """端口冲突时绝不能再打印"打开浏览器访问…"，那正是误导的来源。"""
+        import automind.server as srv
+
+        monkeypatch.setattr(sys, "argv", ["server"])
+        monkeypatch.setattr(srv, "_probe_port", lambda h, p: {
+            "host": h, "port": p, "version": "1.5.0", "frozen": True})
+
+        def _boom(*a, **k):
+            raise AssertionError("端口冲突时不应走到 uvicorn")
+        monkeypatch.setitem(sys.modules, "uvicorn",
+                            type(sys)("uvicorn"))
+        sys.modules["uvicorn"].run = _boom
+
+        with pytest.raises(SystemExit) as e:
+            srv.main()
+        assert e.value.code == 1, "静默返回 0 会让脚本/调度误判服务已起来"
+        out = capsys.readouterr()
+        assert "打开浏览器访问" not in (out.out + out.err)
+        assert "已被占用" in out.err

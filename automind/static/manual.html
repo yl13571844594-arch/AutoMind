@@ -921,7 +921,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.5.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.5.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1044,7 +1044,7 @@ automind --list-skills    automind --list-providers</code></pre>
       <span class="cl-ver">v1.5.2</span><span class="cl-date">2026-08-12</span>
       <span class="cl-badge">当前版本</span>
     </div>
-    <div class="cl-sum">开箱即用 — 第一次跑就会撞上的 6 个问题</div>
+    <div class="cl-sum">开箱即用 — 第一次跑就会撞上的 7 个问题</div>
     <ul>
       <li><b>🖥 命令行启动不再直接崩溃</b>：中文版 Windows 的命令行窗口默认用 GBK 编码，
         而界面里的方框线、✅ 这类符号它显示不了 —— 此前不是显示成乱码，而是
@@ -1071,6 +1071,12 @@ automind --list-skills    automind --list-providers</code></pre>
         <b>连正在逐字输出的对话也会一起卡住</b>。现在这些操作都挪到后台线程。</li>
       <li><b>📦 <code>automind</code> 命令可用</b>：此前照说明书敲 <code>automind</code>
         会提示"不是内部或外部命令"。现在已随包安装，命令行用法与文档一致。</li>
+      <li><b>🔌 端口被占用会说清楚，不再让你看着旧版本发懵</b>：如果已经有一个
+        AutoMind（多半是安装好的桌面版）在跑，新启动的那个其实<b>根本没起来</b> ——
+        但屏幕上最后一句仍是"打开浏览器访问 http://127.0.0.1:8765"。你照做，
+        看到的是那个一直在跑的旧版本，于是以为"更新没生效"。现在启动前会先检查端口，
+        并直接告诉你：<i>"端口 8765 已被占用，占用者 AutoMind v1.5.0（桌面版安装包）；
+        现在用浏览器打开看到的是它，而不是你刚启动的 v1.5.2"</i>，并给出换端口的命令。</li>
     </ul>
   </div>
 

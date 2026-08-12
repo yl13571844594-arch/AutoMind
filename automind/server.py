@@ -3553,6 +3553,74 @@ def _bootstrap_auth(host: str) -> str:
             "  浏览器访问时在地址后加 ?token=<令牌>，API 调用用 Authorization: Bearer <令牌>")
 
 
+def _probe_port(host: str, port: int) -> dict | None:
+    """端口空闲返回 None；被占用则返回占用者信息。
+
+    只做一次真实 bind —— `connect` 探测在 Windows 上会漏判（防火墙静默丢包），
+    而"能不能绑上"才是启动会不会失败的唯一判据。
+    """
+    import errno
+    import socket
+
+    probe_host = host or "127.0.0.1"
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sk:
+        try:
+            sk.bind((probe_host, port))
+            return None
+        except OSError as e:
+            # 只认"地址已被占用"。绑不上还有别的原因（IPv6 地址、本机没有该 IP、
+            # 特权端口……），那些一律交回 uvicorn 报它自己的错，别误报成端口冲突
+            occupied = (e.errno in (errno.EADDRINUSE, errno.EACCES)
+                        or getattr(e, "winerror", 0) in (10013, 10048))
+            if not occupied:
+                return None
+
+    info: dict[str, Any] = {"host": probe_host, "port": port,
+                            "version": "", "frozen": False}
+    # 占用者是不是另一个 AutoMind？知道了才能把话说准
+    reach = "127.0.0.1" if probe_host in ("0.0.0.0", "::", "") else probe_host
+    try:
+        import urllib.request
+        # 本机地址必须绕开系统代理，否则代理会把 127.0.0.1 也接管掉
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://{reach}:{port}/api/health", timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        if isinstance(data, dict) and data.get("status") == "ok":
+            info["version"] = str(data.get("version") or "")
+            info["frozen"] = bool((data.get("paths") or {}).get("frozen"))
+    except Exception:
+        pass
+    return info
+
+
+def _port_conflict_message(info: dict) -> str:
+    """端口冲突的中文说明 —— 重点是回答"那我浏览器里看到的到底是谁"。"""
+    port, reach = info["port"], info["host"]
+    if reach in ("0.0.0.0", "::", ""):
+        reach = "127.0.0.1"
+    url = f"http://{reach}:{port}"
+    lines = [f"\n✗ 端口 {port} 已被占用，本次启动已中止。\n"]
+    if info["version"]:
+        kind = "桌面版安装包" if info["frozen"] else "另一个 AutoMind 实例"
+        lines.append(f"  占用者：AutoMind v{info['version']}（{kind}）")
+        if info["version"] != __version__:
+            # 这正是"改完代码重启，浏览器里版本却没变"的真凶：新进程压根没起来，
+            # 浏览器打开的仍是那个一直在跑的旧实例
+            lines.append(
+                f"  ⚠ 现在用浏览器打开 {url} 看到的是它 —— v{info['version']}，"
+                f"而不是你刚启动的 v{__version__}。")
+    else:
+        lines.append("  占用者：未知程序（该端口上的服务不响应 AutoMind 健康检查）")
+    lines.append("\n  解决办法（任选其一）：")
+    if info["version"] and info["frozen"]:
+        lines.append("    · 退出已在运行的 AutoMind 桌面版（关闭其窗口，"
+                     "或在任务管理器中结束 AutoMind.exe），再重新启动；")
+    else:
+        lines.append("    · 关闭占用该端口的程序后重新启动；")
+    lines.append(f"    · 换一个端口：python -m automind.server --port {port + 1}")
+    return "\n".join(lines)
+
+
 def main():
     import argparse
 
@@ -3567,6 +3635,16 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--reload", action="store_true")
     args = parser.parse_args()
+
+    # 端口预检必须在横幅之前。此前的顺序是"先打横幅再交给 uvicorn"：端口被占
+    # 时 uvicorn 只在日志里留一行英文 bind 错误就**静默退出（返回码 0）**，
+    # 而屏幕上最后停留的是"打开浏览器访问 http://127.0.0.1:8765"。用户照做，
+    # 打开的其实是那个一直在跑的旧实例 —— 于是得出"代码改了、版本没更新"。
+    conflict = _probe_port(args.host, args.port)
+    if conflict:
+        print(_port_conflict_message(conflict), file=sys.stderr, flush=True)
+        sys.exit(1)
+
     auth_note = _bootstrap_auth(args.host)
     print(f"""
 ╔══════════════════════════════════════════════════╗
@@ -3578,10 +3656,20 @@ def main():
 ║  按 Ctrl+C 停止服务器                             ║
 ╚══════════════════════════════════════════════════╝
 {auth_note}
-""")
+""", flush=True)   # 不 flush 的话横幅会被 uvicorn 的日志插到后面去
+
     import uvicorn
+    started = time.time()
     uvicorn.run("automind.server:app", host=args.host, port=args.port,
                 reload=args.reload, log_level="info")
+    # uvicorn 绑定失败时不抛异常、不设返回码，只是立刻返回。兜住这种情况，
+    # 别让脚本/任务调度以为服务起来了。
+    if time.time() - started < 2.0:
+        print(f"\n✗ 服务器启动后立即退出（未能监听 {args.host}:{args.port}）。"
+              f"\n  请查看上方日志；如提示地址已被使用，换端口："
+              f"python -m automind.server --port {args.port + 1}",
+              file=sys.stderr, flush=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
