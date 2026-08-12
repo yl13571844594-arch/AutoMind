@@ -226,16 +226,31 @@ class TaskDependencyGraph:
         if goal:
             goal.status = GoalStatus.FAILED
 
-    def _add_goal_recursive(self, goal: Goal) -> None:
+    def _add_goal_recursive(self, goal: Goal, _seen: set[int] | None = None) -> None:
+        # 用对象身份去重：目标树若被写成真正的环（子节点里挂着自己的祖先），
+        # 无防护的递归会直接 RecursionError 把进程打挂 —— 而且是在
+        # check_cycles() 之前，连"检测到环"的机会都没有。
+        # 按 id() 而非 goal.id 去重：LLM 生成重复 goal.id 是另一回事
+        # （那种情况对象树有限、id 图成环，交给 _resolve_cycles 处理）。
+        if _seen is None:
+            _seen = set()
+        if id(goal) in _seen:
+            return
+        _seen.add(id(goal))
         self.graph.add_node(goal.id, goal=goal)
         self._goal_map[goal.id] = goal
         for child in goal.children:
-            self._add_goal_recursive(child)
+            self._add_goal_recursive(child, _seen)
 
-    def _build_edges(self, goal: Goal) -> None:
+    def _build_edges(self, goal: Goal, _seen: set[int] | None = None) -> None:
+        if _seen is None:
+            _seen = set()
+        if id(goal) in _seen:
+            return
+        _seen.add(id(goal))
         for child in goal.children:
             self.graph.add_edge(goal.id, child.id)
-            self._build_edges(child)
+            self._build_edges(child, _seen)
 
         for i, g1 in enumerate(goal.children):
             for g2 in goal.children[i + 1:]:

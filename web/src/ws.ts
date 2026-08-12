@@ -329,6 +329,42 @@ function handle(data: any) {
       break;
     }
 
+    // 每次 LLM 调用结束就更新 token 数（v1.5.1）。
+    // 此前流式回答只在整段生成完才刷一次，长回答期间面板上一直是 0，
+    // 看起来像"没在计费/卡住了"。后端现在按调用推 usage_update。
+    case 'usage_update': {
+      const cum = data.cumulative || {};
+      if (typeof cum.total_tokens === 'number') {
+        panel().setStats({ tokens: cum.total_tokens });
+      }
+      break;
+    }
+
+    // 工具失败单独标红 —— 此前混在 step_action 流水里看不出来（v1.5.1）
+    case 'tool_error': {
+      const streak = data.streak || 1;
+      const tail = data.circuit_open
+        ? `（已连续失败 ${streak} 次，停止重试）`
+        : streak > 1 ? `（第 ${streak} 次失败）` : '';
+      execTrace(taskMode(), `⛔ 工具失败：${data.tool}${tail}`,
+        esc(String(data.error || '')), 'error');
+      break;
+    }
+
+    // 心跳：长调用期间证明"还活着"，刷新进度条上的阶段文案
+    case 'heartbeat': {
+      const label = data.phase === 'streaming' ? '正在生成回答' : '正在思考';
+      panel().patchProgress({ label: `${label}…` });
+      break;
+    }
+
+    // 任务前自检发现的问题（LLM 未配置 / 目录不可写等）
+    case 'preflight_warning': {
+      const items: string[] = data.problems || [];
+      if (items.length) message.warning(`任务前检查发现问题：${items.join('；')}`, 6);
+      break;
+    }
+
     case 'plan_created': {
       const rows: PlanRow[] = (data.steps || []).map((s: any, i: number) => ({
         text: `${i + 1}. ${s.description}${s.tool ? ` [${s.tool}]` : ''}`,

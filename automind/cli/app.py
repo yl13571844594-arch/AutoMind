@@ -7,6 +7,29 @@ import asyncio
 import sys
 
 from automind.core.config import AgentConfig
+from automind.core.console import enable_utf8_console
+
+
+def _align_provider(config: AgentConfig, explicit: bool) -> None:
+    """把默认模型对齐到实际配了 Key 的提供商，并打印一句中文说明。
+
+    代码默认 openai/gpt-4o，而多数用户只配了 DeepSeek 一家的 Key——
+    此前的表现是任务跑起来才报"LLM 未初始化 provider='openai'"，
+    命令行上看不出该去哪改。这里在开跑前就把话说清楚。
+    """
+    from automind.core import provider_resolver as _pr
+
+    provider, model, note = _pr.resolve(
+        config.llm.provider, config.llm.model, config.llm.api_key)
+    if not note:
+        return
+    # 用户用 --provider 显式指定时不擅自改换，只提示 Key 没配
+    if not explicit and provider != config.llm.provider:
+        config.llm.provider = provider
+        config.llm.model = model
+        config.llm.api_key = _pr.env_api_key(provider)
+        config.llm.api_base = ""
+    print(f"提示：{note}")
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -127,6 +150,9 @@ async def run_cli(args: argparse.Namespace) -> int:
             print(f"  - {s['name']}: {s['description']}")
         return 0
 
+    # 到这里才真的要调模型 —— --list-* 只是列信息，不该报"没配 Key"
+    _align_provider(config, explicit=bool(args.provider))
+
     # 恢复检查点 — 载入状态并继续未完成的任务
     if args.restore:
         from automind.agent import AutoMindAgent
@@ -176,6 +202,9 @@ async def run_cli(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """CLI 入口点。"""
+    # 必须在任何输出之前：中文 Windows 控制台默认 GBK，
+    # 任务报告里的 emoji / 制表符一写就 UnicodeEncodeError 崩进程。
+    enable_utf8_console()
     parser = create_parser()
     args = parser.parse_args()
 
@@ -204,6 +233,7 @@ async def _run_repl(args: argparse.Namespace) -> None:
         config.llm.model = args.model
 
     config.execution.mode = args.mode
+    _align_provider(config, explicit=bool(args.provider))
 
     from automind.agent import AutoMindAgent
     from automind.cli.tui import run_rich_repl

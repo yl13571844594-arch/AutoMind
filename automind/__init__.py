@@ -5,7 +5,7 @@
 """
 
 # 版本号唯一数据源 — server.py 与 pyproject.toml 均以此为准（§14.1）
-__version__ = "1.5.0"
+__version__ = "1.5.2"
 __all__ = [
     "AutoMindAgent",
     "AgentConfig",

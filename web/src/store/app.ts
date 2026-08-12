@@ -19,6 +19,8 @@ export const EDITION_LABELS: Record<string, string> = {
 export interface StatusInfo {
   provider: string; model: string; llm_ready: boolean; has_api_key: boolean;
   llm_error: string; project: string; approval_mode: string;
+  // 自动选路提示（如"已检测到 DeepSeek Key，将使用 deepseek-chat"）；无提示时为空串
+  llm_notice?: string;
   mode_specific: boolean; interaction: string;
   quota?: { daily_used: number; daily_limit: number | null; workspace_limit: number | null };
 }

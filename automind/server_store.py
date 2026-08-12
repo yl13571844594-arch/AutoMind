@@ -14,6 +14,14 @@ import re
 import time
 from pathlib import Path
 
+from automind.core.logging import get_logger
+
+logger = get_logger("automind.store")
+
+
+class SessionSaveError(RuntimeError):
+    """会话历史落库失败（已重试）。调用方应把它告诉用户，而不是吞掉。"""
+
 
 class Store:
     """Web 层持久化状态容器（配置 / API Key / 提供商 / 对话与会话历史）。"""
@@ -188,11 +196,41 @@ class Store:
             self.session_histories[sid] = hist
         return self.session_histories[sid]
 
+    #: 落库失败时的重试次数与退避（磁盘忙 / SQLite 短暂加锁是最常见诱因）
+    _SAVE_RETRIES = 3
+    _SAVE_BACKOFF = 0.15
+
     def save_session_history(self, sid: str) -> None:
+        """把会话历史落库。失败会重试，仍失败则**记日志并向上抛**。
+
+        原实现是 `except Exception: pass` —— 写盘失败时聊天记录**静默丢失**，
+        用户毫不知情，下次打开发现对话没了也无从排查。落库失败是必须让人
+        知道的事：先重试（多数是 SQLite 瞬时加锁），仍不行就记 error 并抛出，
+        由调用方决定是否推送给前端。
+        """
+        import time as _time
+
         sid = sid or "default"
         hist = self.session_histories.get(sid, [])[-200:]
+        # 内存态先更新：即便落库失败，当前会话本身仍可继续用
         self.session_histories[sid] = hist
-        try:
-            self._db().session_save(sid, hist)
-        except Exception:
-            pass
+
+        last: Exception | None = None
+        for attempt in range(self._SAVE_RETRIES):
+            try:
+                self._db().session_save(sid, hist)
+                if attempt:
+                    logger.info("session_history_saved_after_retry",
+                                sid=sid, attempts=attempt + 1)
+                return
+            except Exception as e:
+                last = e
+                if attempt < self._SAVE_RETRIES - 1:
+                    _time.sleep(self._SAVE_BACKOFF * (attempt + 1))
+
+        logger.error("session_history_save_failed", sid=sid,
+                     messages=len(hist), error=str(last),
+                     error_type=type(last).__name__)
+        raise SessionSaveError(
+            f"聊天记录保存失败（已重试 {self._SAVE_RETRIES} 次）：{last}"
+        ) from last

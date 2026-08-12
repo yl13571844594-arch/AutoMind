@@ -1,6 +1,6 @@
 // 设置弹窗四件套：🖥 模型配置 / 🔑 API Keys / ⚙ 通用设置 / 🔌 Agent 集成。
 import {
-  App, Button, Checkbox, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
+  Alert, App, Button, Checkbox, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiGet, apiPost } from '../../api/client';
@@ -29,6 +29,7 @@ function ModelModal() {
   const [modeModels, setModeModels] = useState<any>({ default: {}, modes: {} });
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const [notice, setNotice] = useState('');
 
   useEffect(() => {
     if (!open) return;
@@ -38,6 +39,7 @@ function ModelModal() {
       ]);
       setProviders(prov);
       setKeys(k);
+      setNotice(st.llm_notice || '');
       setProvider(st.provider);
       setModel(st.model || '');
       setApiBase(st.api_base || '');
@@ -106,6 +108,9 @@ function ModelModal() {
   return (
     <Modal title="🖥 模型配置" open={open} onCancel={close} width={640} footer={null}>
       <Paragraph type="secondary" style={{ fontSize: '.86em' }}>选择提供商与模型，配置即时生效（自动重建连接）。</Paragraph>
+      {/* 服务端按实际配到的 Key 自动选路时，把原因摆在最显眼处 —— 此前用户只会
+          看到"模型连接失败"，完全不知道该来这里换一家 */}
+      {notice && <Alert type="info" showIcon message={notice} style={{ marginBottom: 12 }} />}
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <div>
           <Text strong>LLM 提供商</Text>

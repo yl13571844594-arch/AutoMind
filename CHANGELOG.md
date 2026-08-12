@@ -2,6 +2,126 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [1.5.2] - 2026-08-12
+
+**开箱即用专版：6 项"第一次跑就会撞上"的缺陷**
+
+这一版没有新功能，全部是新用户按 README 敲第一条命令就会遇到的问题。
+
+### 修复
+
+- **控制台 GBK 编码崩溃（影响面最大）**：中文 Windows 控制台默认代码页 936，
+  `sys.stdout` 是 `cp936` + `errors='strict'`，写一个 `╔` 或 `✅` 就是
+  `UnicodeEncodeError` —— **不是乱码，是整个进程崩掉**。受影响的是**所有**
+  控制台路径：`python -m automind.server` 启动横幅、CLI 任务执行报告、
+  REPL/TUI 界面。`launch.bat` 里的 `chcp 65001` 只掩盖了一个入口，照 README
+  直接敲命令的用户拿到的仍是崩溃栈。新增 `automind/core/console.py`：进程内
+  把控制台代码页切到 65001（**退出时还原**，不给用户的 shell 留副作用），
+  并把 stdout/stderr 重配为 UTF-8 + `errors="replace"` —— 即便代码页切换失败
+  （无控制台/被重定向）也只会显示替代字符，永不再抛异常。
+- **默认模型与实际 Key 不匹配**：代码默认 `provider=openai` / `model=gpt-4o`，
+  而多数用户只配了 DeepSeek 一家的 Key，结果是启动即 `llm_init_failed
+  provider='openai'`，界面只说"模型连接失败"，用户根本不知道要去设置里换一家。
+  新增 `automind/core/provider_resolver.py`：**用户尚未显式选过提供商时**自动
+  对齐到配得起的那家，并给一句明确的中文提示（"未检测到 OpenAI 的 API Key，
+  已检测到 DeepSeek Key，将使用 deepseek-chat"）。CLI 直接打印，Web 经
+  `/api/status` 的 `llm_notice` 字段返回。用户**显式**选了某家时不擅自改换，
+  只提示 Key 未配置。
+  · 顺带把 provider → 环境变量的映射收敛为单一数据源 —— 此前 `config.py` /
+  `server_store.py` / `server.py` 各写一份，`config.py` 那份漏了
+  `moonshot`/`qwen`/`glm`/`gemini`/`dashscope` 等别名。
+- **社区版并发任务共享全局 Agent 状态**：`_acquire_run_agent()` 在没有企业版
+  会话池时**直接返回全局 `_agent`**，而 WebSocket 路径压根没调用它。该实例的
+  `_interaction`（交互模式）、`_mode`、`context_mgr`（上下文）、`_current_plan`、
+  `llm.usage`（token 计数）全被并发任务共用 —— 开两个标签页同时跑（上限 8 并发）
+  会出现：A 的"对话"模式被 B 的"循环编程"覆盖、两边上下文互相串、token 统计被
+  对方 `reset()` 清零，**且一声不吭**。新增 `AutoMindAgent.clone_for_session()`：
+  共享重且只读的部分（工具/技能注册表、记忆库、项目索引、环境探测），只独享
+  执行态，代价是毫秒级。REST 与 WS 两条路径均改为先取会话 Agent 再切模型。
+- **切模型/切模式卡 2~3 秒**：`_apply_mode_model()` → `_rebuild_agent()` 每次都
+  完全重建 Agent（重新 `AgentConfig.auto_load` 扫盘、重建 ChromaDB、重注册全部
+  工具与技能、重扫项目索引），而真正变化的只有一个模型名。新增
+  `AutoMindAgent.switch_llm()` 只替换 LLM 后端，并同步规划器/执行器/反思模块
+  持有的 `llm` 引用（只换 `agent.llm` 会出现"界面显示已切到 B、实际仍在用 A"）。
+  设置面板的模型/地址/Key 变更同样改走这条路径。
+  · **连带修复（真正的大头）**：只换 LLM 后仍要 1.15 秒，profile 显示 **97%
+  花在 `SSLContext.load_verify_locations`** —— 解析整个 CA 证书包单次约 380ms，
+  而 httpx 每建一个客户端要建 3 个（直连 + 两个代理传输）。新增全进程共享的
+  `shared_ssl_context()`，各 provider 复用同一个上下文（`follow_redirects`
+  与连接池上限对齐 SDK 自带客户端，避免中转代理跳转行为变化）。
+  实测：**切模型 1150ms → 0.7ms，会话克隆 1150ms → 1.3ms**，整体重建 2.2s → 1.0s。
+  · **连带修复**：`OpenAIProvider` / `AnthropicProvider` 此前沿用基类的空
+  `close()`，httpx 连接池从不释放；每会话一个客户端后这会持续泄漏，已补上。
+- **async 端点内同步文件 IO 阻塞事件循环**：`api_fs_list` / `api_preview_file` /
+  `api_files_tree` / `api_files_read` / `api_files_write` / `api_changes_diff`
+  在 `async def` 里直接 `iterdir` / `read_text` / `write_text`。单次是毫秒级，
+  但并发时会把**整个事件循环**顶住 —— 连正在流式输出的 WebSocket 一起卡。
+  全部挪进 `asyncio.to_thread()`；`/api/config` 的配置落盘同样处理。
+- **`automind` 命令不存在**：包未安装，用户按 README 敲 `automind ...` 得到
+  command not found。已 `pip install -e ".[web]"`，`automind` 命令与 README 对齐。
+
+### 文档
+
+- 用户手册（HTML / Markdown）更新日志章节新增 v1.5.2 条目。
+
+新增 25 条回归测试（`tests/test_ux_fixes_v152.py`），覆盖 GBK 流不再抛异常、
+提供商回退选路、会话克隆的共享/独享边界、`switch_llm` 不重建注册表、
+以及各 async 端点确实走了线程池。
+
+## [1.5.1] - 2026-08-09
+
+**可靠性与可观测性专版：5 项静默失败 + 3 项体验缺口**
+
+修复过程中另外发现并修掉 6 处叠加缺陷，均在下文标注。
+
+### 可靠性
+
+- **Q4 · 循环依赖检测到却不处理**：`_resolve_cycles` 原本是 `return root` ——
+  检测到环什么也没做，随后 `topological_order()` 直接抛
+  "Dependency graph contains a cycle!"。现在断开闭合环的**回边**（保留
+  `A→B→C` 正常分解链，破坏最小），迭代重检直到无环。
+  · **连带修复**：`_add_goal_recursive` 与 `Goal.all_children()` 都是无防护递归，
+  目标树真成环时在 `check_cycles()` **之前**就 RecursionError 爆栈 ——
+  消环逻辑压根没机会运行。均加对象身份去重。
+- **Q5 · 两处空实现**：`plan.updated_at = plan.updated_at` 是自赋值（回溯后
+  时间戳从不推进）；datalog 的 `^` 推导分支是 `pass`，规则**永远推不出新事实**。
+  · **连带修复三处**：body 专有变量（`p(X,Y),p(Y,Z)` 里的 `Y`）不参与绑定，
+  连接查询必然失配；跨 body 合并用 `{**prev,**new}` 静默覆盖，等于不校验
+  连接条件；**常量与变量名混存同一字典**，常量被当变量名传给 `_match`，
+  `ask("grandparent","alice","bob")` 这种不成立的查询会返回 True。
+  只修 `^` 会把假阴性变成假阳性，故重写了 `_apply_rule`。
+  · `derive()` 的去重用 `ask()`，而 `query()` 会应用规则 —— 对任何可推导事实
+  都返回 True，导致一条也不物化。改为只查已存储事实。
+- **Q1 · 聊天历史静默丢失**：`save_session_history` 的 `except: pass` 让写盘
+  失败悄无声息。现在 3 次退避重试 → 仍失败则 `logger.error` + 抛
+  `SessionSaveError`；WS 路径转成 `history_save_failed` 事件推前端，
+  且**不中断任务**（回答已生成，不该因存档失败整体失败）。
+- **Q2 · Token 预算保护空转**：`ResourceManager` 实例化后从未被调用。新增与
+  用量回调对称的 `pre_call_hook`：≥80% 推 `budget_warning` 并压缩上下文，
+  ≥100% 推 `budget_exceeded` 并**拒绝调用**。
+  · **连带修复**：`_TokenTrackingLLM` 只代理 `__getattr__` 不代理写，
+  回调全挂在包装器上、真实后端永远读不到 —— "设了但不生效"。补 `__setattr__` 转发。
+  · `ContextManager.compress` 是协程，同步调用等于没压缩还泄漏协程，已改 await。
+- **Q3 · 静默吞异常**：全库实测 93 处（不止 63）。**不做无差别转换** ——
+  尽力而为的清理加日志只是噪音。按"失败是否真正伤到用户"筛出 10 处收敛为
+  具名日志事件：任务历史落库（2）、工具禁用未生效、MCP 重连失败、
+  token 记账失败、流式用量解析、项目索引缺失、三类技能加载失败。
+
+### 体验
+
+- **Q6 · token 数要等整段回答生成完才跳一次**：流式用量此前只在末尾的
+  `<!--STREAM_USAGE:-->` 标记里带出。改用 `__init_subclass__` 给全部 provider
+  统一挂旁路上报，每次调用结束推 `usage_update`，前端实时累加。
+  **chunk 原样透传，标记格式未动**（符合"不改消息流格式"约束）。
+- **Q7 · 任务卡住无从判断**：服务端"连上了但不吐字"时底层不超时，任务无限期
+  挂着。新增单轮**硬超时**（默认 300s，流式按累计时长逐块检查）+ 每 5 秒
+  **心跳事件**，前端显示"正在思考 / 正在生成回答"。
+- **Q8 · 工具失败反复重试且不可见**：同一工具连续失败 3 次即**熔断**，本轮
+  不再调用并把原因回给模型；`tool_error` 事件让前端标红并显示连续失败次数；
+  新增 `preflight_check` 任务前自检（LLM 就绪 / 工具非空 / 项目目录可写）。
+
+新增 58 条回归测试，全量 **669 通过 / 1 跳过**，ruff 全通过。
+
 ## [1.5.0] - 2026-08-07
 
 **内置 12 个办公与集成工具 —— 社区版开放基础能力，进阶动作由专业版实现**

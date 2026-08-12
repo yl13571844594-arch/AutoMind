@@ -65,6 +65,8 @@ class ReActExecutor:
         self.thoughts: list[str] = []
         self.actions: list[tuple[ToolCall, ToolResult]] = []
         self.validations: list[dict] = []  # 自动验证记录
+        # 工具名 → {streak: 连续失败次数, last: 最后一次原因}
+        self._tool_failures: dict[str, dict] = {}
 
     _CODE_TOOLS = ("file_write", "file_edit", "file_multi_edit")
 
@@ -207,15 +209,28 @@ class ReActExecutor:
                     continue
                 # B-03 修复：工具不存在 / 参数不合法等异常若逸出会整体崩溃 ReAct 循环，
                 # 这里兜底为失败结果，让 LLM 据此继续决策而非丢失全部上下文。
+                # 熔断：同一工具连续失败 N 次后不再重试。
+                # 此前模型会对着同一个坏工具反复调用直到迭代上限耗尽 ——
+                # 既烧 token 又拖时间，而失败原因从头到尾没人看见。
+                tripped = self._breaker_reason(tc.name)
+                if tripped:
+                    results.append(ToolResult(
+                        tool_name=tc.name, success=False, error=tripped))
+                    continue
                 try:
                     args = tc.arguments if isinstance(tc.arguments, dict) else {}
                     result = await self.tool_registry.dispatch(tc.name, **args)
                     # TDD 内环：代码修改后立即语法验证并注入观察
-                    results.append(self._auto_validate_result(tc, result))
+                    result = self._auto_validate_result(tc, result)
+                    self._record_tool_outcome(tc.name, result.success,
+                                              result.error or "")
+                    results.append(result)
                 except Exception as e:
+                    reason = f"{type(e).__name__}: {e}"
+                    self._record_tool_outcome(tc.name, False, reason)
                     results.append(ToolResult(
                         tool_name=tc.name, success=False,
-                        error=f"工具执行异常：{type(e).__name__}: {e}"))
+                        error=f"工具执行异常：{reason}"))
 
             for tc, result in zip(response.tool_calls, results):
                 self.actions.append((tc, result))
@@ -233,6 +248,37 @@ class ReActExecutor:
             return (self.thoughts[-1] +
                     "\n\n（提示：已达到最大迭代步数，以上为当前进展。）")
         return "已达到最大迭代步数，任务可能尚未完成。"
+
+    #: 同一工具连续失败达到此次数即熔断，本轮任务内不再调用
+    FAILURE_THRESHOLD = 3
+
+    def _record_tool_outcome(self, name: str, success: bool, error: str) -> None:
+        """记录一次工具调用结果；连续失败到阈值即熔断并留痕。"""
+        st = self._tool_failures.setdefault(name, {"streak": 0, "last": ""})
+        if success:
+            st["streak"] = 0
+            st["last"] = ""
+            return
+        st["streak"] += 1
+        st["last"] = (error or "")[:300]
+        logger.warning("tool_call_failed", tool=name,
+                       streak=st["streak"], error=st["last"])
+        if st["streak"] == self.FAILURE_THRESHOLD:
+            logger.error("tool_circuit_open", tool=name,
+                         threshold=self.FAILURE_THRESHOLD, last_error=st["last"])
+
+    def _breaker_reason(self, name: str) -> str:
+        """熔断已触发时返回给模型看的说明，否则返回空串。"""
+        st = self._tool_failures.get(name)
+        if not st or st["streak"] < self.FAILURE_THRESHOLD:
+            return ""
+        return (f"工具「{name}」已连续失败 {st['streak']} 次，已停止调用以免空转。"
+                f"最后一次的失败原因：{st['last']}。"
+                f"请改用其它方式完成该步骤，或先修复该工具的配置。")
+
+    def tool_failure_report(self) -> dict[str, dict]:
+        """本轮各工具的失败情况（供上层推送给前端标红）。"""
+        return {k: dict(v) for k, v in self._tool_failures.items() if v["streak"]}
 
     async def _gate(self, tc: ToolCall) -> tuple[bool, str]:
         """工具调用前的权限门控。返回 (是否允许, 原因)。"""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -42,8 +43,10 @@ class _TokenTrackingLLM:
         resp = await self._backend.generate(messages, tools=tools, stop=stop)
         try:
             self.usage.add(resp)
-        except Exception:
-            pass
+        except Exception as e:
+            # 记账失败 = token 统计与成本估算全错，而界面照常显示一个数字，
+            # 用户没法察觉。宁可刷日志也不能让它无声无息。
+            logger.warning("token_usage_track_failed", error=str(e))
         return resp
 
     async def generate_stream(self, messages, tools=None):
@@ -57,8 +60,8 @@ class _TokenTrackingLLM:
                     usage = _json.loads(m.group(1))
                     self.usage.prompt_tokens += usage.get("prompt_tokens", 0)
                     self.usage.completion_tokens += usage.get("completion_tokens", 0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("stream_usage_parse_failed", error=str(e))
                 # 移除标记再输出
                 yield _re.sub(r'\n<!--STREAM_USAGE:.*?-->', '', chunk if isinstance(chunk, str) else '')
             else:
@@ -69,6 +72,25 @@ class _TokenTrackingLLM:
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._backend, name)
+
+    #: 必须转交给真实后端的属性 —— 它们由后端内部读取
+    _FORWARD_TO_BACKEND = ("usage_sink", "pre_call_hook",
+                           "heartbeat_hook", "call_timeout",
+                           "heartbeat_interval")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """把回调类属性写到真实后端上。
+
+        本类只代理了 __getattr__（读），没代理写。若不特殊处理，
+        `agent.llm.usage_sink = fn` 只会在**包装器**上挂一个属性，后端里的
+        `self.usage_sink` 永远是 None —— 用量事件一条也发不出来，
+        预算钩子同理形同虚设。这类"设了但不生效"的问题极难从现象反推，
+        故在此显式转交。
+        """
+        if name in self._FORWARD_TO_BACKEND and "_backend" in self.__dict__:
+            setattr(self._backend, name, value)
+            return
+        object.__setattr__(self, name, value)
 from automind.memory.manager import MemoryManager
 from automind.planning.hierarchical_planner import HierarchicalPlanner
 from automind.planning.plan_executor import PlanExecutor
@@ -110,6 +132,8 @@ class AutoMindAgent:
 
     def __init__(self, config: AgentConfig | None = None) -> None:
         self.config = config or AgentConfig.auto_load()
+        # 是否为 clone_for_session 派生的会话实例（决定 close() 的释放范围）
+        self._is_session_clone = False
 
         # ── 核心基础设施 ──────────────────────────
         self.event_bus = EventBus()
@@ -117,6 +141,10 @@ class AutoMindAgent:
         self.event_sink = None
         self._active_goal_id: str | None = None
         self.llm = self._init_llm()
+        self._usage_total: dict[str, int] = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+        self._budget_warned = False
+        self._attach_usage_sink()
         self.tool_registry = ToolRegistry()
         self.permissions = PermissionEngine(
             policy=self.config.permissions,
@@ -516,8 +544,112 @@ class AutoMindAgent:
         if self.event_sink is not None:
             try:
                 await self.event_sink(event)
-            except Exception:
-                pass
+            except Exception as e:
+                # 事件推送失败不该影响任务执行，但也不能一声不吭 ——
+                # 前端"数字不动/面板空白"的投诉基本都出在这里。
+                logger.warning("event_emit_failed",
+                               event_type=event.get("type"), error=str(e))
+
+    def _attach_usage_sink(self) -> None:
+        """把 LLM 的用量回调接到事件流上，每次调用结束推 usage_update。
+
+        此前流式回答的 token 数只在整段生成完、解析 `<!--STREAM_USAGE:-->`
+        标记时才更新一次；长回答期间界面上一直显示 0，看起来像没在计费。
+        现在每次 LLM 调用（含流式）结束都推一条，前端累加即可实时显示。
+        """
+        if self.llm is None:
+            return
+        self._usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
+                             "total_tokens": 0, "calls": 0}
+
+        async def _sink(usage: dict) -> None:
+            t = self._usage_total
+            t["prompt_tokens"] += usage.get("prompt_tokens", 0)
+            t["completion_tokens"] += usage.get("completion_tokens", 0)
+            t["total_tokens"] += usage.get("total_tokens", 0)
+            t["calls"] += 1
+            # 同步记进 ResourceManager —— 不记账，预算检查就永远看到 0
+            rm = getattr(self, "resources", None)
+            if rm is not None:
+                try:
+                    rm.tokens.tokens_used.prompt += usage.get("prompt_tokens", 0)
+                    rm.tokens.tokens_used.completion += usage.get("completion_tokens", 0)
+                except Exception as e:
+                    logger.warning("token_accounting_failed", error=str(e))
+            await self._emit({"type": "usage_update", "delta": usage,
+                              "cumulative": dict(t)})
+
+        self.llm.usage_sink = _sink
+
+        async def _pre_call() -> None:
+            """调用前的预算准入 —— ResourceManager 此前实例化后从未被调用。
+
+            分级处置（要求：超预算触发压缩/降级/终止）：
+              · ≥ WARN 阈值 —— 推 budget_warning 事件，并尝试压缩上下文（降低
+                后续每轮的 prompt 体量），任务继续；
+              · ≥ 100%    —— 推 budget_exceeded 并**拒绝本次调用**，避免
+                预算保护形同虚设、账单无上限地涨下去。
+            """
+            rm = getattr(self, "resources", None)
+            if rm is None:
+                return
+            frac = rm.tokens.usage_fraction()
+            if frac >= 1.0:
+                await self._emit({
+                    "type": "budget_exceeded",
+                    "used": rm.tokens.tokens_used.total,
+                    "budget": rm.tokens.budget,
+                })
+                logger.error("token_budget_exhausted",
+                             used=rm.tokens.tokens_used.total, budget=rm.tokens.budget)
+            elif frac >= self._BUDGET_WARN_AT and not self._budget_warned:
+                self._budget_warned = True
+                await self._emit({
+                    "type": "budget_warning",
+                    "used": rm.tokens.tokens_used.total,
+                    "budget": rm.tokens.budget,
+                    "percent": round(frac * 100, 1),
+                })
+                logger.warning("token_budget_high", percent=round(frac * 100, 1))
+                await self._compress_context()
+            # 速率限制 + 硬性预算（超了会抛 RuntimeError，由此拒绝本次调用）
+            await rm.before_llm_call()
+
+        self.llm.pre_call_hook = _pre_call
+
+        async def _heartbeat(elapsed: float, phase: str) -> None:
+            """LLM 调用在飞行中时每几秒发一条 —— 让界面能证明"还活着"。
+
+            长任务此前在对话区完全无反馈，用户分不清"在想"和"挂了"。
+            """
+            await self._emit({"type": "heartbeat", "phase": phase,
+                              "elapsed": round(elapsed, 1)})
+
+        self.llm.heartbeat_hook = _heartbeat
+        self.llm.call_timeout = float(
+            getattr(self.config.execution, "llm_call_timeout_seconds", 300.0))
+
+    #: 用量到达该比例即预警并尝试压缩上下文
+    _BUDGET_WARN_AT = 0.8
+
+    async def _compress_context(self) -> None:
+        """预算吃紧时压缩上下文（能压则压，压不了不影响主流程）。
+
+        ContextManager.compress 是**协程** —— 早先这里同步调用它，既没真的
+        压缩，还留下一个未 await 的协程（RuntimeWarning）。必须 await。
+        """
+        try:
+            mgr = getattr(self, "context_mgr", None)
+            fn = getattr(mgr, "compress", None)
+            if not callable(fn):
+                return
+            import inspect
+            r = fn(self.llm)
+            if inspect.isawaitable(r):
+                await r
+            logger.info("context_compressed_for_budget")
+        except Exception as e:
+            logger.warning("context_compress_failed", error=str(e))
 
     def _react_callbacks(self, tag: int | None = None):
         """构造 ReAct 的思考/行动回调，转发到 event_sink。"""
@@ -536,8 +668,53 @@ class AutoMindAgent:
                               "args": {k: str(v)[:200] for k, v in (tc.arguments or {}).items()},
                               "success": result.success,
                               "output": str(out)[:600]})
+            # 工具失败单独发一条：step_action 在界面上和成功步骤长得一样，
+            # 失败原因被淹没在流水里。前端据此标红并给出原因。
+            if not result.success:
+                ex = getattr(self, "react_executor", None)
+                streak = 0
+                if ex is not None:
+                    streak = (getattr(ex, "_tool_failures", {})
+                              .get(tc.name, {}).get("streak", 0))
+                await self._emit({
+                    "type": "tool_error", "tool": tc.name,
+                    "error": str(result.error or "")[:600],
+                    "streak": streak,
+                    "circuit_open": streak >= getattr(
+                        type(ex), "FAILURE_THRESHOLD", 3) if ex else False,
+                })
 
         return on_thought, on_action
+
+    async def preflight_check(self) -> dict:
+        """任务开始前的配置自检 —— 早报错好过跑到一半才失败。
+
+        只做"能立刻判定"的检查，不联网、不消耗 token。
+        """
+        problems: list[str] = []
+        if self.llm is None:
+            problems.append(
+                f"LLM 未初始化：{getattr(self, '_llm_init_error', '未配置 API Key')}")
+        try:
+            n_tools = len(self.tool_registry._tools)
+            if n_tools == 0:
+                problems.append("没有任何可用工具，任务将无法执行实际操作")
+        except Exception as e:
+            problems.append(f"工具注册表不可读：{e}")
+        try:
+            root = Path(self.config.project_root)
+            if not root.is_dir():
+                problems.append(f"项目目录不存在：{root}")
+            elif not os.access(root, os.W_OK):
+                problems.append(f"项目目录不可写：{root}")
+        except Exception as e:
+            problems.append(f"项目目录检查失败：{e}")
+
+        report = {"ok": not problems, "problems": problems}
+        if problems:
+            logger.warning("preflight_problems", problems=problems)
+            await self._emit({"type": "preflight_warning", **report})
+        return report
 
     async def _run_react(self, task: str, context: str) -> str:
         """ReAct 模式执行。"""
@@ -696,8 +873,10 @@ class AutoMindAgent:
         try:
             index = self.project_indexer.build_index()
             parts.append(index.to_summary())
-        except Exception:
-            pass
+        except Exception as e:
+            # 项目索引进不了上下文，模型就"看不见"代码结构，回答会明显变差
+            # —— 但表现只是"答得不好"，极难归因，必须留痕。
+            logger.warning("project_index_unavailable", error=str(e))
 
         return "\n\n".join(parts)
 
@@ -759,6 +938,126 @@ class AutoMindAgent:
                            error=str(e))
             self._llm_init_error = str(e)
             return None
+
+    def _rebind_llm(self) -> None:
+        """按当前 ``config.llm`` 重建 LLM 后端，并把持有它的模块重新指过去。
+
+        规划器 / 执行器 / 反思模块在构造时各存了一份 ``self.llm`` 引用，
+        只换 ``agent.llm`` 而不同步它们，会出现"界面显示已切到 B 模型、
+        实际规划仍在用 A 模型"的鬼故事。
+        """
+        self._llm_init_error = ""
+        self.llm = self._init_llm()
+        self._attach_usage_sink()
+        self.hierarchical_planner.llm = self.llm
+        self.plan_executor.llm = self.llm
+        self.quality_assessor.llm = self.llm
+        self.reflexion.llm = self.llm
+        # ReAct 执行器每次任务按需新建，置空即可让它下次取到新 llm
+        self.react_executor = None
+
+    def switch_llm(self, llm_config: Any) -> bool:
+        """只替换 LLM（不重建工具/技能/记忆/项目索引）。
+
+        切换交互模式时此前走的是"整个 Agent 重建"：``AgentConfig.auto_load``
+        重新扫盘、重建 ChromaDB、重新注册全部工具与技能、重扫项目索引 ——
+        用户在 Web 上点一下模式切换要卡 2~3 秒，而真正变的只有一个模型名。
+
+        Args:
+            llm_config: 新的 ``LLMProviderConfig``（调用方负责解析 Key/api_base）。
+
+        Returns:
+            LLM 是否初始化成功（False 表示 Key/地址有问题，``self.llm is None``）。
+        """
+        self.config.llm = llm_config
+        self._rebind_llm()
+        logger.info("llm_switched", provider=llm_config.provider,
+                    model=llm_config.model, ready=self.llm is not None)
+        return self.llm is not None
+
+    #: 会话克隆共享的重资源 —— 建一次几秒钟，且对并发任务是只读的
+    _SHARED_ON_CLONE = (
+        "env", "project_indexer", "input_parser", "memory",
+        "tool_registry", "skill_registry", "mcp_registry",
+        "checkpoint_mgr", "hooks", "plugin_manager",
+    )
+
+    def clone_for_session(self) -> AutoMindAgent:
+        """派生一个执行态独立的会话 Agent（轻量：不重扫项目、不重建记忆库）。
+
+        为什么必须隔离：并发任务此前共用同一个全局 Agent 实例，
+        ``_interaction`` / ``_mode`` / ``context_mgr`` / ``_current_plan`` /
+        ``llm.usage`` 全是共享可变状态。两个标签页同时跑，会出现
+        A 的"对话"模式被 B 的"循环编程"覆盖、两边上下文互相串、
+        token 计数被对方 ``reset()`` 清零 —— 且没有任何报错提示。
+
+        共享的是重且只读的部分（工具/技能注册表、记忆库、项目索引、
+        环境探测结果），独享的是每次任务都会被改写的部分。
+        """
+        from automind.core.events import EventBus
+        from automind.planning.plan_executor import PlanExecutor
+        from automind.reflection.consistency_checker import ConsistencyChecker
+        from automind.reflection.quality_assessor import QualityAssessor
+        from automind.reflection.reflexion import ReflexionEngine
+        from automind.state.resource_manager import ResourceManager
+        from automind.tools.function_calling import FunctionCallHandler
+        from automind.tools.permissions import PermissionEngine
+
+        clone = object.__new__(type(self))
+        for name in self._SHARED_ON_CLONE:
+            setattr(clone, name, getattr(self, name))
+
+        clone.config = self.config.model_copy(deep=True)
+        clone._is_session_clone = True
+        clone._llm_init_error = ""
+
+        # ── 独享：LLM 包装器 + 用量记账 ──
+        # 后端客户端本身只是个 httpx 会话，构造是毫秒级；但 usage_sink 是挂在
+        # 后端上的，若共享后端，两个会话的用量事件会串到最后一个注册者身上。
+        clone.event_bus = EventBus()
+        clone.event_sink = None
+        clone.approval_callback = None
+        clone._active_goal_id = None
+        clone._usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
+                              "total_tokens": 0, "calls": 0}
+        clone._budget_warned = False
+        clone.llm = clone._init_llm()
+        clone.resources = ResourceManager(token_budget=clone.config.llm.max_tokens * 10)
+        clone._attach_usage_sink()
+
+        # ── 独享：权限 / 上下文 / 规划 / 反思 ──
+        clone.permissions = PermissionEngine(
+            policy=clone.config.permissions,
+            project_root=clone.config.project_root,
+            approval_mode=getattr(clone.config.execution, "approval_mode", "auto"),
+        )
+        clone.context_mgr = ContextManager(
+            max_tokens=clone.config.memory.short_term_max_tokens,
+            summary_threshold=clone.config.memory.short_term_summary_threshold,
+        )
+        clone.hierarchical_planner = HierarchicalPlanner(clone.llm)
+        clone.react_executor = None
+        clone.plan_executor = PlanExecutor(
+            clone.llm, clone.tool_registry, clone.permissions,
+            max_retries=clone.config.execution.max_retries,
+            parallel=clone.config.execution.parallel_execution,
+            use_cache=clone.config.execution.subtask_cache,
+        )
+        clone.fn_handler = FunctionCallHandler(clone.tool_registry)
+        clone.quality_assessor = QualityAssessor(clone.llm)
+        clone.consistency_checker = ConsistencyChecker()
+        clone.reflexion = ReflexionEngine(clone.llm, clone.memory.long_term)
+        clone.human_loop = HumanInTheLoop(
+            auto_approve_safe=clone.config.execution.auto_approve_safe)
+        clone.orchestrator = None
+
+        # ── 独享：会话状态 ──
+        clone._current_plan = None
+        clone._agent_state = AgentState()
+        clone._mode = self._mode
+        clone._interaction = self._interaction
+        clone._chat_history = []
+        return clone
 
     def _register_default_tools(self) -> None:
         """注册默认工具。"""
@@ -822,17 +1121,21 @@ class AutoMindAgent:
         """释放全部持有资源 — MCP 连接 / 记忆系统（ChromaDB）/ LLM 连接池。
 
         幂等：重复调用安全；单项失败不阻断其余清理。
+
+        会话克隆（``clone_for_session``）只释放自己独享的 LLM 连接 —— MCP 与
+        记忆库是与主 Agent 共享的，克隆去关会把还在跑的其它会话一并弄挂。
         """
-        # 1. 断开所有 MCP 服务器连接
-        try:
-            await self.mcp_registry.disconnect_all()
-        except Exception as e:
-            logger.warning("close_mcp_failed", error=str(e))
-        # 2. 释放记忆系统（ChromaDB 客户端 + 短期窗口）
-        try:
-            self.memory.close()
-        except Exception as e:
-            logger.warning("close_memory_failed", error=str(e))
+        if not getattr(self, "_is_session_clone", False):
+            # 1. 断开所有 MCP 服务器连接
+            try:
+                await self.mcp_registry.disconnect_all()
+            except Exception as e:
+                logger.warning("close_mcp_failed", error=str(e))
+            # 2. 释放记忆系统（ChromaDB 客户端 + 短期窗口）
+            try:
+                self.memory.close()
+            except Exception as e:
+                logger.warning("close_memory_failed", error=str(e))
         # 3. 关闭 LLM 后端网络资源（经 _TokenTrackingLLM 委托）
         try:
             if self.llm is not None:

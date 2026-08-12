@@ -3,7 +3,7 @@
 ;   构建：iscc installer.iss  →  Output\AutoMind-Setup-<ver>.exe
 
 #define AppName "AutoMind"
-#define AppVersion "1.5.0"
+#define AppVersion "1.5.2"
 #define AppPublisher "AutoMind Team"
 #define AppURL "https://github.com/yl13571844594-arch/AutoMind"
 #define AppExe "AutoMind.exe"

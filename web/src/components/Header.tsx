@@ -76,9 +76,12 @@ export default function Header() {
     if (!status) return badge('…', 'plain');
     const label = `${status.provider}/${status.model}`;
     const modeLabel = status.mode_specific ? `${MODE_LABELS[mode]}模式专用 · ` : '默认 · ';
-    if (status.llm_ready) return badge(label, 'ok', modeLabel + '已就绪', () => openModal('model'));
-    if (status.has_api_key) return badge(label + ' ⚠', 'warn', modeLabel + (status.llm_error || 'LLM 未初始化'), () => openModal('model'));
-    return badge('⚠ 未配置', 'err', '未配置 API Key，点击配置', () => openModal('apikeys'));
+    // 服务端自动换了提供商时（默认 openai 但只配了 DeepSeek Key），把原因说清楚，
+    // 否则用户只会看到"模型怎么和我选的不一样"
+    const notice = status.llm_notice ? ` · ${status.llm_notice}` : '';
+    if (status.llm_ready) return badge(label + (notice ? ' ⓘ' : ''), 'ok', modeLabel + '已就绪' + notice, () => openModal('model'));
+    if (status.has_api_key) return badge(label + ' ⚠', 'warn', modeLabel + (status.llm_error || 'LLM 未初始化') + notice, () => openModal('model'));
+    return badge('⚠ 未配置', 'err', (status.llm_notice || '未配置 API Key') + '，点击配置', () => openModal('apikeys'));
   };
 
   const projectName = (status?.project || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || '—';

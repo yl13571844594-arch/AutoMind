@@ -172,7 +172,11 @@ class DatalogEngine:
                         for i in range(len(rule.head.args))
                     )
                     if all(a is not None for a in concrete_args):
-                        if not self.ask(rule.head.predicate, *concrete_args):
+                        # 去重必须只看**已存储的事实**，不能用 ask()：
+                        # query() 第 2 步会应用规则，故 ask() 对任何"可推导"的
+                        # 事实都返回 True —— 拿它做判断，derive() 永远认为
+                        # "已经有了"，一条也不会物化，返回值恒为 0。
+                        if not self._has_stored_fact(rule.head.predicate, concrete_args):
                             self.assert_fact(rule.head.predicate, *concrete_args)
                             iteration_new += 1
             new_count += iteration_new
@@ -181,6 +185,12 @@ class DatalogEngine:
         return new_count
 
     # ── 内部方法 ──────────────────────────────────────────
+
+    def _has_stored_fact(self, predicate: str, args: tuple[Any, ...]) -> bool:
+        """该事实是否**已经落库**（只查事实索引，不走规则推导）。"""
+        target = tuple(str(a) for a in args)
+        return any(tuple(str(x) for x in f.args) == target
+                   for f in self._fact_index.get(predicate, []))
 
     def _match(
         self,
@@ -210,36 +220,71 @@ class DatalogEngine:
         query_args: tuple[Any, ...],
         query_vars: dict[int, str],
     ) -> list[dict[str, Any]]:
-        """应用规则推导新结果。"""
-        # 为规则变量创建映射
-        rule_vars: dict[str, str] = {}  # rule var → query var
+        """应用规则推导新结果。
+
+        三种调用形态（由 query_args 的前缀区分）：
+          · ``?X``  —— 查询模式，把规则头变量绑定到调用方指定的变量名；
+          · ``^X``  —— 推导模式（derive()），绑定到头变量自身的名字；
+          · 其它   —— **常量**，用于过滤，不是变量。
+
+        v1.5.1 之前这里有三处缺陷叠在一起：
+          1. ``^`` 分支是 ``pass``，推导模式下一个变量都不绑，derive() 永远
+             产不出事实；
+          2. 只出现在 body 里的变量（如 X,Z :- p(X,Y), p(Y,Z) 中的 Y）不在
+             映射表里，被 _match 当常量去比，连接查询必然失配；
+          3. **常量和变量名混存在同一个 dict 里**，常量被当成变量名传给
+             _match，于是 ask("grandparent","alice","bob") 这种本不该成立的
+             查询会返回 True。
+        现在把"变量映射"和"常量替换"彻底分开。
+        """
+        # 规则变量 → 绑定时使用的名字
+        rule_vars: dict[str, str] = {}
+        # 规则变量 → 调用方指定的常量（用于过滤，不参与绑定）
+        rule_consts: dict[str, Any] = {}
+
         for i, arg in enumerate(query_args):
+            if i >= len(rule.head.args):
+                break
             arg_str = str(arg)
-            if i < len(rule.head.args):
-                rule_arg = str(rule.head.args[i])
-                if arg_str.startswith("?"):
-                    rule_vars[rule_arg] = arg_str[1:]
-                elif arg_str.startswith("^"):
-                    pass  # 推导模式
-                else:
-                    rule_vars[rule_arg] = arg_str
+            rule_arg = str(rule.head.args[i])
+            if arg_str.startswith("?"):
+                rule_vars[rule_arg] = arg_str[1:]
+            elif arg_str.startswith("^"):
+                if rule_arg in rule.variables:
+                    rule_vars[rule_arg] = rule_arg
+            else:
+                rule_consts[rule_arg] = arg
+
+        # body 专有变量同样要参与绑定，否则跨 body 的连接做不了
+        for var in rule.variables:
+            v = str(var)
+            if v not in rule_consts:
+                rule_vars.setdefault(v, v)
 
         # 对每个 body 事实，查找所有匹配
         results: list[dict[str, Any]] = [{}]
         for body_fact in rule.body:
-            new_results = []
-            body_query_vars: dict[int, str] = {}
-            for i, arg in enumerate(body_fact.args):
-                arg_str = str(arg)
-                if arg_str in rule_vars:
-                    body_query_vars[i] = rule_vars[arg_str]
+            new_results: list[dict[str, Any]] = []
+            # 把常量替换进模式里，交给 _match 做常量比较；
+            # 其余位置按变量处理。
+            pattern = tuple(rule_consts.get(str(a), a) for a in body_fact.args)
+            body_query_vars: dict[int, str] = {
+                i: rule_vars[str(a)]
+                for i, a in enumerate(body_fact.args)
+                if str(a) in rule_vars
+            }
 
             for fact in self._fact_index.get(body_fact.predicate, []):
+                binding = self._match(fact.args, pattern, body_query_vars)
+                if binding is None:
+                    continue
                 for prev_binding in results:
-                    binding = self._match(fact.args, body_fact.args, body_query_vars)
-                    if binding is not None:
-                        merged = {**prev_binding, **binding}
-                        new_results.append(merged)
+                    # 跨 body 的变量一致性：原来是 `{**prev, **binding}`，
+                    # 共享变量取值冲突时后者直接覆盖前者，等于不校验连接条件。
+                    if any(k in prev_binding and prev_binding[k] != v
+                           for k, v in binding.items()):
+                        continue
+                    new_results.append({**prev_binding, **binding})
 
             results = new_results
             if not results:

@@ -5,7 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from automind.core.logging import get_logger
 from automind.skills.skill_base import AbstractSkill, SkillResult
+
+logger = get_logger("automind.skills")
 
 
 class SkillRegistry:
@@ -78,10 +81,12 @@ class SkillRegistry:
                     skill = skill_cls()
                     self.register(skill)
                     count += 1
-                except Exception:
-                    pass
-        except Exception:
-            pass
+                except Exception as e:
+                    # 用户装了技能包却在界面上看不到 —— 不记日志根本查不出为什么
+                    logger.warning("entrypoint_skill_load_failed",
+                                   entry=getattr(ep, "name", "?"), error=str(e))
+        except Exception as e:
+            logger.warning("entrypoint_scan_failed", error=str(e))
         return count
 
     def discover_from_directory(self, directory: str | Path) -> int:
@@ -118,8 +123,9 @@ class SkillRegistry:
                         skill = attr()
                         self.register(skill)
                         count += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("py_skill_load_failed",
+                               file=str(py_file), error=str(e))
         return count
 
     def discover_skill_md(self, directory: str | Path, recursive: bool = True) -> int:
@@ -147,7 +153,8 @@ class SkillRegistry:
                 seen.add(skill.name)
                 self.register(skill)
                 count += 1
-            except Exception:
+            except Exception as e:
+                logger.warning("md_skill_load_failed", file=str(md), error=str(e))
                 continue
         return count
 

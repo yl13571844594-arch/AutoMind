@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
@@ -28,7 +29,66 @@ from automind.core.exceptions import (
     LLMRateLimitError,
     LLMTimeoutError,
 )
+from automind.core.logging import get_logger
 from automind.core.types import LLMResponse, ToolCall
+
+logger = get_logger("automind.llm")
+
+# ═══════════════════════════════════════════════════════════════
+# 共享 TLS 上下文
+# ═══════════════════════════════════════════════════════════════
+
+_SSL_CONTEXT: Any = None
+
+
+def shared_ssl_context() -> Any:
+    """全进程复用同一个 ``ssl.SSLContext``（首次构建后缓存）。
+
+    新建 LLM 客户端此前实测要 ~1.15 秒，profile 显示 **97% 花在
+    ``SSLContext.load_verify_locations``** —— 解析整个 CA 证书包单次约 380ms，
+    而 httpx 每个客户端要建 3 个（直连 + 两个代理传输）。这直接决定了
+    "切一次模型卡两三秒"：真正的开销不在 Agent 重建，在这里。
+
+    CA 包在进程生命周期内不会变，复用同一个上下文完全安全；``verify`` 传入
+    一个现成的 SSLContext 时 httpx 会原样使用，不再重新加载。
+
+    构建失败（缺 certifi、企业环境证书异常等）时返回 None，调用方退回
+    httpx 的默认行为 —— 慢，但不能因为一个优化把连接能力弄没了。
+    """
+    global _SSL_CONTEXT
+    if _SSL_CONTEXT is None:
+        try:
+            import httpx
+            _SSL_CONTEXT = httpx.create_ssl_context()
+        except Exception as e:
+            logger.warning("ssl_context_build_failed", error=str(e))
+            _SSL_CONTEXT = False        # 用 False 记住"试过且失败"，别每次重试
+    return _SSL_CONTEXT or None
+
+
+def shared_http_client(timeout: float, base_url: str = "") -> Any:
+    """构造一个复用共享 TLS 上下文的 httpx.AsyncClient（失败时返回 None）。"""
+    try:
+        import httpx
+        ctx = shared_ssl_context()
+        if ctx is None:
+            return None
+        kwargs: dict[str, Any] = {
+            "verify": ctx,
+            "timeout": timeout,
+            # 对齐 openai / anthropic SDK 自带客户端的默认值，避免"换了个
+            # http_client 之后中转代理的 3xx 跳转不再跟随"这类隐性行为差异
+            "follow_redirects": True,
+            "limits": httpx.Limits(max_connections=1000,
+                                   max_keepalive_connections=100),
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        return httpx.AsyncClient(**kwargs)
+    except Exception as e:
+        logger.warning("http_client_build_failed", error=str(e))
+        return None
+
 
 # ═══════════════════════════════════════════════════════════════
 # 抽象基类
@@ -41,6 +101,146 @@ class LLMBackend(ABC):
     def __init__(self, config: LLMProviderConfig) -> None:
         self.config = config
         self._tools: list[dict[str, Any]] = []
+        # 每次调用结束后上报用量的旁路回调（可选）。
+        # 走**旁路**而不是改返回值/流格式：流式的 usage 此前只在流末尾以
+        # `<!--STREAM_USAGE:...-->` 标记带出，界面上的 token 数因此要等整段
+        # 回答生成完才跳一次；长回答期间用户看到的一直是 0。
+        # 签名：async (usage: dict) -> None，usage 含 prompt/completion/total/
+        # model/provider/streamed。回调异常绝不能影响主流程。
+        self.usage_sink: Any = None
+        # 每次调用**前**的钩子（可选）。签名 async () -> None。
+        # 与 usage_sink 对称：一个管调用后的记账，一个管调用前的准入
+        # （Token 预算、速率限制）。抛异常即拒绝本次调用 —— 这是它的用途，
+        # 因此这里**不**吞异常。
+        self.pre_call_hook: Any = None
+        # 单轮调用的**硬超时**（秒）。provider 自身的 timeout 只管单个 HTTP
+        # 请求；流式响应一旦服务端"连上了但不再吐字"，底层不会超时，整个任务
+        # 就无限期挂着，界面上停在"执行中"永远不动。这里给一个总时长上限。
+        self.call_timeout: float = 300.0
+        # 心跳回调：调用在飞行中时每隔 heartbeat_interval 秒回调一次，
+        # 签名 async (elapsed_seconds: float, phase: str) -> None。
+        # 让界面能显示"正在思考 已 N 秒"，而不是一片死寂。
+        self.heartbeat_hook: Any = None
+        self.heartbeat_interval: float = 5.0
+
+    async def _with_heartbeat(self, coro: Any, phase: str) -> Any:
+        """在 coro 执行期间周期性发心跳，并施加 call_timeout 硬超时。"""
+        import asyncio
+        import time as _t
+
+        if self.heartbeat_hook is None:
+            return await asyncio.wait_for(coro, timeout=self.call_timeout)
+
+        started = _t.monotonic()
+        task = asyncio.ensure_future(coro)
+
+        async def _beat() -> None:
+            while not task.done():
+                await asyncio.sleep(self.heartbeat_interval)
+                if task.done():
+                    break
+                try:
+                    await self.heartbeat_hook(_t.monotonic() - started, phase)
+                except Exception as e:
+                    logger.warning("heartbeat_hook_failed", error=str(e))
+
+        beat = asyncio.ensure_future(_beat())
+        try:
+            return await asyncio.wait_for(task, timeout=self.call_timeout)
+        finally:
+            beat.cancel()
+            # 等它真正结束，避免留下悬挂任务（"Task was destroyed" 噪音）
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await beat
+
+    async def _report_usage(self, prompt: int, completion: int,
+                            streamed: bool = False) -> None:
+        """把本次调用的用量交给 usage_sink（失败只记日志，不打断生成）。"""
+        if self.usage_sink is None:
+            return
+        try:
+            await self.usage_sink({
+                "prompt_tokens": int(prompt or 0),
+                "completion_tokens": int(completion or 0),
+                "total_tokens": int(prompt or 0) + int(completion or 0),
+                "model": getattr(self, "_model", "") or self.config.model,
+                "provider": self.config.provider,
+                "streamed": streamed,
+            })
+        except Exception as e:
+            logger.warning("usage_sink_failed", error=str(e))
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """给每个 provider 的 generate / generate_stream 自动挂上用量上报。
+
+        用 __init_subclass__ 统一包一层，而不是去改 4 个 provider 的 8 个返回点
+        —— 少改 8 处就少 8 处漏掉的机会，将来新增 provider 也自动带上。
+        包装器**原样透传**每个 chunk，绝不改动流内容与既有的
+        `<!--STREAM_USAGE:...-->` 标记格式（约束要求）。
+        """
+        super().__init_subclass__(**kwargs)
+        import functools
+
+        gen = cls.__dict__.get("generate")
+        if gen is not None and not getattr(gen, "_usage_wrapped", False):
+            @functools.wraps(gen)
+            async def _gen(self: Any, *a: Any, **k: Any) -> Any:
+                if self.pre_call_hook is not None:
+                    await self.pre_call_hook()      # 预算/限流：拒绝就让它抛
+                try:
+                    resp = await self._with_heartbeat(gen(self, *a, **k), "thinking")
+                except TimeoutError as e:
+                    raise LLMTimeoutError(
+                        f"LLM 单轮调用超过 {self.call_timeout:.0f} 秒仍未返回，已中止。"
+                        "常见原因：模型服务无响应、网络中断、或上下文过长。"
+                    ) from e
+                await self._report_usage(
+                    getattr(resp, "prompt_tokens", 0),
+                    getattr(resp, "completion_tokens", 0))
+                return resp
+            _gen._usage_wrapped = True       # type: ignore[attr-defined]
+            cls.generate = _gen              # type: ignore[assignment]
+
+        gs = cls.__dict__.get("generate_stream")
+        if gs is not None and not getattr(gs, "_usage_wrapped", False):
+            @functools.wraps(gs)
+            async def _gs(self: Any, *a: Any, **k: Any) -> Any:
+                import json as _j
+                import re as _re
+                if self.pre_call_hook is not None:
+                    await self.pre_call_hook()
+                import time as _tm
+                started = _tm.monotonic()
+                last_beat = started
+                p = c = 0
+                async for chunk in gs(self, *a, **k):
+                    now = _tm.monotonic()
+                    # 流式没法用 wait_for 包整体（那会连正常的长回答一起掐掉），
+                    # 改为每收到一块就检查累计时长 —— 超了立刻中止。
+                    if now - started > self.call_timeout:
+                        raise LLMTimeoutError(
+                            f"LLM 流式响应超过 {self.call_timeout:.0f} 秒仍未结束，已中止。")
+                    if (self.heartbeat_hook is not None
+                            and now - last_beat >= self.heartbeat_interval):
+                        last_beat = now
+                        try:
+                            await self.heartbeat_hook(now - started, "streaming")
+                        except Exception as e:
+                            logger.warning("heartbeat_hook_failed", error=str(e))
+                    # 顺路把标记里的用量抄出来 —— chunk 本身原样 yield 出去
+                    if isinstance(chunk, str) and "STREAM_USAGE:" in chunk:
+                        m = _re.search(r"STREAM_USAGE:(\{.*?\})", chunk)
+                        if m:
+                            try:
+                                u = _j.loads(m.group(1))
+                                p = u.get("prompt_tokens", 0)
+                                c = u.get("completion_tokens", 0)
+                            except ValueError:
+                                pass
+                    yield chunk
+                await self._report_usage(p, c, streamed=True)
+            _gs._usage_wrapped = True        # type: ignore[attr-defined]
+            cls.generate_stream = _gs        # type: ignore[assignment]
 
     @abstractmethod
     async def generate(
@@ -152,15 +352,28 @@ class OpenAIProvider(LLMBackend):
             or "gpt-4o"
         )
 
+        # 复用共享 TLS 上下文：不传 http_client 时 openai 会新建 3 个 SSL 上下文，
+        # 单次约 1.15 秒 —— 这才是"切模型卡两三秒"的真正来源
+        http_client = shared_http_client(config.timeout)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=api_base,
             timeout=config.timeout,
             max_retries=2,
             default_headers=config.extra_headers or None,
+            **({"http_client": http_client} if http_client is not None else {}),
         )
         self._model = model
         self.api_base = api_base
+
+    async def close(self) -> None:
+        """关闭底层 httpx 连接池。
+
+        此前基类的 no-op 意味着客户端从不释放；会话级 Agent 会为每个会话建一个
+        客户端，不关就是持续泄漏连接与文件句柄。
+        """
+        with contextlib.suppress(Exception):
+            await self._client.close()
 
     async def generate(
         self,
@@ -331,11 +544,18 @@ class AnthropicProvider(LLMBackend):
                 "Anthropic API key not configured. Set ANTHROPIC_API_KEY env var."
             )
 
+        http_client = shared_http_client(config.timeout)   # 同 OpenAI：省掉 TLS 重建
         self._client = AsyncAnthropic(
             api_key=api_key,
             timeout=config.timeout,
+            **({"http_client": http_client} if http_client is not None else {}),
         )
         self._model = config.model or "claude-sonnet-4-20250514"
+
+    async def close(self) -> None:
+        """关闭底层 httpx 连接池（同 OpenAIProvider：不关就持续泄漏连接）。"""
+        with contextlib.suppress(Exception):
+            await self._client.close()
 
     async def generate(
         self,
@@ -562,10 +782,9 @@ class OllamaProvider(LLMBackend):
     def __init__(self, config: LLMProviderConfig) -> None:
         super().__init__(config)
         import httpx
-        self._client = httpx.AsyncClient(
-            base_url=config.api_base or "http://localhost:11434",
-            timeout=config.timeout,
-        )
+        base_url = config.api_base or "http://localhost:11434"
+        self._client = (shared_http_client(config.timeout, base_url)
+                        or httpx.AsyncClient(base_url=base_url, timeout=config.timeout))
         self._model = config.model or "llama3.2"
 
     async def close(self) -> None:

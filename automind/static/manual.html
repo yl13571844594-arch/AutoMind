@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.5.0</title>
+<title>AutoMind 使用手册 — v1.5.2</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.5.0</div>
+  <div class="ver">使用手册 · v1.5.2</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.5.0</b></span>
+    <span class="chip">版本 <b>v1.5.2</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -1041,8 +1041,66 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.5.0</span><span class="cl-date">2026-08-07</span>
+      <span class="cl-ver">v1.5.2</span><span class="cl-date">2026-08-12</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">开箱即用 — 第一次跑就会撞上的 6 个问题</div>
+    <ul>
+      <li><b>🖥 命令行启动不再直接崩溃</b>：中文版 Windows 的命令行窗口默认用 GBK 编码，
+        而界面里的方框线、✅ 这类符号它显示不了 —— 此前不是显示成乱码，而是
+        <b>程序当场退出并甩出一串英文报错</b>。按说明书敲
+        <code>python -m automind.server</code> 或 <code>automind</code> 的用户，
+        第一步就会卡在这里。现在程序会自己把命令行切到能显示中文的模式
+        （<b>退出时自动还原</b>，不影响你在同一个窗口里跑的其它程序）。</li>
+      <li><b>🔑 只配了一家的 Key 也能直接用</b>：软件出厂默认用 OpenAI 的模型，
+        但大多数人只填了 DeepSeek 的 Key，于是一打开就提示"模型连接失败"，
+        <b>却不告诉你要去哪儿改</b>。现在会自动认出你填了哪家的 Key 并直接用它，
+        同时明确告诉你：<i>"未检测到 OpenAI 的 API Key，已检测到 DeepSeek Key，
+        将使用 deepseek-chat"</i>。你要是自己在设置里指定过某一家，则不会被擅自改掉，
+        只会提醒你 Key 还没填。</li>
+      <li><b>🔀 多个标签页同时跑任务不再互相干扰</b>：此前所有并发任务共用同一份运行状态 ——
+        一个标签页在"对话"、另一个在"循环编程"，模式会<b>互相覆盖</b>，
+        两边的上下文互相串进对方的对话，Token 统计也会被对方清零，而且没有任何提示。
+        现在每个会话都有自己独立的运行环境（共用的只是工具、技能这些只读部分，
+        所以几乎不占额外开销）。</li>
+      <li><b>⚡ 切换模式/模型不再卡 2~3 秒</b>：此前在界面上点一下模式切换，
+        程序会把整个引擎重建一遍（重新扫描项目、重建记忆库、重新加载全部工具与技能），
+        而实际变化的只有一个模型名。现在只替换模型本身，<b>点击即时生效</b>（实测由 1.1 秒降到 1 毫秒以内）。</li>
+      <li><b>🚀 文件浏览与编辑不再拖慢全局</b>：打开目录选择器、预览文件、
+        保存编辑器内容时的读写磁盘操作，此前会把服务端的主循环整个占住 ——
+        <b>连正在逐字输出的对话也会一起卡住</b>。现在这些操作都挪到后台线程。</li>
+      <li><b>📦 <code>automind</code> 命令可用</b>：此前照说明书敲 <code>automind</code>
+        会提示"不是内部或外部命令"。现在已随包安装，命令行用法与文档一致。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.5.1</span><span class="cl-date">2026-08-09</span>
+    </div>
+    <div class="cl-sum">可靠性与可观测性 — 不再"悄悄出错"</div>
+    <ul>
+      <li><b>💬 聊天记录不再悄悄丢失</b>：此前保存失败是<b>完全静默</b>的，
+        你下次打开发现对话没了也无从查起。现在会自动重试，仍失败则在界面上明确告知
+        （并提示检查磁盘空间与目录权限）；<b>不会因此中断正在进行的任务</b>。</li>
+      <li><b>⏱ 任务卡住会自己停下</b>：模型服务"连上了却不再回话"时，此前任务会
+        <b>无限期挂着</b>，界面停在"执行中"永远不动。现在单轮超过 5 分钟自动中止并说明原因；
+        执行期间每几秒刷新一次状态，显示<b>"正在思考 / 正在生成回答 已 N 秒"</b>，
+        让你分得清"在想"和"挂了"。</li>
+      <li><b>🪙 Token 数实时更新</b>：此前要等整段回答生成完才跳一次，长回答期间一直显示 0，
+        看起来像没在计费。现在每次模型调用结束就更新。</li>
+      <li><b>🛡 用量超预算会真正拦住</b>：预算保护此前<b>一直是空转的</b>（代码建好了却从未被调用）。
+        现在用到 80% 会提醒并自动压缩上下文，用满则停止调用，不会无声无息地一直花钱。</li>
+      <li><b>⛔ 坏掉的工具不再反复重试</b>：同一个工具连续失败 3 次即停用，
+        失败原因在对话区<b>标红显示</b>并附上连续失败次数 —— 此前它会一直重试到步数耗尽，
+        既慢又看不出发生了什么。任务开始前还会自检模型配置与目录权限。</li>
+      <li><b>🧭 计划出现循环依赖能自动化解</b>：此前检测到循环却不做处理，任务会直接报错中止。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.5.0</span><span class="cl-date">2026-08-07</span>
     </div>
     <div class="cl-sum">新增 12 个办公与集成工具 — AI 现在能直接帮你处理表格、文档、邮件</div>
     <ul>
@@ -1252,7 +1310,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.5.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.5.2 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

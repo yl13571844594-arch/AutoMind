@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+from automind.core.logging import get_logger
 from automind.core.types import (
     Action,
     Goal,
@@ -14,6 +15,8 @@ from automind.core.types import (
     Predicate,
 )
 from automind.planning.dependency_graph import TaskDependencyGraph
+
+logger = get_logger("automind.planner")
 
 
 class HierarchicalPlanner:
@@ -190,9 +193,69 @@ class HierarchicalPlanner:
         elif GoalStatus.BLOCKED in statuses:
             goal.status = GoalStatus.BLOCKED
 
+    #: 消环的最大轮数 —— 断一条边可能暴露出新的环，但不能无限转
+    _MAX_CYCLE_PASSES = 16
+
     @staticmethod
     def _resolve_cycles(root: Goal, cycles: list[list[str]]) -> Goal:
-        """解决循环依赖 — 移除最后一条引起循环的边。"""
+        """真正断开引起循环的依赖边。
+
+        原实现是 ``return root`` —— 检测到环后什么也没做，计划照旧带着环往下走，
+        后续 ``topological_order()`` 直接抛 "Dependency graph contains a cycle!"，
+        或者 ``detect_parallel_groups()`` 提前 break 悄悄丢掉一批目标。
+
+        做法：``find_cycles`` 返回的路径形如 ``[A, B, C, A]``，其中最后一条边
+        ``C → A`` 就是把路径闭合成环的那条**回边**。断开它即可破环，同时保留
+        ``A → B → C`` 这条正常的分解链 —— 相比随便删一条边，破坏最小。
+
+        断一条边可能让原先被它掩盖的环浮现，故循环重建依赖图重新检测，
+        直到无环或达到轮数上限（防御性，正常一两轮就干净了）。
+        """
+        removed: list[tuple[str, str]] = []
+
+        for _ in range(HierarchicalPlanner._MAX_CYCLE_PASSES):
+            if not cycles:
+                break
+            # 不能用 Goal.all_children()：它也是无防护递归，目标树若是真环
+            # 会直接 RecursionError —— 而我们恰恰是来处理环的。改为带
+            # 对象身份去重的迭代遍历。
+            index: dict[str, Goal] = {}
+            stack, seen = [root], {id(root)}
+            while stack:
+                g = stack.pop()
+                index.setdefault(g.id, g)
+                for ch in g.children:
+                    if id(ch) not in seen:
+                        seen.add(id(ch))
+                        stack.append(ch)
+            broke_any = False
+            for cycle in cycles:
+                if len(cycle) < 2:
+                    continue
+                parent_id, child_id = cycle[-2], cycle[-1]
+                parent = index.get(parent_id)
+                if parent is None:
+                    continue
+                kept = [c for c in parent.children if c.id != child_id]
+                if len(kept) != len(parent.children):
+                    parent.children = kept
+                    removed.append((parent_id, child_id))
+                    broke_any = True
+            if not broke_any:
+                # 环里的边在目标树上找不到对应父子关系，再转也没用
+                logger.warning("plan_cycle_unresolvable",
+                               cycles=[" → ".join(c) for c in cycles[:3]])
+                break
+            regraph = TaskDependencyGraph()
+            regraph.build_from_goal_tree(root)
+            cycles = regraph.check_cycles()
+
+        if removed:
+            logger.warning(
+                "plan_cycles_resolved",
+                removed_edges=[f"{p}->{c}" for p, c in removed],
+                count=len(removed),
+            )
         return root
 
     # ── LLM 分解 ──────────────────────────────────────────

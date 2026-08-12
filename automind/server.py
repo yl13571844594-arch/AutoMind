@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -214,8 +215,10 @@ def _save_task_history() -> None:
     """全量同步内存历史到 SQLite（删除/清空后调用；追加走 _push_history）。"""
     try:
         _db_mod.get_db().history_replace(_task_history[-_HISTORY_CAP:])
-    except Exception:
-        pass
+    except Exception as e:
+        # 静默失败 = 任务历史悄悄丢了，用户下次打开发现记录不见却无从查起
+        logger.error("task_history_replace_failed",
+                     count=len(_task_history), error=str(e))
 
 
 def _push_history(record: dict) -> dict:
@@ -227,24 +230,17 @@ def _push_history(record: dict) -> dict:
     del _task_history[:-_HISTORY_CAP]
     try:
         _db_mod.get_db().history_append(record, cap=_HISTORY_CAP)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("task_history_append_failed",
+                     session=record.get("session_id"), error=str(e))
     return record
 
 
 _load_task_history()
 
-# 环境变量映射
-_ENV_KEY_MAP = {
-    "openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY",
-    "google": "GOOGLE_API_KEY", "gemini": "GOOGLE_API_KEY",
-    "grok": "GROK_API_KEY", "deepseek": "DEEPSEEK_API_KEY",
-    "kimi": "MOONSHOT_API_KEY", "moonshot": "MOONSHOT_API_KEY",
-    "bailian": "DASHSCOPE_API_KEY", "dashscope": "DASHSCOPE_API_KEY",
-    "qwen": "DASHSCOPE_API_KEY",
-    "zhipu": "ZHIPU_API_KEY", "glm": "ZHIPU_API_KEY",
-    "doubao": "DOUBAO_API_KEY", "custom": "CUSTOM_API_KEY",
-}
+# 环境变量映射（单一数据源：core.provider_resolver —— 此前 config.py /
+# server_store.py / 这里各写一份，加一家提供商就得改三处且极易漏）
+from automind.core.provider_resolver import ENV_KEY_MAP as _ENV_KEY_MAP  # noqa: E402
 
 # 交互模式 → 底层执行引擎
 _INTERACTION_TO_EXECUTION = {
@@ -287,9 +283,103 @@ _get_session_history = _store.get_session_history
 _save_session_history = _store.save_session_history
 
 
+async def _save_history_notify(sid: str, ws: Any = None) -> bool:
+    """保存会话历史；失败时记日志并（有 ws 时）告诉前端。
+
+    落库失败此前是 `except: pass` —— 聊天记录悄悄丢了，用户下次打开才发现
+    对话没了。现在 store 层会重试并抛 SessionSaveError，这里负责把它变成
+    用户看得见的一条提示，同时**不让它中断正在进行的任务**
+    （回答已经生成出来了，不该因为存档失败就整个失败）。
+    """
+    from automind.server_store import SessionSaveError
+    try:
+        _save_session_history(sid)
+        return True
+    except SessionSaveError as e:
+        logger.error("chat_history_persist_failed", sid=sid, error=str(e))
+        if ws is not None:
+            try:
+                await ws.send_json({
+                    "type": "history_save_failed",
+                    "error": "聊天记录保存失败，本次对话可能不会留存。"
+                             "请检查磁盘空间与数据目录写权限。",
+                    "detail": str(e)[:300],
+                })
+            except Exception:
+                pass
+        return False
+
+
+# 面向用户的模型选路提示（自动 fallback / 未配 Key），由 /api/status 展示
+_llm_notice: str = ""
+
+
+def _set_llm_notice(note: str) -> None:
+    global _llm_notice
+    _llm_notice = note or ""
+
+
+def _resolve_provider_fallback(config, *, explicit: bool,
+                               saved_keys: dict[str, str]) -> str:
+    """当前提供商没有 Key 时，对齐到实际配了 Key 的那家。返回中文提示（无则空串）。
+
+    Args:
+        config: 待写入的 AgentConfig（原地修改 ``config.llm``）。
+        explicit: 提供商是否由用户/调用方显式指定。显式指定时**不**自动改换
+            —— 用户刚在设置里选了 OpenAI 却被悄悄切成 DeepSeek 更莫名其妙；
+            此时只回一句提示，告诉他 Key 还没填。
+        saved_keys: 配置文件中已保存的 provider → key。
+    """
+    from automind.core import provider_resolver as _pr
+
+    new_provider, new_model, note = _pr.resolve(
+        config.llm.provider, config.llm.model, config.llm.api_key, saved_keys)
+    if not note:
+        return ""
+    if explicit or new_provider == config.llm.provider:
+        logger.warning("llm_key_missing", provider=config.llm.provider, note=note)
+        return note
+    config.llm.provider = new_provider
+    config.llm.model = new_model
+    config.llm.api_base = ""
+    config.llm.api_key = (saved_keys.get(new_provider)
+                          or _pr.env_api_key(new_provider) or "")
+    logger.info("llm_provider_auto_switched",
+                to_provider=new_provider, to_model=new_model)
+    return note
+
+
+def _llm_config_for(agent, provider: str, model: str = ""):
+    """按持久化配置为 (provider, model) 组装一份完整的 LLMProviderConfig。
+
+    解析顺序与 `_rebuild_agent` 一致：模型 = 显式 > 提供商配置 > 内置默认；
+    api_base 仅接受合法 URL；Key = 已保存 > 环境变量 >（同提供商时）当前值。
+    采样参数（temperature / max_tokens / timeout）从当前配置继承。
+    """
+    from automind.core import provider_resolver as _pr
+
+    provider = (provider or agent.config.llm.provider).lower()
+    pcfg = _load_providers().get(provider, {})
+    cfg = agent.config.llm.model_copy(deep=True)
+    cfg.provider = provider
+    cfg.model = (model or pcfg.get("model")
+                 or _pr.default_model(provider) or cfg.model)
+    raw_base = pcfg.get("api_base", "")
+    cfg.api_base = raw_base if _valid_api_base(raw_base) else ""
+    key = _load_api_keys().get(provider) or _env_api_key(provider)
+    if not key and provider == agent.config.llm.provider:
+        key = agent.config.llm.api_key
+    cfg.api_key = key or ""
+    return cfg
+
+
 def _apply_mode_model(agent, interaction: str):
-    """按交互模式切换到对应模型（不改写全局默认配置）。返回最新 agent。"""
-    global _agent
+    """按交互模式切换到对应模型（不改写全局默认配置）。返回最新 agent。
+
+    只换 LLM，不重建整个 Agent —— 重建会重新 `AgentConfig.auto_load`、
+    重扫项目索引、重建 ChromaDB、重注册全部工具与技能，用户在 Web 上点一下
+    模式切换就要卡 2~3 秒，而真正变化的只有一个模型名。
+    """
     mm = _mode_model(interaction)
     if not mm:
         # 该模式未单独配置 → 回退到全局默认（provider+model）
@@ -298,8 +388,7 @@ def _apply_mode_model(agent, interaction: str):
               "model": active.get("model") or agent.config.llm.model}
     cur = (agent.config.llm.provider, agent.config.llm.model)
     if (mm["provider"], mm["model"]) != cur:
-        _rebuild_agent(provider=mm["provider"], model=mm["model"])
-        return _agent
+        agent.switch_llm(_llm_config_for(agent, mm["provider"], mm["model"]))
     return agent
 
 
@@ -319,6 +408,7 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
     from automind.core.types import ExecutionMode, InteractionMode
     from automind.tools.permissions import PermissionPolicy
 
+    provider_arg = provider     # 调用方是否显式指定（决定能否自动换提供商）
     active = _load_active()
     providers = _load_providers()
 
@@ -369,6 +459,15 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
     elif not config.llm.api_key:
         config.llm.api_key = _env_api_key(provider)
 
+    # 3.5) 默认模型与实际 Key 对齐（§开箱即用）
+    # 代码默认 openai/gpt-4o，而用户往往只配了 DeepSeek 一家的 Key —— 此前的
+    # 结果是启动即 llm_init_failed，界面只说"模型连接失败"，用户根本不知道
+    # 要去设置里换一家。这里在**用户尚未显式选过提供商**时自动对齐到配得起
+    # 的那家，并留一句中文提示给 /api/status 展示。
+    _set_llm_notice(_resolve_provider_fallback(
+        config, explicit=bool(provider_arg or active.get("provider")),
+        saved_keys=api_keys))
+
     # 4) 底层执行引擎
     interaction = active.get("interaction", "chat")
     exec_mode = _INTERACTION_TO_EXECUTION.get(interaction, "plan_and_execute")
@@ -404,10 +503,13 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
     for tname in _read_config().get("disabled_tools", []):
         try:
             _agent.tool_registry.unregister(tname)
-        except Exception:
-            pass
+        except Exception as e:
+            # 用户在界面上禁用了工具却没生效，是安全相关的错觉，必须记
+            logger.warning("disable_tool_failed", tool=tname, error=str(e))
     # 重连已保存的 MCP 服务器
     _reconnect_mcp_servers(_agent)
+    # 旧的会话克隆挂在上一代 agent 的工具/记忆上，必须一并作废
+    _drop_session_clones()
     logger.info("agent_rebuilt", provider=config.llm.provider, model=config.llm.model,
                 interaction=interaction, exec_mode=exec_mode,
                 llm_ready=_agent.llm is not None, project=config.project_root)
@@ -434,8 +536,9 @@ def _reconnect_mcp_servers(agent) -> None:
                 args=s.get("args", []), url=s.get("url", ""),
                 transport=s.get("transport", "stdio"),
             ))
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("mcp_server_restore_failed",
+                           server=s.get("name"), error=str(e))
 
 
 @asynccontextmanager
@@ -475,6 +578,12 @@ async def _lifespan(_app):
             await _pool.aclose_all()  # 释放全部会话 Agent（§7.4）
         except Exception as e:
             logger.warning("shutdown_pool_failed", error=str(e))
+    for _clone in list(_session_clones.values()):   # 社区版轻量克隆的 LLM 连接
+        try:
+            await _clone.close()
+        except Exception as e:
+            logger.warning("shutdown_clone_failed", error=str(e))
+    _session_clones.clear()
     if _agent is not None:
         try:
             await _agent.close()
@@ -515,16 +624,57 @@ def _pool_enabled() -> bool:
     return pool is not None and pool.enabled()
 
 
-def _acquire_run_agent(base_agent, sid: str):
-    """返回本次任务应使用的 Agent。
+# ── 社区/专业版：轻量会话克隆（§7.4 的免费档实现）─────────────────
+# 没有企业版会话池时，此前**所有并发任务共用同一个全局 Agent**：
+# `_interaction`（交互模式）、`_mode`、`context_mgr`（上下文消息）、
+# `_current_plan`（规划状态）、`llm.usage`（token 计数）全是共享可变状态。
+# 开两个标签页同时跑，就会出现「A 的对话模式被 B 的循环编程覆盖」
+# 「两边上下文互相串」「token 数被对方 reset() 清零」，而且一声不吭。
+# 克隆共享重资源（工具/技能注册表、记忆库、项目索引），只独享执行态，
+# 因此代价是毫秒级，不重扫项目也不重建 ChromaDB。
+_session_clones: OrderedDict[str, Any] = OrderedDict()
+_SESSION_CLONE_MAX = 32
 
-    企业版会话池启用时：返回该会话独立的 Agent（隔离 _current_plan/ReAct 态/
-    审批回调），并同步全局的交互/执行模式与审批回调；
-    否则：原样返回全局 agent（与历史行为一致，零改动）。
+
+def _drop_session_clones() -> None:
+    """全局 agent 被重建后，旧克隆全部作废（其 LLM 连接稍后异步关闭）。"""
+    stale = list(_session_clones.values())
+    _session_clones.clear()
+    for a in stale:
+        _close_clone_later(a)
+
+
+def _close_clone_later(agent) -> None:
+    """尽力释放克隆独享的 LLM 连接；没有事件循环时静默跳过。"""
+    try:
+        asyncio.get_running_loop().create_task(agent.close())
+    except RuntimeError:
+        pass
+    except Exception as e:
+        logger.warning("session_clone_close_failed", error=str(e))
+
+
+def _acquire_run_agent(base_agent, sid: str):
+    """返回本次任务应使用的 Agent（执行态与其它会话隔离）。
+
+    企业版会话池启用时：走池（带配额、超时回收与跨进程语义）；
+    否则：按会话缓存一个轻量克隆，同一会话的多轮复用同一实例，
+    不同会话彼此隔离。全局 agent 只作为「配置模板」，不再直接执行任务。
     """
-    if not _pool_enabled():
-        return base_agent
-    a = _edition.get_feature("session_pool").acquire(sid)
+    if _pool_enabled():
+        a = _edition.get_feature("session_pool").acquire(sid)
+    else:
+        a = _session_clones.get(sid)
+        if a is None or getattr(a, "_clone_origin", None) is not base_agent:
+            if a is not None:
+                _close_clone_later(a)
+            a = base_agent.clone_for_session()
+            a._clone_origin = base_agent
+            _session_clones[sid] = a
+            while len(_session_clones) > _SESSION_CLONE_MAX:
+                _, evicted = _session_clones.popitem(last=False)
+                _close_clone_later(evicted)
+        _session_clones.move_to_end(sid)
     a._interaction = base_agent._interaction
     a._mode = base_agent._mode
     a.approval_callback = getattr(base_agent, "approval_callback", None)
@@ -601,6 +751,9 @@ async def api_status(interaction: str = ""):
         "has_api_key": has_key,
         "llm_ready": llm_ready,
         "llm_error": llm_error,
+        # 自动选路提示（如"已检测到 DeepSeek Key，将使用 deepseek-chat"），
+        # 前端在模型面板顶部原样展示；无提示时为空串
+        "llm_notice": _llm_notice,
         "project": str(agent.config.project_root),
         "tools": len(agent.tool_registry),
         "skills": len(agent.skill_registry),
@@ -784,41 +937,55 @@ async def api_config_full():
 @app.post("/api/config")
 async def api_config(data: dict):
     """更新配置：提供商 / 模型 / api_base / API Key / 交互模式 / 采样参数。"""
-    global _agent
     from automind.core.types import ExecutionMode, InteractionMode
 
     agent = get_agent()
-    changed = False
+    llm_changed = False   # 提供商 / 模型 / Key / 地址 是否变化
+    changed = False       # 是否有任何影响会话执行的变化（用于作废会话克隆）
+    new_model = data.get("model") or ""
 
+    # 配置落盘是同步 IO —— 一律丢线程池，别让设置面板的一次保存
+    # 把整个事件循环（含正在流式输出的会话）顶住
     if data.get("provider") and data["provider"] != agent.config.llm.provider:
         agent.config.llm.provider = data["provider"]
-        _save_active(provider=data["provider"])
-        changed = True
-    if "model" in data and data["model"]:
-        agent.config.llm.model = data["model"]
-        _save_provider_cfg(agent.config.llm.provider, model=data["model"])
-        _save_active(model=data["model"])
-        changed = True
+        await asyncio.to_thread(_save_active, provider=data["provider"])
+        llm_changed = True
+    if new_model:
+        agent.config.llm.model = new_model
+        await asyncio.to_thread(_save_provider_cfg, agent.config.llm.provider,
+                                model=new_model)
+        await asyncio.to_thread(_save_active, model=new_model)
+        llm_changed = True
     if "api_base" in data:
         agent.config.llm.api_base = data["api_base"]
-        _save_provider_cfg(agent.config.llm.provider, api_base=data["api_base"])
-        changed = True
+        await asyncio.to_thread(_save_provider_cfg, agent.config.llm.provider,
+                                api_base=data["api_base"])
+        llm_changed = True
     if data.get("api_key"):
         agent.config.llm.api_key = data["api_key"]
         keys = _load_api_keys()
         keys[agent.config.llm.provider] = data["api_key"]
-        _save_api_keys(keys)
+        await asyncio.to_thread(_save_api_keys, keys)
+        llm_changed = True
+
+    if llm_changed:
+        # 只换 LLM。此前这里走的是整个 Agent 重建（重扫项目索引、重建
+        # ChromaDB、重注册全部工具与技能），在设置里点一下模型/模式就要
+        # 卡 2~3 秒 —— 而真正变化的只有一个模型名。
+        agent.switch_llm(_llm_config_for(agent, agent.config.llm.provider, new_model))
         changed = True
+
     if data.get("interaction"):
         try:
             new_interaction = InteractionMode(data["interaction"])
             exec_mode = _INTERACTION_TO_EXECUTION.get(data["interaction"], "plan_and_execute")
             agent._interaction = new_interaction
             agent._mode = ExecutionMode(exec_mode)
-            _save_active(interaction=data["interaction"])
-            # 切换到该模式对应的模型
+            agent.config.execution.mode = exec_mode
+            await asyncio.to_thread(_save_active, interaction=data["interaction"])
+            # 切换到该模式对应的模型（同样只换 LLM）
             agent = _apply_mode_model(agent, data["interaction"])
-            changed = True  # 强制走重建逻辑以确保模型生效
+            changed = True
         except ValueError:
             pass
     if "temperature" in data:
@@ -827,8 +994,8 @@ async def api_config(data: dict):
         agent.config.llm.max_tokens = int(data["max_tokens"])
 
     if changed:
-        _rebuild_agent()
-        agent = _agent
+        # 会话克隆持有旧的模型/模式配置，需在下次任务时重新派生
+        _drop_session_clones()
 
     llm_error = ""
     if agent.config.llm.api_key and agent.llm is None:
@@ -1080,6 +1247,48 @@ def _fs_path_denied(p: Path) -> bool:
                for part in _FS_DENY_PARTS)
 
 
+def _fs_list_sync(path: str) -> dict:
+    """目录浏览的同步实现（由 api_fs_list 丢进线程池执行）。
+
+    ``iterdir`` + 逐项 ``is_dir`` 在网络盘或大目录上可能几百毫秒，
+    直接跑在 async 端点里会**堵住整个事件循环**：此时所有其它 API、
+    正在流式输出的 WebSocket 一起卡住。
+    """
+    roots = _fs_roots()
+    base = (Path(path).expanduser() if path else Path.home()).resolve()
+    if _fs_path_denied(base):
+        return {"_error": "该目录不允许浏览", "_status": 403}
+    # 根锚定：路径必须与某个锚点根相关联，不能拿绝对路径漫游全盘
+    if not _fs_within_roots(base, roots):
+        return {"_error": "该目录不在允许浏览的范围内（仅限主目录、项目目录与已配置的工作区）",
+                "_status": 403, "roots": [str(r) for r in roots]}
+    if not base.is_dir():
+        return {"_error": f"非目录: {base}", "_status": 400}
+    dirs = []
+    try:
+        for e in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+            # 子项同样要过锚点与黑名单：向上导航到锚点父级时，
+            # 只应看到通往锚点的那条路，而不是该层的所有目录
+            if (e.is_dir() and not e.name.startswith(".")
+                    and not _fs_path_denied(e) and _fs_within_roots(e, roots)):
+                dirs.append(e.name)
+    except PermissionError:
+        pass
+    parent = str(base.parent) if base.parent != base else ""
+    # 已经在最外层锚点上时不再给 parent，避免界面诱导用户往上点却总是 403
+    if parent and not _fs_within_roots(Path(parent), roots):
+        parent = ""
+    return {
+        "path": str(base),
+        "parent": parent,
+        "dirs": dirs,
+        "roots": [str(r) for r in roots],
+        # drives 仅在确实有锚点落在该盘符下时才给出
+        "drives": [d for d in _list_drives()
+                   if any(str(r).upper().startswith(d.upper()) for r in roots)],
+    }
+
+
 @app.get("/api/fs/list")
 async def api_fs_list(request: Request, path: str = ""):
     """浏览本地目录（仅返回子目录），用于项目目录选择器。"""
@@ -1089,42 +1298,32 @@ async def api_fs_list(request: Request, path: str = ""):
                        client=request.client.host if request.client else "?")
         return JSONResponse({"error": denied}, status_code=403)
     try:
-        roots = _fs_roots()
-        base = (Path(path).expanduser() if path else Path.home()).resolve()
-        if _fs_path_denied(base):
-            return JSONResponse({"error": "该目录不允许浏览"}, status_code=403)
-        # 根锚定：路径必须与某个锚点根相关联，不能拿绝对路径漫游全盘
-        if not _fs_within_roots(base, roots):
-            return JSONResponse(
-                {"error": "该目录不在允许浏览的范围内（仅限主目录、项目目录与已配置的工作区）",
-                 "roots": [str(r) for r in roots]}, status_code=403)
-        if not base.is_dir():
-            return JSONResponse({"error": f"非目录: {base}"}, status_code=400)
-        dirs = []
-        try:
-            for e in sorted(base.iterdir(), key=lambda p: p.name.lower()):
-                # 子项同样要过锚点与黑名单：向上导航到锚点父级时，
-                # 只应看到通往锚点的那条路，而不是该层的所有目录
-                if (e.is_dir() and not e.name.startswith(".")
-                        and not _fs_path_denied(e) and _fs_within_roots(e, roots)):
-                    dirs.append(e.name)
-        except PermissionError:
-            pass
-        parent = str(base.parent) if base.parent != base else ""
-        # 已经在最外层锚点上时不再给 parent，避免界面诱导用户往上点却总是 403
-        if parent and not _fs_within_roots(Path(parent), roots):
-            parent = ""
-        return {
-            "path": str(base),
-            "parent": parent,
-            "dirs": dirs,
-            "roots": [str(r) for r in roots],
-            # drives 仅在确实有锚点落在该盘符下时才给出
-            "drives": [d for d in _list_drives()
-                       if any(str(r).upper().startswith(d.upper()) for r in roots)],
-        }
+        result = await asyncio.to_thread(_fs_list_sync, path)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=400)
+    if "_error" in result:
+        status = result.pop("_status", 400)
+        result["error"] = result.pop("_error")
+        return JSONResponse(result, status_code=status)
+    return result
+
+
+def _preview_file_sync(root: Path, path: str) -> dict:
+    """预览文件的同步实现（路径校验 + 读盘，交由线程池执行）。"""
+    try:
+        target = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
+    except Exception:
+        return {"_error": "非法路径", "_status": 400}
+    # 限制在项目根目录内，防止目录穿越
+    if root not in target.parents and target != root:
+        return {"_error": "路径超出项目目录范围", "_status": 403}
+    if not target.is_file():
+        return {"_error": f"文件不存在: {target}", "_status": 404}
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"_error": str(e), "_status": 400}
+    return {"content": content, "suffix": target.suffix.lower()}
 
 
 @app.get("/api/preview/file")
@@ -1132,26 +1331,16 @@ async def api_preview_file(path: str):
     """在项目目录范围内安全地预览一个文件（HTML 直接渲染，其它返回文本）。"""
     agent = get_agent()
     root = Path(agent.config.project_root).resolve()
-    try:
-        target = (root / path).resolve() if not Path(path).is_absolute() else Path(path).resolve()
-    except Exception:
-        return JSONResponse({"error": "非法路径"}, status_code=400)
-    # 限制在项目根目录内，防止目录穿越
-    if root not in target.parents and target != root:
-        return JSONResponse({"error": "路径超出项目目录范围"}, status_code=403)
-    if not target.is_file():
-        return JSONResponse({"error": f"文件不存在: {target}"}, status_code=404)
-    suffix = target.suffix.lower()
-    try:
-        content = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    if suffix in (".html", ".htm"):
-        return HTMLResponse(content)
+    # 读盘不能跑在事件循环上 —— 预览一个大文件会让所有会话一起卡住
+    r = await asyncio.to_thread(_preview_file_sync, root, path)
+    if "_error" in r:
+        return JSONResponse({"error": r["_error"]}, status_code=r["_status"])
+    if r["suffix"] in (".html", ".htm"):
+        return HTMLResponse(r["content"])
     media = "text/plain; charset=utf-8"
-    if suffix == ".svg":
+    if r["suffix"] == ".svg":
         media = "image/svg+xml"
-    return HTMLResponse(content, media_type=media)
+    return HTMLResponse(r["content"], media_type=media)
 
 
 @app.post("/api/preview/render")
@@ -1439,10 +1628,11 @@ def _apply_router(agent, raw_task: str, images: list | None):
         return agent
     if (sel["provider"], sel["model"]) != (agent.config.llm.provider,
                                            agent.config.llm.model):
-        _rebuild_agent(provider=sel["provider"], model=sel["model"])
+        # 只换本会话 agent 的 LLM —— 路由是逐任务决策，绝不能改写全局实例，
+        # 否则并发任务会互相把对方路由到的模型顶掉
+        agent.switch_llm(_llm_config_for(agent, sel["provider"], sel["model"]))
         logger.info("router_switched", tier=sel.get("tier"), score=sel.get("score"),
                     provider=sel["provider"], model=sel["model"])
-        return _agent
     return agent
 
 
@@ -1624,10 +1814,8 @@ def _editor_target(path: str) -> tuple[Path | None, str]:
     return target, ""
 
 
-@app.get("/api/files/tree")
-async def api_files_tree(limit: int = 800, depth: int = 6):
-    """项目文件树（扁平列表，前端折叠渲染）；排除依赖/缓存目录。"""
-    root = _editor_root()
+def _files_tree_sync(root: Path, limit: int, depth: int) -> dict:
+    """项目文件树的同步实现（递归 iterdir + stat，必须放到线程池）。"""
     entries: list[dict] = []
 
     def _walk(base: Path, level: int) -> None:
@@ -1656,38 +1844,42 @@ async def api_files_tree(limit: int = 800, depth: int = 6):
             "truncated": len(entries) >= limit}
 
 
+@app.get("/api/files/tree")
+async def api_files_tree(limit: int = 800, depth: int = 6):
+    """项目文件树（扁平列表，前端折叠渲染）；排除依赖/缓存目录。"""
+    return await asyncio.to_thread(_files_tree_sync, _editor_root(), limit, depth)
+
+
+def _files_read_sync(target: Path, path: str) -> dict:
+    """编辑器读文件的同步实现（stat + 读盘，交由线程池执行）。"""
+    if not target.is_file():
+        return {"_error": f"文件不存在: {path}", "_status": 404}
+    st = target.stat()
+    if st.st_size > _EDITOR_MAX_BYTES:
+        return {"_error": "文件过大，编辑器仅支持 1.5MB 以内的文本文件", "_status": 413}
+    try:
+        content = target.read_text(encoding="utf-8", errors="replace")
+    except Exception as e:
+        return {"_error": str(e), "_status": 400}
+    return {"path": path, "content": content,
+            "size": st.st_size, "mtime": st.st_mtime}
+
+
 @app.get("/api/files/read")
 async def api_files_read(path: str):
     """读取项目内文本文件（供编辑器打开）。"""
     target, err = _editor_target(path)
     if target is None:
         return JSONResponse({"error": err}, status_code=403)
-    if not target.is_file():
-        return JSONResponse({"error": f"文件不存在: {path}"}, status_code=404)
-    if target.stat().st_size > _EDITOR_MAX_BYTES:
-        return JSONResponse({"error": "文件过大，编辑器仅支持 1.5MB 以内的文本文件"},
-                            status_code=413)
-    try:
-        content = target.read_text(encoding="utf-8", errors="replace")
-    except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-    return {"path": path, "content": content,
-            "size": target.stat().st_size, "mtime": target.stat().st_mtime}
+    r = await asyncio.to_thread(_files_read_sync, target, path)
+    if "_error" in r:
+        return JSONResponse({"error": r["_error"]}, status_code=r["_status"])
+    return r
 
 
-@app.post("/api/files/write")
-async def api_files_write(data: dict):
-    """保存编辑器内容（前像记入改动日志 → 右栏「文件改动」可撤销）。"""
+def _files_write_sync(target: Path, content: str) -> dict:
+    """编辑器写文件的同步实现（读前像 + 落盘，交由线程池执行）。"""
     from automind.tools.file_editor import JOURNAL
-    path = (data.get("path") or "").strip()
-    content = data.get("content")
-    if not path or not isinstance(content, str):
-        return JSONResponse({"error": "path 与 content 必填"}, status_code=400)
-    if len(content.encode("utf-8", errors="ignore")) > _EDITOR_MAX_BYTES:
-        return JSONResponse({"error": "内容过大（上限 1.5MB）"}, status_code=413)
-    target, err = _editor_target(path)
-    if target is None:
-        return JSONResponse({"error": err}, status_code=403)
     try:
         existed = target.exists()
         if existed:
@@ -1701,10 +1893,38 @@ async def api_files_write(data: dict):
             JOURNAL.record(str(target), None, "editor")
         target.write_text(content, encoding="utf-8")
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+        return {"_error": str(e), "_status": 400}
+    return {"created": not existed}
+
+
+@app.post("/api/files/write")
+async def api_files_write(data: dict):
+    """保存编辑器内容（前像记入改动日志 → 右栏「文件改动」可撤销）。"""
+    path = (data.get("path") or "").strip()
+    content = data.get("content")
+    if not path or not isinstance(content, str):
+        return JSONResponse({"error": "path 与 content 必填"}, status_code=400)
+    if len(content.encode("utf-8", errors="ignore")) > _EDITOR_MAX_BYTES:
+        return JSONResponse({"error": "内容过大（上限 1.5MB）"}, status_code=413)
+    target, err = _editor_target(path)
+    if target is None:
+        return JSONResponse({"error": err}, status_code=403)
+    r = await asyncio.to_thread(_files_write_sync, target, content)
+    if "_error" in r:
+        return JSONResponse({"error": r["_error"]}, status_code=r["_status"])
     logger.info("editor_saved", path=path, size=len(content))
     return {"status": "ok", "path": path, "size": len(content),
-            "created": not existed}
+            "created": r["created"]}
+
+
+def _read_text_safe(target: Path) -> str:
+    """尽力读出文本；读不出（不存在/二进制/无权限）返回空串。"""
+    if not target.is_file():
+        return ""
+    try:
+        return target.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return ""
 
 
 @app.get("/api/changes/diff")
@@ -1717,12 +1937,7 @@ async def api_changes_diff(path: str):
     pre = JOURNAL.pre_image(str(target))
     if pre is None:
         return JSONResponse({"error": "该文件没有记录在案的改动"}, status_code=404)
-    current = ""
-    if target.is_file():
-        try:
-            current = target.read_text(encoding="utf-8", errors="replace")
-        except Exception:
-            current = ""
+    current = await asyncio.to_thread(_read_text_safe, target)
     return {"path": path, "before": pre["before"] or "",
             "after": current, "created": pre["created"]}
 
@@ -2370,6 +2585,10 @@ async def api_run(data: dict):
         except ValueError:
             pass
 
+    # 取本会话独立的 Agent —— 必须在切模型/路由**之前**，否则模式与模型仍然
+    # 落在全局实例上，并发任务照样互相覆盖（企业版走会话池，其余走轻量克隆）
+    agent = _acquire_run_agent(agent, chat_sid)
+
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
@@ -2403,8 +2622,6 @@ async def api_run(data: dict):
         "model": agent.config.llm.model, "interaction": agent._interaction.value,
     }
     _running_tasks["count"] += 1
-    # §7.4：池启用时改用该会话独立的 Agent（执行态隔离）；关闭时仍是全局 agent。
-    agent = _acquire_run_agent(agent, chat_sid)
     logger.info("task_start", session=session_id, interaction=agent._interaction.value,
                 provider=agent.config.llm.provider, model=agent.config.llm.model,
                 task=task[:120], running=_running_tasks["count"],
@@ -2420,7 +2637,7 @@ async def api_run(data: dict):
             if cached is not None:
                 hist.append({"role": "user", "content": raw_task})
                 hist.append({"role": "assistant", "content": cached["reply"]})
-                _save_session_history(chat_sid)
+                await _save_history_notify(chat_sid)
                 _active_sessions[session_id]["status"] = "success"
                 record = {
                     "session_id": session_id, "task": raw_task, "success": True,
@@ -2436,7 +2653,7 @@ async def api_run(data: dict):
             task_with_kb = _apply_kb(task)   # 知识库自动检索注入
             reply = await agent.chat(task_with_kb, images=images, history=hist)
             _restore_kb_history(hist, task, task_with_kb, images)
-            _save_session_history(chat_sid)
+            await _save_history_notify(chat_sid)
             usage = agent.llm.usage
             _cache_store(raw_task, images, reply, usage.total)
             _active_sessions[session_id]["status"] = "success"
@@ -2559,7 +2776,13 @@ async def api_chat_history(session_id: str = "default"):
 async def api_chat_reset(session_id: str = "default"):
     """删除某会话的对话记录。"""
     _store.session_histories[session_id] = []
-    _save_session_history(session_id)
+    from automind.server_store import SessionSaveError
+    try:
+        _save_session_history(session_id)
+    except SessionSaveError as e:
+        logger.error("chat_reset_persist_failed", sid=session_id, error=str(e))
+        return JSONResponse(
+            {"error": f"清空记录未能写入磁盘：{e}"}, status_code=500)
     if session_id == "default":
         try:
             get_agent().reset_chat()
@@ -2682,6 +2905,10 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         except ValueError:
             pass
 
+    # 取本会话独立的 Agent（WS 路径此前直接用全局实例，两个标签页同时跑
+    # 会互相覆盖交互模式、串上下文、清对方的 token 计数）
+    agent = _acquire_run_agent(agent, chat_sid)
+
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
@@ -2756,7 +2983,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                                     "delta": cached["reply"]})
                 hist.append({"role": "user", "content": raw_task})
                 hist.append({"role": "assistant", "content": cached["reply"]})
-                _save_session_history(chat_sid)
+                await _save_history_notify(chat_sid, ws)
                 record = {
                     "session_id": session_id, "task": raw_task, "success": True,
                     "output": cached["reply"], "steps": 0, "backtracks": 0,
@@ -2781,7 +3008,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                 await ws.send_json({"type": "chat_chunk", "session_id": session_id,
                                     "delta": delta})
             _restore_kb_history(hist, task, task_with_kb, images)
-            _save_session_history(chat_sid)
+            await _save_history_notify(chat_sid, ws)
             _cache_store(raw_task, images, "".join(chunks),
                          getattr(getattr(agent, "_last_stream_usage", None),
                                  "total", 0) or 0)
@@ -3328,6 +3555,13 @@ def _bootstrap_auth(host: str) -> str:
 
 def main():
     import argparse
+
+    # 中文 Windows 控制台默认 GBK：横幅里的 ╔ ║ 一写就 UnicodeEncodeError，
+    # 进程直接崩在第一行。launch.bat 的 chcp 65001 只救了那一个入口，
+    # 照 README 直接敲 `python -m automind.server` 的用户仍会撞上。
+    from automind.core.console import enable_utf8_console
+    enable_utf8_console()
+
     parser = argparse.ArgumentParser(description="AutoMind Web Server")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)

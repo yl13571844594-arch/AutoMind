@@ -169,23 +169,16 @@ class AgentConfig(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         """初始化后从环境变量补充 API Key。"""
-        env_key_map = {
-            "openai": "OPENAI_API_KEY",
-            "anthropic": "ANTHROPIC_API_KEY",
-            "google": "GOOGLE_API_KEY",
-            "grok": "GROK_API_KEY",
-            "deepseek": "DEEPSEEK_API_KEY",
-            "kimi": "MOONSHOT_API_KEY",
-            "bailian": "DASHSCOPE_API_KEY",
-            "zhipu": "ZHIPU_API_KEY",
-            "doubao": "DOUBAO_API_KEY",
-        }
+        # provider → 环境变量的映射此前在 config.py / server_store.py /
+        # server.py 各写了一份，加一家提供商就得改三处；现统一到 resolver
+        from automind.core.provider_resolver import ENV_KEY_MAP
+
         if not self.llm.api_key:
-            env_var = env_key_map.get(self.llm.provider, "")
+            env_var = ENV_KEY_MAP.get(self.llm.provider, "")
             if env_var:
                 self.llm.api_key = os.environ.get(env_var, "")
         for fb in self.fallback_llms:
             if not fb.api_key:
-                env_var = env_key_map.get(fb.provider, "")
+                env_var = ENV_KEY_MAP.get(fb.provider, "")
                 if env_var:
                     fb.api_key = os.environ.get(env_var, "")

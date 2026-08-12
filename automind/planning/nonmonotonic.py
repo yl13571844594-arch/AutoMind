@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 from automind.core.types import Goal, GoalStatus, HierarchicalPlan
 
@@ -199,7 +200,9 @@ class NonMonotonicReasoner:
         plan.revision_history.append(
             f"Backtrack from {failed_goal_id}: {error_context}"
         )
-        plan.updated_at = plan.updated_at  # 更新时间戳
+        # 原来是 `plan.updated_at = plan.updated_at` —— 自赋值，纯 no-op，
+        # 时间戳从回溯发生起就再没动过，外部据此判断"计划是否有变更"会一直误判。
+        plan.updated_at = datetime.now(UTC)
 
         return plan
 
