@@ -220,7 +220,12 @@ class AutoMindAgent:
 
         # ── 生命周期钩子 + 插件系统（§3.5 / §14.7）──
         self.hooks = AgentHooks()
+        # 搜索目录由 PluginManager 自己决定（内置目录优先、用户目录其次），
+        # 不在这里另写一份 —— 两处各写一遍必然会漂移
         self.plugin_manager = PluginManager()
+        # 内置插件开箱即用：默认全部加载（用户插件仍需在界面手动启用）
+        self._load_builtin_plugins()
+        self.apply_plugin_hooks()
 
     # 各交互模式的系统提示词（精炼、可执行，提升命中率并节省 token）
     CHAT_SYSTEM_PROMPT = (
@@ -274,6 +279,19 @@ class AutoMindAgent:
     def apply_plugin_hooks(self) -> None:
         """将当前已加载插件的 hooks 汇总应用到本 Agent。"""
         self.hooks = self.plugin_manager.assemble_hooks()
+
+    def _load_builtin_plugins(self) -> None:
+        """默认加载随包分发的内置插件（用户插件仍需手动启用）。
+
+        失败不阻断启动：单个插件加载异常只是不生效，绝不会让 Agent 起不来。
+        """
+        for meta in self.plugin_manager.discover():
+            try:
+                if self.plugin_manager.is_builtin(meta):
+                    self.plugin_manager.load(meta.name)
+            except Exception as e:                        # pragma: no cover - 防御性
+                logger.warning("builtin_plugin_load_failed",
+                               plugin=meta.name, error=str(e))
 
     async def _run_impl(self, user_input: str) -> AgentResult:
         """执行用户指令。
@@ -662,6 +680,16 @@ class AutoMindAgent:
 
         async def on_action(tc, result) -> None:
             out = result.output if result.success else result.error
+            # 浏览器/截图工具：把 base64 截图单独推给前端渲染 —— 让"网页交互效果"
+            # 直接可视化在对话框里（step_action 的 output 是 600 字文本，塞不下图片）。
+            preview = self._extract_screenshot(result)
+            if preview and len(preview) <= 1_500_000:
+                await self._emit({"type": "browser_preview", "tool": tc.name,
+                                  "screenshot_base64": preview})
+            # output 里若含 base64，摘要掉，避免 600 字全是乱码
+            if isinstance(out, dict) and any(k in out for k in ("screenshot_base64", "base64")):
+                out = {k: ("<base64 截图>" if k in ("screenshot_base64", "base64") else v)
+                       for k, v in out.items()}
             await self._emit({"type": "step_action", "iter": tag,
                               "goal_id": getattr(self, "_active_goal_id", None),
                               "tool": tc.name,
@@ -685,6 +713,25 @@ class AutoMindAgent:
                 })
 
         return on_thought, on_action
+
+    @staticmethod
+    def _extract_screenshot(result: Any) -> str | None:
+        """从工具结果里取出截图 base64（供前端渲染网页交互效果）。
+
+        识别浏览器/截图工具返回的 ``screenshot_base64`` 或 ``base64`` 字段；
+        兼容 ``data:image/...;base64,`` 前缀。非截图结果返回 None。
+        """
+        if not getattr(result, "success", False):
+            return None
+        out = getattr(result, "output", None)
+        if not isinstance(out, dict):
+            return None
+        b64 = out.get("screenshot_base64") or out.get("base64")
+        if not isinstance(b64, str) or not b64:
+            return None
+        if b64.startswith("data:") and "," in b64:
+            b64 = b64.split(",", 1)[1]
+        return b64
 
     async def preflight_check(self) -> dict:
         """任务开始前的配置自检 —— 早报错好过跑到一半才失败。
@@ -1089,7 +1136,9 @@ class AutoMindAgent:
         for _loader in (self._register_office_tools,
                         self._register_net_tools,
                         self._register_data_tools,
-                        self._register_collab_tools):
+                        self._register_collab_tools,
+                        self._register_media_tools,
+                        self._register_system_tools):
             try:
                 _loader()
             except Exception as e:                        # pragma: no cover - 防御性
@@ -1097,9 +1146,32 @@ class AutoMindAgent:
                                group=_loader.__name__, error=str(e))
 
     def _register_office_tools(self) -> None:
-        from automind.tools.office import EmailTool, ExcelTool, PdfTool, WordTool
-        for tool in (ExcelTool(), WordTool(), PdfTool(), EmailTool()):
+        from automind.tools.office import EmailTool, ExcelTool, PdfTool, PptTool, WordTool
+        for tool in (ExcelTool(), WordTool(), PdfTool(), PptTool(), EmailTool()):
             self.tool_registry.register(tool)
+
+    def _register_media_tools(self) -> None:
+        """多媒体工具（v1.6.0）：截屏 / OCR / 图像 / 图表 / 音频 / 视频。"""
+        from automind.tools.media_tools import (
+            AudioTool,
+            ChartTool,
+            ImageTool,
+            OcrTool,
+            ScreenshotTool,
+            VideoTool,
+        )
+        for tool in (ScreenshotTool(), OcrTool(), ImageTool(),
+                     ChartTool(), AudioTool(), VideoTool()):
+            self.tool_registry.register(tool)
+
+    def _register_system_tools(self) -> None:
+        """系统工具（v1.6.0）：git / 进程 / 剪贴板 / CSV。"""
+        from automind.tools.csv_tool import CsvTool
+        from automind.tools.system_tools import ClipboardTool, GitTool, ProcessTool
+        self.tool_registry.register(GitTool(project_root=self.config.project_root))
+        self.tool_registry.register(ProcessTool())
+        self.tool_registry.register(ClipboardTool())
+        self.tool_registry.register(CsvTool())
 
     def _register_net_tools(self) -> None:
         from automind.tools.net_tools import HttpRequestTool, WebSearchTool

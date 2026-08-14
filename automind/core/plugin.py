@@ -38,15 +38,41 @@ class PluginMeta:
     path: str = ""  # 插件目录绝对路径
 
 
+def builtin_plugin_dir() -> Path:
+    """随包分发的内置插件目录（automind/builtin_plugins）。"""
+    return Path(__file__).resolve().parent.parent / "builtin_plugins"
+
+
+def user_plugin_dir() -> Path:
+    """用户自建插件目录。"""
+    return Path("~/.automind/plugins").expanduser()
+
+
 class PluginManager:
     """插件管理器 — 扫描、加载、卸载插件并汇总其 hooks。"""
 
     def __init__(self, plugin_dirs: list[Path] | None = None) -> None:
+        # 内置目录在前、用户目录在后：同名时用户插件覆盖内置（_meta 后写胜出），
+        # 这样用户想改写内置插件的行为，放一个同名目录即可，无需改源码。
+        #
+        # 此前默认只有用户目录 —— 随包分发的 4 个内置插件（cost_tracker /
+        # pii_guard / task_notify / hello_hooks）文件在、清单在，却**从未被
+        # 扫描到**，插件面板永远显示"未发现插件"。
         self.plugin_dirs: list[Path] = plugin_dirs or [
-            Path("~/.automind/plugins").expanduser()
+            builtin_plugin_dir(), user_plugin_dir(),
         ]
+        self._builtin_dir: Path = builtin_plugin_dir()
         self._loaded: dict[str, AgentHooks] = {}
         self._meta: dict[str, PluginMeta] = {}
+
+    def is_builtin(self, meta: PluginMeta | None) -> bool:
+        """该插件是否来自随包分发的内置目录。"""
+        if meta is None or not meta.path:
+            return False
+        try:
+            return self._builtin_dir.resolve() in Path(meta.path).resolve().parents
+        except OSError:
+            return False
 
     # ── 发现 ──────────────────────────────────────────────
 
@@ -166,6 +192,9 @@ class PluginManager:
                 "version": m.version if m else "",
                 "description": m.description if m else "",
                 "author": m.author if m else "",
+                # 按插件**实际所在目录**判定，而不是"plugin_dirs[0] 即内置"——
+                # 后者在用户自定义 plugin_dirs 时会把用户插件错标成内置
+                "builtin": self.is_builtin(m),
                 "loaded": n in self._loaded,
             })
         return out

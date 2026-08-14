@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "1.5.2"
+version = "1.6.0"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
@@ -50,12 +50,25 @@ web = [
 # 办公自动化工具（excel/word/pdf/calendar）。这些库不进核心依赖 ——
 # 只用对话功能的用户没道理被拖上一堆 Office 解析库；工具照常注册，
 # 缺库时返回可照抄的安装命令（见 automind/tools/_toolkit.py）。
+#
+# 这一组必须与 automind/tools/_toolkit.py 的 OPTIONAL_DEPS 保持同步 ——
+# 缺库时工具返回的提示就是"pip install 'automind-agent[office]'"，
+# 少一个包，那句提示就是一张空头支票（照做了还是用不了）。
+# tests/tools/test_optional_deps.py 会断言两边一致。
 office = [
     "openpyxl>=3.1",         # Excel 读写
     "python-docx>=1.1",      # Word 读写
     "pypdf>=4.0",            # PDF 解析与合并
     "icalendar>=5.0",        # ICS 日历
     "httpx>=0.27.0",         # web_search / http_request / im_integration
+    # v1.6.0 内置多媒体 / 系统工具
+    "pillow>=10.0",          # 图像处理 / 截屏 / 图表导出
+    "python-pptx>=0.6.21",   # PowerPoint 生成
+    "matplotlib>=3.7",       # 数据图表绘制
+    "psutil>=5.9",           # 进程与端口管理
+    "pyperclip>=1.8",        # 剪贴板读写
+    "pytesseract>=0.3.10",   # OCR 文字识别（另需系统安装 Tesseract 引擎）
+    "mutagen>=1.47",         # 音频元信息解析
 ]
 full = [
     "fastapi>=0.110.0",
@@ -70,6 +83,13 @@ full = [
     "python-docx>=1.1",
     "pypdf>=4.0",
     "icalendar>=5.0",
+    "pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "matplotlib>=3.7",
+    "psutil>=5.9",
+    "pyperclip>=1.8",
+    "pytesseract>=0.3.10",
+    "mutagen>=1.47",
 ]
 dev = [
     "automind-agent[web]",   # 测试需 Web 栈（fastapi/uvicorn/httpx/openai）
@@ -79,6 +99,16 @@ dev = [
     "openpyxl>=3.1",
     "python-docx>=1.1",
     "icalendar>=5.0",
+    # v1.6.0 多媒体/系统工具同理 —— 不装的话 chart/ppt/image/process/clipboard
+    # 的用例只能验"缺库提示"，真正的绘图与读写分支一行都跑不到。
+    # 唯独 pytesseract 不进 dev：它还需要系统级 Tesseract 引擎，
+    # CI 上装了 Python 包也只会换一种失败方式，反而掩盖真实结论。
+    "pillow>=10.0",
+    "python-pptx>=0.6.21",
+    "matplotlib>=3.7",
+    "psutil>=5.9",
+    "pyperclip>=1.8",
+    "mutagen>=1.47",
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
 ]
@@ -115,6 +145,9 @@ automind = [
     "static/js/*.js",
     "static/dist/*.html",
     "static/dist/assets/*",
+    # 内置插件（非 Python 包，需显式随包分发 plugin.json + hooks.py）
+    "builtin_plugins/*/plugin.json",
+    "builtin_plugins/*/hooks.py",
 ]
 
 [tool.ruff]

@@ -81,7 +81,8 @@ class NotifyTool(AbstractTool):
         enc = base64.b64encode(ps.encode("utf-16-le")).decode()
         r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive",
                             "-EncodedCommand", enc],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20,
+                           encoding="utf-8", errors="replace")
         if r.returncode != 0:
             return bad(self.name, f"通知发送失败：{(r.stderr or '').strip()[:200]}")
         return ok(self.name, shown=True, platform="windows", title=title)
@@ -95,7 +96,8 @@ class NotifyTool(AbstractTool):
         # osascript 同理：用 argv 传参而非拼字符串
         script = 'on run argv\ndisplay notification (item 2 of argv) with title (item 1 of argv)\nend run'
         r = subprocess.run(["osascript", "-e", script, title, body],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20,
+                           encoding="utf-8", errors="replace")
         if r.returncode != 0:
             return bad(self.name, f"通知发送失败：{(r.stderr or '').strip()[:200]}")
         return ok(self.name, shown=True, platform="macos", title=title)
@@ -106,7 +108,8 @@ class NotifyTool(AbstractTool):
                        "未找到 notify-send。请安装：Debian/Ubuntu `apt install libnotify-bin`，"
                        "Fedora `dnf install libnotify`。")
         r = subprocess.run(["notify-send", "-u", urgency, "-a", "AutoMind", title, body],
-                           capture_output=True, text=True, timeout=20)
+                           capture_output=True, text=True, timeout=20,
+                           encoding="utf-8", errors="replace")
         if r.returncode != 0:
             return bad(self.name, f"通知发送失败：{(r.stderr or '').strip()[:200]}")
         return ok(self.name, shown=True, platform="linux", title=title)

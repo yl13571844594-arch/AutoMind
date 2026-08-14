@@ -305,7 +305,8 @@ def _signature_info(path: str) -> tuple[str, str]:
              f"$s = Get-AuthenticodeSignature -FilePath '{path}';"
              "$s.Status.ToString() + '|' + "
              "$(if ($s.SignerCertificate) { $s.SignerCertificate.Subject } else { '' })"],
-            capture_output=True, text=True, timeout=30, check=False)
+            capture_output=True, text=True, timeout=30, check=False,
+            encoding="utf-8", errors="replace")
         status, _, subject = out.stdout.strip().partition("|")
         return status or "Unknown", subject
     except Exception as e:

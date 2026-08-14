@@ -15,7 +15,7 @@ import sys
 import time
 import uuid
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Any
 
@@ -506,6 +506,9 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
         except Exception as e:
             # 用户在界面上禁用了工具却没生效，是安全相关的错觉，必须记
             logger.warning("disable_tool_failed", tool=tname, error=str(e))
+    # 恢复已启用的插件（内置 + 用户）—— 此前"启用"只活在当前进程的内存里，
+    # 一次改模型触发的重建、或重启服务，插件就悄悄失效了
+    _restore_plugins(_agent)
     # 重连已保存的 MCP 服务器
     _reconnect_mcp_servers(_agent)
     # 旧的会话克隆挂在上一代 agent 的工具/记忆上，必须一并作废
@@ -523,6 +526,47 @@ _BUILTIN_SKILLS = {
 }
 # 自定义技能目录
 _SKILLS_DIR = _skills_dir()
+
+
+def _restore_plugins(agent) -> None:
+    """把插件的启用状态对齐到配置（既补加载，也补卸载）。
+
+    只"补加载"是不够的：内置插件在 `AutoMindAgent.__init__` 里默认全部自动
+    加载，所以用户在界面上关掉一个内置插件后，下一次 Agent 重建（改个模型就
+    会触发）又会把它悄悄装回来 —— 开关看起来能点，实际按不住。
+    """
+    cfg = _read_config()
+    if "enabled_plugins" not in cfg:
+        return                              # 用户从未调整过 → 保持默认（内置全开）
+    want = set(cfg.get("enabled_plugins") or [])
+    agent.plugin_manager.discover()         # 先建立元信息缓存，否则 load() 找不到
+
+    loaded, unloaded = [], []
+    for name in sorted(want - set(agent.plugin_manager.loaded_names())):
+        try:
+            if agent.plugin_manager.load(name) is not None:
+                loaded.append(name)
+            else:
+                logger.warning("plugin_restore_missing", plugin=name)
+        except Exception as e:
+            logger.warning("plugin_restore_failed", plugin=name, error=str(e))
+    for name in sorted(set(agent.plugin_manager.loaded_names()) - want):
+        try:
+            agent.plugin_manager.unload(name)
+            unloaded.append(name)
+        except Exception as e:
+            logger.warning("plugin_disable_failed", plugin=name, error=str(e))
+
+    if loaded or unloaded:
+        agent.apply_plugin_hooks()
+        logger.info("plugins_reconciled", loaded=loaded, unloaded=unloaded)
+
+
+def _persist_enabled_plugins(agent) -> None:
+    """把当前已加载的插件名单落盘（下次启动/重建自动恢复）。"""
+    cfg = _read_config()
+    cfg["enabled_plugins"] = agent.plugin_manager.loaded_names()
+    _write_config(cfg)
 
 
 def _reconnect_mcp_servers(agent) -> None:
@@ -1104,9 +1148,14 @@ async def api_config_test(data: dict):
 
     # 仅当 api_base 是有效 URL 时才传入，避免误用占位符
     safe_base = api_base if (api_base and (api_base.startswith("http://") or api_base.startswith("https://"))) else ""
+    # 测试连接要点：
+    # - timeout 12s + max_retries 0：快速失败，别再让前端"转圈圈"几十秒；
+    # - max_tokens 128：推理模型（如 deepseek-v4-flash）会先输出 reasoning，
+    #   token 太少会把 content 挤成空串，reply_sample 看起来像"没反应"。
     cfg = LLMProviderConfig(
         provider=provider, model=model, api_key=api_key,
-        api_base=safe_base, max_tokens=16, temperature=0.0, timeout=30.0,
+        api_base=safe_base, max_tokens=128, temperature=0.0,
+        timeout=12.0, max_retries=0,
     )
     t0 = time.perf_counter()
     try:
@@ -1142,6 +1191,10 @@ async def api_config_test(data: dict):
         return {"success": False, "stage": "request", "error": msg,
                 "hint": hint, "provider": provider, "model": model,
                 "api_base": api_base or "(默认)"}
+    finally:
+        # 测试连接是一次性探测，用完即关，别留下连接池（每次测试都会新建一个）
+        with suppress(Exception):
+            await backend.close()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2060,6 +2113,13 @@ async def api_rollback(data: dict):
 # ═══════════════════════════════════════════════════════════
 
 
+@app.get("/api/mcp/presets")
+async def api_mcp_presets():
+    """返回内置 MCP 官方适配预设（一键添加用，见 tools/mcp_presets.py）。"""
+    from automind.tools.mcp_presets import MCP_PRESETS
+    return {"presets": MCP_PRESETS}
+
+
 @app.get("/api/mcp")
 async def api_mcp_list():
     """列出已配置的 MCP 服务器及其工具。"""
@@ -2447,21 +2507,24 @@ async def api_plugins():
 
 @app.post("/api/plugins/{name}/load")
 async def api_plugin_load(name: str):
-    """加载插件并将其 hooks 应用到当前 Agent。"""
+    """加载插件并将其 hooks 应用到当前 Agent（启用状态会持久化）。"""
     agent = get_agent()
+    agent.plugin_manager.discover()   # 刚放进目录的插件也能直接启用
     hooks = agent.plugin_manager.load(name)
     if hooks is None:
         return JSONResponse({"error": f"插件加载失败或不存在：{name}"}, status_code=400)
     agent.apply_plugin_hooks()
+    await asyncio.to_thread(_persist_enabled_plugins, agent)
     return {"ok": True, "loaded": agent.plugin_manager.loaded_names()}
 
 
 @app.post("/api/plugins/{name}/unload")
 async def api_plugin_unload(name: str):
-    """卸载插件并刷新 Agent hooks。"""
+    """卸载插件并刷新 Agent hooks（启用状态会持久化）。"""
     agent = get_agent()
     removed = agent.plugin_manager.unload(name)
     agent.apply_plugin_hooks()
+    await asyncio.to_thread(_persist_enabled_plugins, agent)
     return {"ok": removed, "loaded": agent.plugin_manager.loaded_names()}
 
 
