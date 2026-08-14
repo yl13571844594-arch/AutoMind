@@ -1,8 +1,8 @@
 // 设置弹窗四件套：🖥 模型配置 / 🔑 API Keys / ⚙ 通用设置 / 🔌 Agent 集成。
 import {
-  Alert, App, Button, Checkbox, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
+  Alert, App, Button, Checkbox, Divider, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
 } from 'antd';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { apiGet, apiPost } from '../../api/client';
 import { prettyCombo } from '../../lib/hotkeys';
 import { notifyPermission, notifySupported, notifyTask, requestNotifyPermission } from '../../lib/notify';
@@ -74,7 +74,13 @@ function ModelModal() {
     const payload: any = { provider, model: model.trim() };
     if (provider === 'custom') payload.api_base = apiBase.trim();
     if (apiKey.trim()) payload.api_key = apiKey.trim();
-    const r = await apiPost('/config/test', payload).catch((e) => ({ success: false, error: String(e) }));
+    // 前端兜底超时（后端 12s 会先返回，但万一请求被代理/网络吞掉，20s 后也不再空转）
+    const r = await apiPost('/config/test', payload, 20000).catch((e) => ({
+      success: false,
+      error: e?.name === 'AbortError'
+        ? '测试连接超时（20 秒无响应），请检查网络 / 代理 / api_base'
+        : String(e),
+    }));
     setTestResult(r);
     setTesting(false);
   };
@@ -406,6 +412,22 @@ const AUTOPILOT_LABELS: Record<string, [string, string]> = {
   subtask_cache: ['📦 子任务缓存', '同一任务内相同的只读工具调用结果复用'],
 };
 
+// 通用设置里的分组小节：图标标题 + 说明 + 内容，视觉统一。
+function Section({ icon, title, desc, children }: {
+  icon: string; title: string; desc?: string; children: ReactNode;
+}) {
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+        <span style={{ fontSize: '1.15em' }}>{icon}</span>
+        <Text strong>{title}</Text>
+      </div>
+      {desc && <Paragraph type="secondary" style={{ fontSize: '.78em', margin: '0 0 10px' }}>{desc}</Paragraph>}
+      {children}
+    </div>
+  );
+}
+
 function GeneralModal() {
   const { message } = App.useApp();
   const open = useUi((s) => s.modal) === 'general';
@@ -438,11 +460,10 @@ function GeneralModal() {
   if (!cfg) return <Modal open={open} onCancel={close} footer={null} title="⚙ 通用设置" />;
 
   return (
-    <Modal title="⚙ 通用设置" open={open} onCancel={close} width={600} footer={null}>
-      <Space direction="vertical" style={{ width: '100%' }} size="middle">
-        <div>
-          <Text strong>项目目录（Agent 文件操作的根目录）</Text>
-          <Space.Compact style={{ width: '100%', marginTop: 4 }}>
+    <Modal title="⚙ 通用设置" open={open} onCancel={close} width={620} footer={null}>
+      <Space direction="vertical" style={{ width: '100%' }} size={14}>
+        <Section icon="📁" title="项目目录" desc="Agent 文件操作的根目录，所有读写都限定在此目录内">
+          <Space.Compact style={{ width: '100%' }}>
             <Input value={cfg.project} onChange={(e) => setCfg({ ...cfg, project: e.target.value })} />
             <Button onClick={() => { setShowPicker(!showPicker); if (!showPicker) browse(cfg.project || ''); }}>📁 浏览</Button>
             <Button type="primary" onClick={() => saveProject(cfg.project.trim())}>应用</Button>
@@ -469,30 +490,28 @@ function GeneralModal() {
               </div>
             </div>
           )}
-        </div>
-        <div>
-          <Text strong>Temperature：{cfg.temperature}</Text>
-          <Slider min={0} max={2} step={0.1} value={cfg.temperature}
-            onChange={(v) => setCfg({ ...cfg, temperature: v })} />
-        </div>
-        <div>
-          <Text strong>最大输出 Token</Text>
-          <InputNumber style={{ width: 160, marginLeft: 12 }} min={256} max={32768} value={cfg.max_tokens}
-            onChange={(v) => setCfg({ ...cfg, max_tokens: v })} />
-        </div>
-        <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-          <Button onClick={close}>取消</Button>
-          <Button type="primary" onClick={async () => {
-            await apiPost('/config', { temperature: cfg.temperature, max_tokens: cfg.max_tokens });
-            close(); message.success('设置已保存');
-          }}>保存采样参数</Button>
-        </Space>
-        <InterfacePrefs />
-        <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
-          <Text strong>🔄 自主任务闭环（工作 / 编程模式）</Text>
-          <Paragraph type="secondary" style={{ fontSize: '.76em', margin: '4px 0 8px' }}>
-            任务完成后自动 多Agent审查 → Loop 语义验收 → 未达标带反馈自动修复。默认全开，可单独关闭。
-          </Paragraph>
+        </Section>
+
+        <Divider style={{ margin: 0 }} />
+
+        <Section icon="🎛" title="采样参数" desc="影响生成随机性与单次回复长度">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+            <div style={{ flex: '1 1 240px' }}>
+              <Text>Temperature：<b>{cfg.temperature}</b></Text>
+              <Slider min={0} max={2} step={0.1} value={cfg.temperature}
+                onChange={(v) => setCfg({ ...cfg, temperature: v })} />
+            </div>
+            <div>
+              <Text>最大输出 Token</Text>
+              <InputNumber style={{ width: 140, marginLeft: 10 }} min={256} max={32768} value={cfg.max_tokens}
+                onChange={(v) => setCfg({ ...cfg, max_tokens: v })} />
+            </div>
+          </div>
+        </Section>
+
+        <Divider style={{ margin: 0 }} />
+
+        <Section icon="🚀" title="自主任务闭环" desc="任务完成后自动 多Agent审查 → Loop 语义验收 → 未达标带反馈自动修复（工作 / 编程模式，默认全开）">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
             {Object.entries(AUTOPILOT_LABELS).map(([k, [label, tip]]) => (
               <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={async (e) => {
@@ -502,7 +521,21 @@ function GeneralModal() {
               }}>{label}</Checkbox>
             ))}
           </div>
-        </div>
+        </Section>
+
+        <Divider style={{ margin: 0 }} />
+
+        <InterfacePrefs />
+
+        <Divider style={{ margin: 0 }} />
+
+        <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
+          <Button onClick={close}>关闭</Button>
+          <Button type="primary" onClick={async () => {
+            await apiPost('/config', { temperature: cfg.temperature, max_tokens: cfg.max_tokens });
+            close(); message.success('设置已保存');
+          }}>保存采样参数</Button>
+        </Space>
       </Space>
     </Modal>
   );

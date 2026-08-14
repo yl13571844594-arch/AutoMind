@@ -38,6 +38,14 @@ OPTIONAL_DEPS: dict[str, tuple[str, str]] = {
     "icalendar": ("icalendar>=5.0", "ICS 日历读写"),
     "httpx": ("httpx>=0.27", "HTTP 请求与网页搜索"),
     "win32com": ("pywin32>=306", "Windows Outlook / COM 集成"),
+    # v1.6.0 内置多媒体 / 系统工具（同样可选依赖、缺库给安装提示）
+    "PIL": ("pillow>=10.0", "图像处理 / 截屏 / 图表导出"),
+    "pptx": ("python-pptx>=0.6.21", "PowerPoint 生成"),
+    "matplotlib": ("matplotlib>=3.7", "数据图表绘制"),
+    "psutil": ("psutil>=5.9", "进程与端口管理"),
+    "pyperclip": ("pyperclip>=1.8", "剪贴板读写"),
+    "pytesseract": ("pytesseract>=0.3.10", "OCR 文字识别"),
+    "mutagen": ("mutagen>=1.47", "音频元信息解析"),
 }
 
 

@@ -412,6 +412,16 @@ function handle(data: any) {
       execTrace(mode, (data.success ? '🛠 ' : '⚠ ') + '调用 ' + esc(data.tool), args + out, data.success ? 'action' : 'warn');
       break;
     }
+    case 'browser_preview': {
+      // 浏览器/截图工具返回的网页截图 —— 直接渲染在对话框里，展示网页交互效果
+      const b64 = data.screenshot_base64 || '';
+      if (b64) {
+        execTrace(mode, '🖼 ' + esc(data.tool || '浏览器') + ' · 网页截图',
+          `<img class="trace-shot" src="data:image/png;base64,${b64}" alt="网页截图" />`,
+          'shot');
+      }
+      break;
+    }
 
     case 'chat_chunk':
       if (!live.stream) startStream(mode);

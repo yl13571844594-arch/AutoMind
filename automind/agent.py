@@ -178,6 +178,9 @@ class AutoMindAgent:
 
         # ── 工具注册 ─────────────────────────────
         self._register_default_tools()
+        # 随包内置的工具名单 —— 界面据此把「内置」与后来接入的 MCP / 插件工具
+        # 区分开（用户需要一眼看出哪些是开箱即用、哪些是自己接的）
+        self.builtin_tool_names: frozenset[str] = frozenset(self.tool_registry.list_names())
 
         # ── 技能 ──────────────────────────────────
         self.skill_registry = SkillRegistry()

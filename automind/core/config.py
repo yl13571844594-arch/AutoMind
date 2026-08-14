@@ -23,6 +23,7 @@ class LLMProviderConfig(BaseModel):
     temperature: float = 0.7
     top_p: float = 1.0
     timeout: float = 120.0
+    max_retries: int = 2
     extra_headers: dict[str, str] = Field(default_factory=dict)
     extra_body: dict[str, Any] = Field(default_factory=dict)
 

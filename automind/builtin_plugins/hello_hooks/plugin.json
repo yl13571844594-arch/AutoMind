@@ -1,0 +1,7 @@
+{
+  "name": "hello_hooks",
+  "version": "1.0.0",
+  "description": "示例插件：挂接全部生命周期钩子并记录日志，供第三方插件开发参考的完整模板",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks"
+}

@@ -6,13 +6,20 @@ export async function apiGet<T = any>(path: string): Promise<T> {
   return r.json();
 }
 
-export async function apiPost<T = any>(path: string, body?: unknown): Promise<T> {
-  const r = await fetch(`${API}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  return r.json();
+export async function apiPost<T = any>(path: string, body?: unknown, timeoutMs?: number): Promise<T> {
+  const ctrl = timeoutMs ? new AbortController() : undefined;
+  const timer = ctrl ? window.setTimeout(() => ctrl.abort(), timeoutMs) : undefined;
+  try {
+    const r = await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: ctrl?.signal,
+    });
+    return r.json();
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
 }
 
 export async function apiDelete<T = any>(path: string): Promise<T> {

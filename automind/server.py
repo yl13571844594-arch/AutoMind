@@ -908,8 +908,13 @@ async def api_stats():
     tool_usage: dict[str, int] = {}
     total_dur = 0.0
     success = 0
+    # Token 合计与 by_mode 必须出自同一份数据。此前合计取的是进程内存计数器
+    # `_token_totals`（重启即清零），而 by_mode 取的是持久化的任务历史 ——
+    # 于是重启后同一屏上会出现「累计 Token 0」与「编程模式 108,203 tk」
+    # 这种自相矛盾的数字，且不会报任何错。
+    tokens = {"prompt": 0, "completion": 0, "total": 0, "tasks": 0}
     for h in hist:
-        m = h.get("interaction", "other")
+        m = h.get("interaction") or "other"
         b = by_mode.setdefault(m, {"count": 0, "success": 0, "tokens": 0, "duration_ms": 0.0})
         b["count"] += 1
         b["success"] += 1 if h.get("success") else 0
@@ -917,6 +922,10 @@ async def api_stats():
         b["duration_ms"] += h.get("duration_ms", 0) or 0
         total_dur += h.get("duration_ms", 0) or 0
         success += 1 if h.get("success") else 0
+        tokens["prompt"] += h.get("prompt_tokens", 0) or 0
+        tokens["completion"] += h.get("completion_tokens", 0) or 0
+        tokens["total"] += h.get("tokens", 0) or 0
+        tokens["tasks"] += 1
     # 工具使用来自审计日志（安全获取）
     agent = get_agent()
     try:
@@ -943,7 +952,9 @@ async def api_stats():
         "success_total": success,
         "success_rate": round(success / n * 100, 1) if n else 0,
         "avg_duration_ms": round(total_dur / n, 1) if n else 0,
-        "tokens": dict(_token_totals),
+        "tokens": tokens,
+        # 本次运行的实时增量（右栏"Token 用量统计"用），与上面的历史合计区分开
+        "tokens_session": dict(_token_totals),
         "by_mode": by_mode,
         "tool_usage": dict(sorted(tool_usage.items(), key=lambda x: -x[1])),
         "audit": audit_summary,
@@ -2434,6 +2445,14 @@ async def api_models_remove(data: dict):
 async def api_tools():
     agent = get_agent()
     disabled = _read_config().get("disabled_tools", [])
+    builtin = getattr(agent, "builtin_tool_names", frozenset())
+
+    def _source(name: str) -> str:
+        """工具来源：内置 / MCP / 插件（界面据此打标签）。"""
+        if name.startswith("mcp__"):
+            return "mcp"
+        return "builtin" if name in builtin else "plugin"
+
     result = [
         {
             "name": t.name,
@@ -2444,6 +2463,7 @@ async def api_tools():
             "required": t.parameters.get("required", []),
             "enabled": True,
             "mcp": t.name.startswith("mcp__"),
+            "source": _source(t.name),
         }
         for t in agent.tool_registry.list_all()
     ]
@@ -2453,6 +2473,9 @@ async def api_tools():
             "name": name, "description": "（已禁用）", "tier": "safe",
             "risk": 0, "params": [], "required": [], "enabled": False,
             "mcp": name.startswith("mcp__"),
+            # 已禁用的工具不在注册表里，按名字兜底判断（内置名单是构造期快照，
+            # 禁用后仍保留该名字，故这里判断依然准确）
+            "source": _source(name),
         })
     return result
 

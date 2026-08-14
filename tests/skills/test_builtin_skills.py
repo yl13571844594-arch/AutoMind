@@ -124,6 +124,8 @@ class TestRegistration:
         from automind.skills.skill_registry import SkillRegistry
         reg = SkillRegistry()
         n = reg.register_builtin_skills()
-        assert n == 6
-        for name in ("log_analyzer", "doc_generator", "dep_audit"):
+        assert n == 12
+        for name in ("log_analyzer", "doc_generator", "dep_audit",
+                     "excel_report", "web_research", "data_insight",
+                     "doc_batch", "article_writer", "env_doctor"):
             assert name in reg

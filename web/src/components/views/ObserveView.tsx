@@ -11,7 +11,7 @@
 import {
   App, Badge, Button, Card, Empty, Segmented, Space, Statistic, Table, Tag, Tooltip, Typography,
 } from 'antd';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { apiGet } from '../../api/client';
 import { SID } from '../../api/client';
 import { useApp } from '../../store/app';
@@ -78,6 +78,26 @@ function fmtMs(ms?: number | null) {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** 统计小卡片 —— 观测中心顶部的指标栅格，统一配色与间距。 */
+function StatCard({ icon, title, value, tone }: {
+  icon: string; title: string; value: ReactNode; tone?: 'ok' | 'warn' | 'danger';
+}) {
+  const color = tone === 'danger' ? '#ff4d4f' : tone === 'warn' ? '#faad14' : tone === 'ok' ? '#52c41a' : 'var(--text)';
+  return (
+    <div style={{
+      flex: '1 1 110px', minWidth: 110, borderRadius: 10, padding: '12px 14px',
+      border: '1px solid var(--border)', background: 'var(--bg2)',
+    }}>
+      <div className="hint-text" style={{ fontSize: '.74em', display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span>{icon}</span>{title}
+      </div>
+      <div style={{ fontSize: '1.5em', fontWeight: 600, color, marginTop: 4, fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </div>
+    </div>
+  );
+}
+
 function DagCanvas({ onSelect, selected }: { onSelect: (id: string) => void; selected: string | null }) {
   const nodes = useObserve((s) => s.nodes);
   const edges = useObserve((s) => s.edges);
@@ -96,7 +116,10 @@ function DagCanvas({ onSelect, selected }: { onSelect: (id: string) => void; sel
 
   const pos = new Map(placed.map((p) => [p.id, p]));
   return (
-    <div ref={wrapRef} style={{ overflow: 'auto', maxHeight: 460, border: '1px solid var(--border)', borderRadius: 8 }}>
+    <div ref={wrapRef} style={{
+      overflow: 'auto', maxHeight: 480, border: '1px solid var(--border)', borderRadius: 10,
+      background: 'var(--bg0)', padding: 8,
+    }}>
       <svg width={width} height={height} style={{ display: 'block', minWidth: '100%' }}>
         <defs>
           <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="3"
@@ -125,6 +148,7 @@ function DagCanvas({ onSelect, selected }: { onSelect: (id: string) => void; sel
           const isSel = selected === n.id;
           return (
             <g key={n.id} onClick={() => onSelect(n.id)} style={{ cursor: 'pointer' }}>
+              <title>{`${n.kind} · ${n.label || n.id}${n.tool ? `\n工具：${n.tool}` : ''}\n状态：${(STATUS_STYLE[n.status] || {}).label || n.status}`}</title>
               <rect x={n.x} y={n.y} width={NODE_W} height={NODE_H} rx={8}
                 fill={st.fill} stroke={isSel ? 'var(--accent)' : st.stroke}
                 strokeWidth={isSel ? 2.2 : 1.2} />
@@ -208,35 +232,33 @@ export default function ObserveView() {
         {st.task && <Paragraph style={{ marginBottom: 10 }} ellipsis={{ rows: 2 }}>
           <Text type="secondary">任务：</Text>{st.task}
         </Paragraph>}
-        <Space size="large" wrap style={{ marginBottom: 12 }}>
-          <Statistic title="步骤" value={st.counters.steps} />
-          <Statistic title="工具调用" value={st.counters.actions} />
-          <Statistic title="失败" value={st.counters.failures}
-            valueStyle={{ color: st.counters.failures ? '#ff4d4f' : undefined }} />
-          <Statistic title="回溯" value={st.counters.backtracks}
-            valueStyle={{ color: st.counters.backtracks ? '#faad14' : undefined }} />
-          <Statistic title="耗时" value={fmtMs(
+        <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginBottom: 12 }}>
+          <StatCard icon="🧩" title="步骤" value={st.counters.steps} />
+          <StatCard icon="🛠" title="工具调用" value={st.counters.actions} />
+          <StatCard icon="❌" title="失败" value={st.counters.failures} tone={st.counters.failures ? 'danger' : undefined} />
+          <StatCard icon="↩️" title="回溯" value={st.counters.backtracks} tone={st.counters.backtracks ? 'warn' : undefined} />
+          <StatCard icon="⏱" title="耗时" value={fmtMs(
             st.startedAt ? (st.finishedAt || Date.now()) - st.startedAt : 0)} />
-        </Space>
+          <StatCard icon="🔁" title="状态" value={st.status === 'running' ? '执行中'
+            : st.status === 'ok' ? '完成' : st.status === 'fail' ? '失败'
+              : st.status === 'cancelled' ? '中断' : '空闲'} tone={st.status === 'fail' ? 'danger' : st.status === 'ok' ? 'ok' : undefined} />
+        </div>
 
         <DagCanvas selected={st.selected} onSelect={(id) => useObserve.getState().select(id)} />
 
-        <Space wrap style={{ marginTop: 10 }}>
+        <div style={{ marginTop: 12, display: 'flex', gap: 6, flexWrap: 'wrap', alignItems: 'center' }}>
           {Object.entries(STATUS_STYLE).map(([k, v]) => (
-            <span key={k} style={{ fontSize: '.78em', color: 'var(--text3)' }}>
-              <span style={{
-                display: 'inline-block', width: 10, height: 10, borderRadius: 3,
-                background: v.fill, border: `1px solid ${v.stroke}`, marginRight: 4,
-                verticalAlign: 'middle',
-              }} />{v.label}
-            </span>
+            <Tag key={k} style={{
+              marginInlineEnd: 0, fontSize: '.76em', background: v.fill,
+              borderColor: v.stroke, color: 'var(--text2)',
+            }}>{v.label}</Tag>
           ))}
           {st.counters.truncated > 0 && (
             <Text type="secondary" style={{ fontSize: '.78em' }}>
               （节点过多，已省略 {st.counters.truncated} 个）
             </Text>
           )}
-        </Space>
+        </div>
       </Card>
 
       {sel && (

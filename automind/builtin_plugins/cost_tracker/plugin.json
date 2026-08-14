@@ -1,0 +1,7 @@
+{
+  "name": "cost_tracker",
+  "version": "1.0.0",
+  "description": "成本追踪：把每次任务的 Token 用量与耗时按行记入本地 CSV，衔接实时用量统计",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks"
+}

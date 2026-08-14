@@ -7,6 +7,7 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { EmptyState, Tile, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
 
@@ -72,24 +73,37 @@ export default function KbView() {
   const tierTag = enterprise ? <Tag color="purple">企业版 · 混合检索</Tag>
     : pro ? <Tag color="blue">专业版 · Reranker</Tag> : <Tag>社区版</Tag>;
 
+  const chunkTotal = docs.reduce((n: number, d: any) => n + (d.chunks || 0), 0);
   const overview = (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
-      <Card size="small">
-        <Space wrap size="large">
-          <span>📄 文档 <b>{docs.length}</b>{limits.docs != null && ` / ${limits.docs}`}</span>
-          <span>💾 总量 <b>{fmtSize(sizeUsed)}</b>{limits.size != null && ` / ${fmtSize(limits.size)}`}</span>
-          {limits.size != null && <Progress percent={sizePct} size="small" style={{ width: 160 }} />}
-          <span>自动检索
-            <Switch size="small" style={{ marginLeft: 8 }} checked={data.auto_retrieve}
-              onChange={async (v) => { await apiPost('/kb/auto', { enabled: v }); reload(); message.info(v ? '对话中将自动检索知识库' : '已关闭自动检索'); }} />
-          </span>
-        </Space>
-        {!pro && (
-          <Paragraph type="secondary" style={{ fontSize: '.78em', margin: '8px 0 0' }}>
-            🔒 专业版解锁：无限文档 / 200MB / 多知识库 / Reranker 重排 / 引用溯源 / 定时重嵌入；企业版再加混合检索、热度统计、检索审计与批量导入。
+      <div className="tile-grid" style={{ marginBottom: 0 }}>
+        <Tile label="📄 文档数" value={docs.length}
+              unit={limits.docs != null ? ` / ${limits.docs}` : undefined}
+              tone={limits.docs != null && docs.length >= limits.docs ? 'yellow' : undefined}
+              foot={limits.docs != null ? '社区版上限' : '不限'} />
+        <Tile label="💾 占用空间" value={fmtSize(sizeUsed)}
+              tone={sizePct >= 80 ? 'red' : sizePct >= 50 ? 'yellow' : undefined}
+              foot={limits.size != null ? `上限 ${fmtSize(limits.size)}（已用 ${sizePct}%）` : '不限'} />
+        <Tile label="🧩 索引片段" value={chunkTotal} foot="可被检索的最小单位" />
+        <Tile label="🔎 对话自动检索"
+              value={<Switch size="small" checked={data.auto_retrieve}
+                onChange={async (v) => {
+                  await apiPost('/kb/auto', { enabled: v }); reload();
+                  message.info(v ? '对话中将自动检索知识库' : '已关闭自动检索');
+                }} />}
+              foot={data.auto_retrieve ? '提问时自动带上相关资料' : '当前关闭，仅手动检索'} />
+      </div>
+      {/* 一条 0% 的空进度条没有任何信息量，没文档时就别占地方 */}
+      {limits.size != null && docs.length > 0 && <Progress percent={sizePct} size="small"
+        status={sizePct >= 90 ? 'exception' : undefined} />}
+      {!pro && (
+        <Card size="small">
+          <Paragraph type="secondary" style={{ fontSize: '.78em', margin: 0 }}>
+            🔒 专业版解锁：无限文档 / 200MB / 多知识库 / Reranker 重排 / 引用溯源 / 定时重嵌入；
+            企业版再加混合检索、热度统计、检索审计与批量导入。
           </Paragraph>
-        )}
-      </Card>
+        </Card>
+      )}
 
       <Space wrap>
         {pro && (
@@ -168,7 +182,11 @@ export default function KbView() {
             ),
           },
         ]}
-        locale={{ emptyText: '还没有文档 — 上传 PDF / Word / Markdown / TXT，对话时 Agent 会自动检索引用' }}
+        locale={{
+          emptyText: <EmptyState icon="📄" title="还没有任何文档"
+            hint="上传 PDF / Word / Markdown / TXT 后，对话时 Agent 会自动检索并引用其中的内容。"
+            style={{ border: 'none', background: 'transparent' }} />,
+        }}
       />
 
       <Card size="small" title={<span>🔎 检索测试 {tierTag}</span>}>
@@ -179,15 +197,24 @@ export default function KbView() {
         </Space.Compact>
         {results && (
           <div style={{ marginTop: 10 }}>
-            {(results.results || []).length === 0 && <em className="hint-text">未检索到相关内容</em>}
+            {(results.results || []).length === 0 && (
+              <EmptyState icon="🔍" title="未检索到相关内容"
+                hint="换个说法再试；若知识库刚上传过文档，也可能是这个问题确实没有对应资料。"
+                style={{ padding: '22px 16px' }} />
+            )}
             {(results.results || []).map((h: any, i: number) => (
-              <div key={i} style={{ border: '1px solid var(--border)', borderRadius: 8, padding: 10, marginTop: 8, fontSize: '.86em' }}>
-                <Space size="small">
-                  {pro && <Tag color="blue">[{i + 1}]</Tag>}
+              <div key={i} className="kb-hit">
+                <div className="kb-hit-head">
+                  {pro && <span className="badge badge-mcp">[{i + 1}]</span>}
                   <Text strong>{h.doc_name}</Text>
-                  <span className="hint-text">第 {h.seq + 1} 段 · 相关度 {h.score}</span>
-                </Space>
-                <div style={{ color: 'var(--text2)', marginTop: 4, whiteSpace: 'pre-wrap' }}>{h.text.slice(0, 400)}{h.text.length > 400 ? '…' : ''}</div>
+                  <span className="hint-text">第 {h.seq + 1} 段</span>
+                  <span className="kb-score" title={`相关度 ${h.score}`}>
+                    <span className="kb-score-bar"
+                          style={{ width: `${Math.round(Math.max(0, Math.min(1, h.score)) * 100)}%` }} />
+                  </span>
+                  <span className="hint-text">{h.score}</span>
+                </div>
+                <div className="kb-hit-body">{h.text.slice(0, 400)}{h.text.length > 400 ? '…' : ''}</div>
               </div>
             ))}
             <div className="hint-text" style={{ marginTop: 8 }}>
@@ -242,7 +269,8 @@ export default function KbView() {
 
   return (
     <div>
-      <h3 style={{ marginBottom: 12 }}>📚 RAG 知识库 {tierTag}</h3>
+      <ViewHead icon="📚" title="RAG 知识库" extra={tierTag}
+                sub="上传的资料会被切片并建立向量索引；开启「对话自动检索」后，提问时 Agent 会自动引用相关片段。" />
       {items.length > 1 ? <Tabs items={items} /> : overview}
     </div>
   );

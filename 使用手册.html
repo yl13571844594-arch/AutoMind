@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.5.2</title>
+<title>AutoMind 使用手册 — v1.6.0</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.5.2</div>
+  <div class="ver">使用手册 · v1.6.0</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.5.2</b></span>
+    <span class="chip">版本 <b>v1.6.0</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -750,7 +750,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
       <text x="105" y="54" fill="#a7b0c8" font-size="10">终端·文件·沙箱·浏览器</text>
       <rect x="580" y="10" width="150" height="60" rx="12" fill="rgba(108,224,255,.1)" stroke="#6ce0ff"/>
       <text x="655" y="34" fill="#6ce0ff" font-weight="700">✨ 技能</text>
-      <text x="655" y="54" fill="#a7b0c8" font-size="10">内置6个 + SKILL.md + .py</text>
+      <text x="655" y="54" fill="#a7b0c8" font-size="10">内置12个 + SKILL.md + .py</text>
       <rect x="30" y="140" width="150" height="60" rx="12" fill="rgba(245,197,66,.1)" stroke="#f5c542"/>
       <text x="105" y="164" fill="#f5c542" font-weight="700">🔌 MCP</text>
       <text x="105" y="184" fill="#a7b0c8" font-size="10">外部工具生态接入</text>
@@ -772,6 +772,14 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <tr><td><code>python_sandbox</code></td><td><span class="tag sen">敏感</span></td><td>沙箱执行 Python 片段（计算 / 数据处理）</td></tr>
     <tr><td><code>web_fetch</code></td><td><span class="tag safe">安全</span></td><td>抓网页提取正文与链接</td></tr>
     <tr><td><code>browser</code></td><td><span class="tag sen">敏感</span></td><td>Playwright 浏览器自动化</td></tr>
+    <tr><td><code>screenshot_tool</code> / <code>ocr_tool</code></td><td><span class="tag sen">敏感</span></td><td>截屏 / 图片文字识别</td></tr>
+    <tr><td><code>ppt_tool</code></td><td><span class="tag sen">敏感</span></td><td>PowerPoint 生成 / 读取 / 追加</td></tr>
+    <tr><td><code>git_tool</code></td><td><span class="tag sen">敏感</span></td><td>结构化 git 操作（含危险门控）</td></tr>
+    <tr><td><code>image_tool</code> / <code>chart_tool</code></td><td><span class="tag sen">敏感</span></td><td>图像缩放裁剪水印 / 数据图表</td></tr>
+    <tr><td><code>csv_tool</code></td><td><span class="tag sen">敏感</span></td><td>CSV 与 JSON 读写转换合并</td></tr>
+    <tr><td><code>clipboard_tool</code></td><td><span class="tag sen">敏感</span></td><td>读写系统剪贴板</td></tr>
+    <tr><td><code>audio_tool</code> / <code>video_tool</code></td><td><span class="tag safe">安全/敏感</span></td><td>音频信息 / 视频信息与抽帧</td></tr>
+    <tr><td><code>process_tool</code></td><td><span class="tag sen">敏感</span></td><td>进程列表 / 端口占用 / 结束进程</td></tr>
   </table></div>
   <div class="note"><b>开关用法：</b>每个工具卡片带开关，关掉后 Agent 就"看不到"它。
   不想让它上网 → 关 <code>web_fetch</code> 和 <code>browser</code>；只读分析 → 只留 <code>file_read</code>。</div>
@@ -785,6 +793,12 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <tr><td><code>log_analyzer</code></td><td>日志级别统计 / 错误样本 / 高频模式聚类</td><td>「分析这个日志文件」</td></tr>
     <tr><td><code>doc_generator</code></td><td>从 Python 源码生成 Markdown API 文档</td><td>「给 src 生成 API 文档」</td></tr>
     <tr><td><code>dep_audit</code></td><td>依赖审计：未固定版本 / 重复声明</td><td>「检查依赖健康度」</td></tr>
+    <tr><td><code>excel_report</code></td><td>表格数据汇总成 Markdown 报告</td><td>「把这张表做成周报」</td></tr>
+    <tr><td><code>web_research</code></td><td>多来源搜索 + 抓正文，带引用调研报告</td><td>「调研这个话题」</td></tr>
+    <tr><td><code>data_insight</code></td><td>描述性统计 + 相关性，输出关键发现</td><td>「这组数据有什么规律」</td></tr>
+    <tr><td><code>doc_batch</code></td><td>批量合并 / 提取文本 / 重命名 Word、PDF</td><td>「把 PDF 合成一个」</td></tr>
+    <tr><td><code>article_writer</code></td><td>公众号 / 小红书 / 新闻稿风格写作</td><td>「写一篇种草笔记」</td></tr>
+    <tr><td><code>env_doctor</code></td><td>环境诊断：依赖 / 端口 / 磁盘体检</td><td>「为什么跑不起来」</td></tr>
   </table></div>
   <p><b>导入自定义技能：</b>「📁 加载目录」批量导入 <b>SKILL.md 技能包</b>（YAML 头 + 指令正文，无代码）；
   「📄 导入 .py」导入继承 <code>AbstractSkill</code> 的 Python 技能（模板见 <code>examples/03-skill-development/</code>）；
@@ -794,10 +808,17 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <p>MCP（Model Context Protocol）是开放协议，接入后外部服务的工具<strong>自动出现在工具列表</strong>供
   Agent 调用（文件系统、数据库、搜索、地图…）。支持单个添加（stdio 本地命令 / sse URL）
   或直接粘贴 Claude Desktop 格式的 <code>{"mcpServers": {...}}</code> 批量导入。需先 <code>pip install mcp</code>。</p>
+  <p><b>⭐ 官方适配（一键添加）：</b>内置 GitHub、PostgreSQL、MySQL、Slack、飞书、钉钉、
+  Playwright 浏览器 7 个预设，点「添加」即写入配置并连接；需密钥的服务会提示在系统
+  环境变量里设置（如 <code>GITHUB_PERSONAL_ACCESS_TOKEN</code>、<code>DATABASE_URL</code>）。</p>
 
   <h3 id="t-plugins">🧩 插件 —— 生命周期钩子扩展</h3>
   <p>插件在任务<strong>开始 / 结束 / 解析后 / 计划后 / 出错</strong>等时机自动执行你的逻辑
   （记日志、发通知、审计上报），不改动主程序。面板中「加载 / 卸载」即时生效。</p>
+  <p><b>内置 4 个插件</b>（随包分发、默认自动加载，面板以「内置 / 自定义」区分）：
+  <code>cost_tracker</code>（Token/耗时入账 CSV）、<code>pii_guard</code>（敏感信息检测告警）、
+  <code>task_notify</code>（任务完成通知，可选 <code>AUTOMIND_NOTIFY_WEBHOOK</code>）、
+  <code>hello_hooks</code>（示例模板）。</p>
   <pre><code><span class="cm"># 插件目录结构</span>
 ~/.automind/plugins/task-timer/
 ├── plugin.json     <span class="cm"># {"name":"task-timer","version":"1.0.0","description":"…"}</span>
@@ -921,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.5.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1041,8 +1062,45 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.5.2</span><span class="cl-date">2026-08-12</span>
+      <span class="cl-ver">v1.6.0</span><span class="cl-date">2026-08-13</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">开箱即用能力大扩容：内置插件 / 工具 / 技能 / MCP 适配 + 界面美化</div>
+    <ul>
+      <li><b>🧩 内置 4 个插件</b>（随包分发、默认自动加载，插件面板区分「内置 / 自定义」）：
+        <code>cost_tracker</code>（Token/耗时入账 CSV）、<code>pii_guard</code>（敏感信息检测告警）、
+        <code>task_notify</code>（任务完成通知，可选 Webhook）、<code>hello_hooks</code>（示例模板）。</li>
+      <li><b>🛠 内置 11 个工具</b>：<code>screenshot_tool</code>、<code>ocr_tool</code>、
+        <code>ppt_tool</code>、<code>git_tool</code>、<code>image_tool</code>、<code>csv_tool</code>、
+        <code>clipboard_tool</code>、<code>chart_tool</code>、<code>audio_tool</code>、
+        <code>video_tool</code>、<code>process_tool</code>。全部可选依赖懒加载，缺库时返回可照抄的安装命令。</li>
+      <li><b>✨ 内置 6 个技能</b>：<code>excel_report</code>、<code>web_research</code>、
+        <code>data_insight</code>、<code>doc_batch</code>、<code>article_writer</code>、
+        <code>env_doctor</code>。</li>
+      <li><b>🔌 内置 7 个 MCP 官方适配</b>（一键添加）：GitHub、PostgreSQL、MySQL、Slack、
+        飞书、钉钉、Playwright 浏览器。MCP 面板新增「官方适配」卡片。</li>
+      <li><b>🖼 浏览器交互可视化</b>：浏览器/截图工具返回的网页截图直接渲染在对话框的执行流程里。</li>
+      <li><b>🎨 界面美化</b>：观测中心指标卡片化 + DAG 节点悬停提示；通用设置分组化。</li>
+      <li><b>🎨 各面板视觉打通</b>：工具、技能、MCP、插件、知识库、专家市场、团队协作、
+        统计分析、任务历史此前各写各的样式，同一个"卡片"在不同页面里边距圆角字号都不一样。
+        现在统一成一套语汇（页头 / 卡片 / 徽标 / 统计块 / 空态 / 看板），并且空态会说清楚
+        <i>为什么是空的、下一步该做什么</i>，而不是只写"暂无数据"。</li>
+      <li><b>🏷 一眼看出能力从哪来</b>：工具面板给每项标注
+        <span class="cl-badge">内置</span> / <span class="cl-badge">MCP</span> /
+        <span class="cl-badge">插件</span>，可按来源筛选与搜索；技能、插件同样区分
+        "随软件内置"与"你自己导入的"。工具图标不再被长描述挤出卡片。</li>
+      <li><b>🇨🇳 工具面板讲中文</b>：工具说明原本是写给模型看的英文提示词，界面上排着
+        31 段英文没人会读。现在内置能力都配了中文名与一句话说明（原始英文标识符附在后面），
+        模型那一侧一个字没改。</li>
+      <li><b>🔢 统计数字不再自相矛盾</b>：重启后统计页会同时显示"累计 Token 0"和
+        "编程模式 108,203 tk" —— 前者读的是重启即清零的内存计数器。现在两个数字出自
+        同一份历史记录，对不上都不可能。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.5.2</span><span class="cl-date">2026-08-12</span>
     </div>
     <div class="cl-sum">开箱即用 — 第一次跑就会撞上的 7 个问题</div>
     <ul>
@@ -1316,7 +1374,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.5.2 同步 ·
+  AutoMind 使用手册 · 与软件 v1.6.0 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

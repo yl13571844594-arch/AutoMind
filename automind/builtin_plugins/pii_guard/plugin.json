@@ -1,0 +1,7 @@
+{
+  "name": "pii_guard",
+  "version": "1.0.0",
+  "description": "敏感信息守卫：检测输入与工具输出中的 API Key / Token / 私钥并写入审计日志告警",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks"
+}

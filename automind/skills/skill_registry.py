@@ -166,16 +166,26 @@ class SkillRegistry:
 
     def register_builtin_skills(self) -> int:
         """注册所有内置技能。"""
+        from automind.skills.builtin.article_writer import ArticleWriterSkill
         from automind.skills.builtin.code_generator import CodeGeneratorSkill
+        from automind.skills.builtin.data_insight import DataInsightSkill
         from automind.skills.builtin.dep_audit import DependencyAuditSkill
+        from automind.skills.builtin.doc_batch import DocBatchSkill
         from automind.skills.builtin.doc_generator import DocGeneratorSkill
+        from automind.skills.builtin.env_doctor import EnvDoctorSkill
+        from automind.skills.builtin.excel_report import ExcelReportSkill
         from automind.skills.builtin.log_analyzer import LogAnalyzerSkill
         from automind.skills.builtin.project_init import ProjectInitSkill
         from automind.skills.builtin.test_runner import TestRunnerSkill
+        from automind.skills.builtin.web_research import WebResearchSkill
 
         builtins = [
+            # 软件工程向（v1.0 基线）
             ProjectInitSkill(), CodeGeneratorSkill(), TestRunnerSkill(),
             LogAnalyzerSkill(), DocGeneratorSkill(), DependencyAuditSkill(),
+            # 场景化工作流（v1.6.0）
+            ExcelReportSkill(), WebResearchSkill(), DataInsightSkill(),
+            DocBatchSkill(), ArticleWriterSkill(), EnvDoctorSkill(),
         ]
         count = 0
         for skill in builtins:

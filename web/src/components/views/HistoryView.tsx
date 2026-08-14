@@ -13,6 +13,7 @@ import { copyText } from '../../lib/clipboard';
 import { renderMarkdown } from '../../lib/markdown';
 import { MODE_LABELS, useApp, type Mode } from '../../store/app';
 import { useChat } from '../../store/chat';
+import { Badge, EmptyState, EntityCard, Tile, ViewHead } from '../ui/Panel';
 
 const { Text } = Typography;
 const MODE_ICON: Record<string, string> = { chat: '💬', work: '⚙️', coding: '💻', multi: '🤝', loop: '🔁' };
@@ -52,6 +53,8 @@ export default function HistoryView() {
   useEffect(() => { setPage(1); }, [q, modeFilter, okFilter]);
 
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+  const okCount = history.filter((h) => h.success).length;
+  const tokenSum = history.reduce((n, h) => n + (h.tokens || 0), 0);
 
   // 命中的关键词高亮，扫一眼就知道为什么匹配到这条
   const mark = (s: string) => {
@@ -86,21 +89,26 @@ export default function HistoryView() {
 
   return (
     <div>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start">
-        <h3 style={{ margin: 0 }}>
-          📜 任务历史（{filtered.length}
-          {filtered.length !== history.length ? ` / ${history.length}` : ''}）{' '}
-          <span className="hint-text" style={{ fontWeight: 400 }}>
-            已持久化 — 关浏览器/重启服务都不会丢（最多保留最近 {FETCH_LIMIT} 条）
-          </span>
-        </h3>
-        <Button size="small" danger disabled={!history.length} onClick={() => modal.confirm({
-          title: '清空全部任务历史？',
-          content: '不可撤销，且会清掉全部记录（不只是当前筛选出的这些）。',
-          okText: '清空', okButtonProps: { danger: true }, cancelText: '取消',
-          onOk: async () => { await apiDelete('/history'); reload(); message.info('历史已清空'); },
-        })}>清空</Button>
-      </Space>
+      <ViewHead icon="📜" title="任务历史"
+                sub={`已持久化 — 关浏览器或重启服务都不会丢，最多保留最近 ${FETCH_LIMIT} 条。`}
+                extra={
+                  <Button size="small" danger disabled={!history.length} onClick={() => modal.confirm({
+                    title: '清空全部任务历史？',
+                    content: '不可撤销，且会清掉全部记录（不只是当前筛选出的这些）。',
+                    okText: '清空', okButtonProps: { danger: true }, cancelText: '取消',
+                    onOk: async () => { await apiDelete('/history'); reload(); message.info('历史已清空'); },
+                  })}>🗑 清空</Button>
+                } />
+
+      <div className="tile-grid">
+        <Tile label="📋 记录总数" value={history.length}
+              foot={filtered.length !== history.length ? `当前筛选出 ${filtered.length} 条` : '全部'} />
+        <Tile label="✅ 成功" value={okCount} tone="green"
+              foot={history.length ? `${Math.round((okCount / history.length) * 100)}% 成功率` : '—'} />
+        <Tile label="✗ 未完成" value={history.length - okCount}
+              tone={history.length - okCount ? 'red' : undefined} foot="可点「重跑」再试一次" />
+        <Tile label="🔢 累计 Token" value={tokenSum.toLocaleString()} foot="全部历史任务合计" />
+      </div>
 
       <Space wrap style={{ width: '100%', margin: '10px 0 4px' }}>
         <Input.Search
@@ -134,40 +142,48 @@ export default function HistoryView() {
       </Space>
 
       {filtered.length === 0 && (
-        <Empty
-          style={{ marginTop: 40 }}
-          description={history.length ? '没有匹配的记录，换个关键词或放宽筛选条件' : '暂无历史记录'}
-        />
+        history.length
+          ? <EmptyState icon="🔍" title="没有匹配的记录"
+                        hint="换个关键词，或把模式/状态筛选放宽到「全部」。" />
+          : <EmptyState icon="📜" title="还没有任务记录"
+                        hint="在对话工作台执行一个任务后，这里会留下可搜索、可回看、可一键重跑的完整记录。" />
       )}
 
-      {pageItems.map((h) => (
-        <Card key={h.session_id} size="small" style={{ marginTop: 8, borderColor: h.success ? 'var(--green)' : 'var(--red)' }}>
-          <Space style={{ width: '100%', justifyContent: 'space-between' }} align="start">
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <Text strong>{mark((h.task || '').slice(0, 120))}</Text>
-              <div className="hint-text" style={{ marginTop: 3 }}>
-                {MODE_ICON[h.interaction] || ''}{MODE_LABELS[h.interaction as Mode] || ''}
-                {h.scheduled ? ' ⏰' : ''}{h.cached ? ' ⚡缓存' : ''}
-                {h.time ? ` · ${h.time}` : ''} · {h.steps}步 · {h.tokens}tk · {h.duration_ms}ms
-              </div>
-              <div style={{ fontSize: '.82em', color: 'var(--text2)', marginTop: 4, maxHeight: 60, overflow: 'hidden' }}>
-                {mark((h.output || '').slice(0, 200))}
-              </div>
-            </div>
-            <Space direction="vertical" size={4}>
-              <Button size="small" onClick={async () => {
-                const d = await apiGet(`/history/${encodeURIComponent(h.session_id)}`);
-                if (d.error) { message.error(d.error); return; }
-                setDetail(d);
-              }}>🔍 查看</Button>
-              <Button size="small" onClick={() => rerun(h.interaction || 'work', h.task || '')}>↻ 重跑</Button>
-              <Button size="small" danger onClick={async () => {
-                await apiDelete(`/history/${h.session_id}`); reload(); message.info('记录已删除');
-              }}>删除</Button>
-            </Space>
-          </Space>
-        </Card>
-      ))}
+      <div className="ent-grid wide">
+        {pageItems.map((h) => (
+          <EntityCard
+            key={h.session_id}
+            state={h.success ? 'ok' : 'bad'}
+            icon={MODE_ICON[h.interaction] || '📜'}
+            // 任务为空时给一个占位 —— 否则标题行只剩下几个徽标，看着像渲染坏了
+            title={h.task ? mark(h.task.slice(0, 120)) : <em style={{ color: 'var(--text3)' }}>（无任务内容）</em>}
+            badges={<>
+              <Badge tone={h.success ? 'builtin' : 'dangerous'}>{h.success ? '成功' : '未完成'}</Badge>
+              {/* 早期记录没存 interaction，硬渲染会得到一个空药丸 */}
+              {(MODE_LABELS[h.interaction as Mode] || h.interaction) && (
+                <Badge tone="muted">{MODE_LABELS[h.interaction as Mode] || h.interaction}</Badge>
+              )}
+              {h.scheduled && <Badge tone="muted">⏰ 定时</Badge>}
+              {h.cached && <Badge tone="muted">⚡ 缓存</Badge>}
+            </>}
+            desc={mark((h.output || '').slice(0, 200))}
+            meta={<>{h.time ? `${h.time} · ` : ''}{h.steps} 步 · {(h.tokens || 0).toLocaleString()} tk · {h.duration_ms} ms</>}
+            actions={
+              <Space direction="vertical" size={4}>
+                <Button size="small" onClick={async () => {
+                  const d = await apiGet(`/history/${encodeURIComponent(h.session_id)}`);
+                  if (d.error) { message.error(d.error); return; }
+                  setDetail(d);
+                }}>🔍 查看</Button>
+                <Button size="small" onClick={() => rerun(h.interaction || 'work', h.task || '')}>↻ 重跑</Button>
+                <Button size="small" danger type="text" onClick={async () => {
+                  await apiDelete(`/history/${h.session_id}`); reload(); message.info('记录已删除');
+                }}>🗑 删除</Button>
+              </Space>
+            }
+          />
+        ))}
+      </div>
 
       {filtered.length > PAGE_SIZE && (
         <Pagination

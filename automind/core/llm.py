@@ -79,8 +79,14 @@ def shared_http_client(timeout: float, base_url: str = "") -> Any:
             # 对齐 openai / anthropic SDK 自带客户端的默认值，避免"换了个
             # http_client 之后中转代理的 3xx 跳转不再跟随"这类隐性行为差异
             "follow_redirects": True,
-            "limits": httpx.Limits(max_connections=1000,
-                                   max_keepalive_connections=100),
+            # 连接池上限收紧 + 显式 keep-alive 过期：此前 100 个空闲连接长期
+            # 保留，服务端（如 DeepSeek）主动断开空闲连接后，httpx 复用坏连接
+            # 会 read timeout —— 表现为"测试连接/对话间歇性卡死，重启才恢复"。
+            # 少量空闲连接 + 30s 过期，既保留连接复用带来的延迟收益，又让坏
+            # 连接很快被淘汰，不会一直复用同一个已断开的 socket。
+            "limits": httpx.Limits(max_connections=50,
+                                   max_keepalive_connections=10,
+                                   keepalive_expiry=30.0),
         }
         if base_url:
             kwargs["base_url"] = base_url
@@ -359,7 +365,7 @@ class OpenAIProvider(LLMBackend):
             api_key=api_key,
             base_url=api_base,
             timeout=config.timeout,
-            max_retries=2,
+            max_retries=config.max_retries,
             default_headers=config.extra_headers or None,
             **({"http_client": http_client} if http_client is not None else {}),
         )

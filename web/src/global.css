@@ -290,6 +290,8 @@ body.light .code-block, body.light .html-block { box-shadow: 0 2px 10px rgba(30,
 .trace-args { font-family: var(--mono); font-size: .82em; color: var(--text3); word-break: break-all; }
 .trace-out { font-family: var(--mono); font-size: .84em; color: var(--green); white-space: pre-wrap; word-break: break-word; }
 .trace-out.fail { color: var(--red); }
+.trace-shot { border-left-color: var(--accent); }
+.trace-shot .trace-body img { max-width: 100%; max-height: 360px; border-radius: 8px; border: 1px solid var(--border); display: block; margin-top: 4px; }
 .plan-row { padding: 2px 0; font-size: .92em; }
 .plan-row.ok { color: var(--green); }
 .plan-row.fail { color: var(--red); }
@@ -463,6 +465,208 @@ body.light .msg .bubble {
 
 /* 7) 数字与代码统一用等宽字形对齐，表格/统计列不再左右跳动 */
 .err-at, .time, code, pre, .mono { font-variant-numeric: tabular-nums; }
+
+/* ══════════════════════════════════════════════════════════════
+   v1.6 面板视觉统一层
+   ——————————————————————————————————————————————————————————————
+   工具/技能/MCP/插件/知识库/专家/团队/统计/历史此前各写各的内联样式，
+   同一个"卡片"在不同面板里边距、圆角、字号都不一样。这里抽出一套共用
+   语汇（页头 / 实体卡 / 徽标 / 统计块 / 空态），各视图只管填内容。
+
+   排版上最关键的一条是 min-width: 0：flex/grid 子项默认 min-width:auto
+   ＝"不小于内容宽度"，长英文描述、长参数名、长路径会把卡片顶破，图标被
+   挤出容器 —— 这正是工具面板图标溢出的成因。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 视图页头 ── */
+.view-head { margin-bottom: 14px; }
+.view-head h3 {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 1.12em; font-weight: 700; letter-spacing: -.02em;
+}
+.view-head h3 .vh-icon {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; flex-shrink: 0;
+  border-radius: 10px; font-size: .92em;
+  background: linear-gradient(135deg, rgba(123, 159, 255, .18), rgba(181, 148, 255, .12));
+  border: 1px solid var(--border);
+}
+.view-head .vh-sub { margin-top: 5px; font-size: .8em; color: var(--text3); line-height: 1.6; }
+.view-head .vh-right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+
+/* ── 实体卡（工具 / 技能 / MCP / 插件 / 专家 / 文档 共用）── */
+.ent-grid {
+  display: grid; gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+}
+.ent-grid.wide { grid-template-columns: repeat(auto-fill, minmax(430px, 1fr)); }
+.ent-card {
+  position: relative; display: flex; gap: 11px; align-items: flex-start;
+  padding: 12px 13px; min-width: 0;
+  background: var(--bg1); border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+.ent-card:hover {
+  border-color: var(--border-focus); transform: translateY(-1px);
+  box-shadow: 0 6px 20px -10px rgba(0, 0, 0, .5);
+}
+body.light .ent-card:hover { box-shadow: 0 6px 18px -12px rgba(30, 45, 90, .3); }
+.ent-card.off { opacity: .5; }
+.ent-card.ok { border-left: 3px solid var(--green); }
+.ent-card.bad { border-left: 3px solid var(--red); }
+
+/* 图标固定尺寸且不参与收缩 —— 内容再长也压不到它头上 */
+.ent-ico {
+  flex: 0 0 34px; width: 34px; height: 34px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 1.05em; line-height: 1;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 10px; overflow: hidden;
+}
+/* 正文列必须允许收缩到内容以下，否则长描述会把整卡撑破 */
+.ent-body { flex: 1 1 auto; min-width: 0; }
+.ent-title {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  font-weight: 650; font-size: .93em; line-height: 1.4;
+}
+.ent-title .ent-name { min-width: 0; overflow-wrap: anywhere; }
+/* 原始英文标识符跟在中文名后面 —— 用户按中文认，模型/文档按原名认，两边都要给 */
+.ent-alias {
+  margin-left: 6px; font-family: var(--mono); font-size: .8em;
+  font-weight: 500; color: var(--text3); overflow-wrap: anywhere;
+}
+.ent-desc {
+  margin-top: 4px; font-size: .79em; color: var(--text3); line-height: 1.62;
+  overflow-wrap: anywhere;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.ent-meta { margin-top: 6px; font-size: .74em; color: var(--text3); overflow-wrap: anywhere; }
+.ent-meta code {
+  display: inline-block; margin: 2px 4px 0 0; padding: 1px 6px;
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 5px;
+  font-family: var(--mono); font-size: .95em; color: var(--text2);
+}
+/* 操作区同样不收缩，按钮永远在卡内右侧对齐 */
+.ent-act { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; }
+
+/* ── 来源徽标（内置 / MCP / 插件 / 自定义）── */
+.badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 0 7px; height: 19px; flex-shrink: 0;
+  font-size: .68em; font-weight: 700; letter-spacing: .02em;
+  border-radius: 6px; border: 1px solid transparent; white-space: nowrap;
+}
+.badge-builtin { background: var(--green-bg); color: var(--green); border-color: rgba(60, 230, 138, .3); }
+.badge-mcp { background: var(--accent-glow); color: var(--accent); border-color: rgba(123, 159, 255, .34); }
+.badge-plugin { background: var(--purple-bg); color: var(--purple); border-color: rgba(195, 155, 255, .32); }
+.badge-custom { background: var(--yellow-bg); color: var(--yellow); border-color: rgba(245, 197, 66, .3); }
+.badge-muted { background: var(--bg2); color: var(--text3); border-color: var(--border); }
+/* 危险等级 */
+.badge-safe { background: var(--green-bg); color: var(--green); }
+.badge-sensitive { background: var(--yellow-bg); color: var(--yellow); }
+.badge-dangerous { background: var(--red-bg); color: var(--red); }
+/* 风险圆点 */
+.risk-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+
+/* ── 统计块（统计分析 / 观测中心 / 团队）── */
+.tile-grid {
+  display: grid; gap: 10px; margin-bottom: 14px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+.tile {
+  position: relative; overflow: hidden; min-width: 0;
+  padding: 13px 15px; border-radius: var(--radius-sm);
+  background: var(--bg1); border: 1px solid var(--border);
+}
+.tile::before {
+  content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 3px;
+  background: var(--accent-grad); opacity: .8;
+}
+.tile.green::before { background: var(--green); }
+.tile.yellow::before { background: var(--yellow); }
+.tile.red::before { background: var(--red); }
+.tile .tile-label {
+  font-size: .72em; color: var(--text3); display: flex; align-items: center; gap: 5px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tile .tile-value {
+  margin-top: 5px; font-size: 1.6em; font-weight: 700; line-height: 1.1;
+  font-variant-numeric: tabular-nums; letter-spacing: -.03em;
+  overflow-wrap: anywhere;
+}
+.tile .tile-value small { font-size: .5em; font-weight: 600; color: var(--text3); margin-left: 3px; }
+.tile .tile-foot { margin-top: 4px; font-size: .71em; color: var(--text3); }
+
+/* ── 空态：说清楚"为什么空"和"下一步做什么" ── */
+.empty-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 7px; padding: 40px 20px; text-align: center;
+  border: 1px dashed var(--border); border-radius: var(--radius);
+  background: var(--bg1);
+}
+.empty-state .es-ico { font-size: 1.9em; opacity: .5; line-height: 1; }
+.empty-state .es-title { font-size: .92em; font-weight: 650; color: var(--text2); }
+.empty-state .es-hint { font-size: .78em; color: var(--text3); max-width: 460px; line-height: 1.7; }
+
+/* ── 分组小标题 ── */
+.sec-title {
+  display: flex; align-items: center; gap: 7px; margin: 16px 0 9px;
+  font-size: .82em; font-weight: 700; color: var(--text2);
+}
+.sec-title::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+.sec-title .sec-count {
+  font-size: .88em; font-weight: 600; color: var(--text3);
+  padding: 0 6px; background: var(--bg2); border-radius: 5px;
+}
+
+/* ── 知识库检索命中卡 ── */
+.kb-hit {
+  margin-top: 8px; padding: 10px 12px; font-size: .85em;
+  background: var(--bg1); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.kb-hit-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.kb-hit-body {
+  margin-top: 6px; color: var(--text2); line-height: 1.7;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* 相关度做成小条 —— 0.83 这样的数字光看没概念，长短一眼可比 */
+.kb-score {
+  flex: 0 0 56px; height: 4px; border-radius: 99px;
+  background: var(--bg3); overflow: hidden;
+}
+.kb-score-bar { display: block; height: 100%; background: var(--accent-grad); border-radius: 99px; }
+
+/* ── 看板（团队协作）── */
+.kanban {
+  display: grid; gap: 12px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.kanban-col { min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+.kanban-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 7px 10px; font-size: .8em; font-weight: 700; color: var(--text2);
+  background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+}
+.kanban-empty {
+  padding: 18px 10px; text-align: center; font-size: .78em; color: var(--text3);
+  border: 1px dashed var(--border); border-radius: var(--radius-sm);
+}
+
+/* ── 活动流（团队通知）── */
+.feed { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.feed-row {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 12px; font-size: .8em; border-bottom: 1px solid var(--border);
+}
+.feed-row:last-child { border-bottom: none; }
+.feed-row:nth-child(odd) { background: var(--bg1); }
+.feed-time { flex: 0 0 auto; color: var(--text3); font-size: .92em; }
+.feed-body { min-width: 0; overflow-wrap: anywhere; color: var(--text2); }
+
+/* 面板内的 antd 卡片跟随同一套圆角与描边，避免两种卡片语言并存 */
+.view-slot .ant-card { border-radius: var(--radius-sm); }
+.view-slot .ant-tabs-nav { margin-bottom: 12px; }
 
 /* 「减少动效」偏好：晕动症敏感用户，或老机器上动画反而更卡的场景。
    全站动画与过渡压到近乎瞬时，但不改变任何布局与功能。 */

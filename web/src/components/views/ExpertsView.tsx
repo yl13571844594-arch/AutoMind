@@ -3,6 +3,7 @@ import { App, Button, Card, Input, Modal, Space, Tag, Typography, Upload } from 
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { chatSid, useApp } from '../../store/app';
+import { Badge, EmptyState, EntityCard, SectionTitle, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
 
@@ -35,26 +36,27 @@ export default function ExpertsView() {
   });
 
   const expertCard = (e: any, actions: React.ReactNode) => (
-    <Card key={e.id} size="small" style={{ marginBottom: 8, borderColor: active === e.id ? 'var(--green)' : undefined }}>
-      <Space align="start" style={{ width: '100%' }}>
-        <span style={{ fontSize: '1.5em' }}>{e.icon || '🎓'}</span>
-        <div style={{ flex: 1 }}>
-          <Text strong>{e.name}</Text>
-          {active === e.id && <Tag color="green" style={{ marginLeft: 6 }}>✓ 已激活</Tag>}
-          {e.shared && <Tag style={{ marginLeft: 4, fontSize: '.68em' }}>👥 已分享{data.approval && !e.approved ? '·待审批' : ''}</Tag>}
-          <div className="hint-text">{e.desc || ''}</div>
-          {data.pro && e.usage ? <div className="hint-text">已调用 {e.usage} 次</div> : null}
-        </div>
-        <Space>{actions}</Space>
-      </Space>
-    </Card>
+    <EntityCard
+      key={e.id}
+      state={active === e.id ? 'ok' : undefined}
+      icon={e.icon || '🎓'}
+      title={e.name}
+      badges={<>
+        {active === e.id && <Badge tone="builtin">✓ 已激活</Badge>}
+        {e.source === 'official' && <Badge tone="mcp">官方精选</Badge>}
+        {e.shared && <Badge tone="muted">👥 已分享{data.approval && !e.approved ? ' · 待审批' : ''}</Badge>}
+      </>}
+      desc={e.desc || '（无简介）'}
+      meta={data.pro && e.usage ? <>已调用 {e.usage} 次</> : undefined}
+      actions={actions}
+    />
   );
 
   return (
     <div>
-      <Space style={{ width: '100%', justifyContent: 'space-between', marginBottom: 12 }} wrap>
-        <h3>🎓 专家市场 <span className="hint-text" style={{ fontWeight: 400 }}>专家 = 可复用的角色设定；激活后所有任务带该设定执行</span></h3>
-        {data.pro ? (
+      <ViewHead icon="🎓" title="专家市场"
+                sub="专家 = 可复用的角色设定；激活后所有任务都会带上该设定执行。"
+                extra={data.pro ? (
           <Space>
             <Button size="small" onClick={() => window.open('/api/experts/export', '_blank')}>📤 导出</Button>
             <Upload showUploadList={false} accept=".json" beforeUpload={async (f) => {
@@ -72,8 +74,7 @@ export default function ExpertsView() {
               setStats(r.stats || []); setStatsOpen(true);
             }}>📊 统计</Button>
           </Space>
-        ) : <span className="hint-text">导入/导出/统计/分享 🔒 专业版</span>}
-      </Space>
+        ) : <span className="hint-text">导入 / 导出 / 统计 / 分享 🔒 专业版</span>} />
 
       {active && (
         <Card size="small" style={{ marginBottom: 10, borderColor: 'var(--green)' }}>
@@ -84,8 +85,10 @@ export default function ExpertsView() {
         </Card>
       )}
 
-      <Text strong>⭐ 我的专家（{data.custom_limit == null ? custom.length + ' · 不限' : `${data.custom_count}/${data.custom_limit}`}）</Text>
-      <div style={{ marginTop: 8 }}>
+      <SectionTitle count={custom.length}>
+        ⭐ 我的专家{data.custom_limit == null ? '（不限）' : `（上限 ${data.custom_limit}）`}
+      </SectionTitle>
+      <div className="ent-grid">
         {custom.map((e: any) => expertCard(e, (
           <>
             {active !== e.id && <Button size="small" type="primary" onClick={() => activate(e.id)}>激活</Button>}
@@ -97,8 +100,11 @@ export default function ExpertsView() {
             <Button size="small" danger type="text" onClick={() => del(e.id)}>✕</Button>
           </>
         )))}
-        {!custom.length && <div className="hint-text" style={{ margin: '6px 0' }}>还没有自建专家 — 在下方创建，或先从官方精选安装。</div>}
       </div>
+      {!custom.length && (
+        <EmptyState icon="⭐" title="还没有自建专家"
+                    hint="在下方填写名称与角色设定即可创建；也可以先从「官方精选」里安装一个改改。" />
+      )}
 
       <Space.Compact style={{ width: '100%', marginTop: 8 }}>
         <Input style={{ width: 60 }} maxLength={4} value={form.icon} onChange={(e) => setForm({ ...form, icon: e.target.value })} />
@@ -117,11 +123,8 @@ export default function ExpertsView() {
         onChange={(e) => setForm({ ...form, prompt: e.target.value })}
         placeholder="角色设定提示词（它是谁、擅长什么、输出风格与硬性要求）" />
 
-      <div style={{ marginTop: 16, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-        <Text strong>🏛️ 官方精选（{data.official.length}）</Text>
-        <span className="hint-text" style={{ marginLeft: 6 }}>一键安装即可激活使用</span>
-      </div>
-      <div style={{ marginTop: 8 }}>
+      <SectionTitle count={data.official.length}>🏛️ 官方精选 · 一键安装即可激活</SectionTitle>
+      <div className="ent-grid">
         {data.official.map((e: any) => {
           const inst = officialInstalled.find((i: any) => i.id === e.id);
           return expertCard(inst || e, e.installed ? (
