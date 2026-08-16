@@ -45,6 +45,11 @@ else:
 # React 构建产物 + 经典界面 + 内置手册 全部随包
 datas = [(os.path.join(ROOT, "automind", "static"), "automind/static")]
 datas += collect_data_files("automind")
+# 内置插件必须**连 hooks.py 一起**落到磁盘上：插件是用 spec_from_file_location
+# 按路径加载的，不走 import，所以 Analysis 扫不到它们；而 collect_data_files
+# 默认 include_py_files=False，只会带上 plugin.json。二者叠加的结果是——
+# 界面上 4 个内置插件都在、都标着"内置"，但点哪个都加载失败（清单在、代码不在）。
+datas += [(os.path.join(ROOT, "automind", "builtin_plugins"), "automind/builtin_plugins")]
 # 托盘图标随包（Windows 用 .ico；mac/linux 用 .png）
 for _ico in ("icon.ico", "icon.png"):
     _p = os.path.join(SPECPATH, _ico)

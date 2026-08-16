@@ -14,6 +14,7 @@ hello_hooks），文件与清单都齐全 —— 但 `PluginManager` 的默认 `
 from __future__ import annotations
 
 import json
+import logging
 
 import pytest
 
@@ -162,3 +163,60 @@ class TestEnabledStatePersists:
         agent = _FakeAgent()
         srv._restore_plugins(agent)                 # 不抛异常
         assert agent.plugin_manager.loaded_names() == ["cost_tracker"]
+
+
+class TestLoadFailuresAreDiagnosable:
+    """加载失败必须留下能定位问题的日志，而不是一句"失败或不存在"。
+
+    桌面版打包曾漏带 hooks.py（清单在、代码不在）：界面上 4 个内置插件全都
+    显示正常且标着"内置"，但一个也加载不了，日志里一个字都没有 —— 排查全靠猜。
+    """
+
+    def _meta_only_plugin(self, tmp_path):
+        d = tmp_path / "broken"
+        d.mkdir()
+        (d / "plugin.json").write_text(
+            json.dumps({"name": "broken", "version": "1.0.0"}), encoding="utf-8")
+        return PluginManager(plugin_dirs=[tmp_path])
+
+    def test_missing_entry_file_is_logged(self, tmp_path, caplog):
+        """只有 plugin.json、没有 hooks.py —— 正是打包漏带 .py 的现场。"""
+        pm = self._meta_only_plugin(tmp_path)
+        with caplog.at_level(logging.ERROR):
+            assert pm.load("broken") is None
+        assert "plugin_entry_missing" in caplog.text, "入口代码缺失却没留下任何日志"
+        assert "broken" in caplog.text
+
+    def test_broken_plugin_code_is_logged_with_reason(self, tmp_path, caplog):
+        d = tmp_path / "boom"
+        d.mkdir()
+        (d / "plugin.json").write_text(
+            json.dumps({"name": "boom", "version": "1.0.0"}), encoding="utf-8")
+        (d / "hooks.py").write_text("raise RuntimeError('插件自己炸了')\n", encoding="utf-8")
+
+        pm = PluginManager(plugin_dirs=[tmp_path])
+        with caplog.at_level(logging.ERROR):
+            assert pm.load("boom") is None
+        assert "plugin_load_failed" in caplog.text
+        assert "插件自己炸了" in caplog.text, "没有把真实异常写进日志"
+
+    def test_missing_entry_point_attribute_is_logged(self, tmp_path, caplog):
+        d = tmp_path / "noattr"
+        d.mkdir()
+        (d / "plugin.json").write_text(
+            json.dumps({"name": "noattr", "version": "1.0.0"}), encoding="utf-8")
+        (d / "hooks.py").write_text("x = 1\n", encoding="utf-8")
+
+        pm = PluginManager(plugin_dirs=[tmp_path])
+        with caplog.at_level(logging.ERROR):
+            assert pm.load("noattr") is None
+        assert "plugin_entry_point_not_found" in caplog.text
+
+
+class TestPackagedPluginsAreComplete:
+    @pytest.mark.parametrize("name", sorted(BUILTIN))
+    def test_manifest_and_entry_code_ship_together(self, name):
+        """清单与入口代码必须成对存在 —— 只有清单等于"装上了但用不了"。"""
+        d = builtin_plugin_dir() / name
+        assert (d / "plugin.json").is_file(), f"{name} 缺 plugin.json"
+        assert (d / "hooks.py").is_file(), f"{name} 缺 hooks.py"

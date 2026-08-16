@@ -24,6 +24,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from automind.core.hooks import AgentHooks, merge_hooks
+from automind.core.logging import get_logger
+
+logger = get_logger("automind.plugin")
 
 
 @dataclass
@@ -132,24 +135,41 @@ class PluginManager:
 
     @staticmethod
     def _load_from_meta(meta: PluginMeta) -> AgentHooks | None:
+        """按清单加载插件；失败返回 None 并**说明原因**。
+
+        此前这里是一个光秃秃的 `except Exception: return None`，任何失败都退化成
+        "插件加载失败或不存在"这一句既不区分原因、也无处排查的提示。桌面版打包
+        漏带 hooks.py 时（清单在、代码不在），界面上 4 个内置插件全都显示正常
+        却一个也用不了，而日志里一个字都没有 —— 排查全靠猜。
+        """
         mod_name, _, attr = meta.entry_point.partition(":")
         attr = attr or "get_hooks"
         module_file = Path(meta.path) / f"{mod_name}.py"
         if not module_file.exists():
+            logger.error("plugin_entry_missing", plugin=meta.name,
+                         expected=str(module_file),
+                         hint="清单存在但入口代码缺失；打包时可能漏带了 .py 文件")
             return None
         try:
             spec = importlib.util.spec_from_file_location(
                 f"automind_plugin_{meta.name}", module_file
             )
             if spec is None or spec.loader is None:
+                logger.error("plugin_spec_failed", plugin=meta.name,
+                             file=str(module_file))
                 return None
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             target = getattr(module, attr, None)
             if target is None:
+                logger.error("plugin_entry_point_not_found", plugin=meta.name,
+                             attr=attr, file=str(module_file))
                 return None
             return PluginManager._resolve_hooks(target)
-        except Exception:
+        except Exception as e:
+            logger.error("plugin_load_failed", plugin=meta.name,
+                         file=str(module_file),
+                         error=f"{type(e).__name__}: {e}")
             return None
 
     @staticmethod

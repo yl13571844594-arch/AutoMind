@@ -65,6 +65,27 @@ if ($LASTEXITCODE -ne 0) { throw "安装器编译失败" }
 
 # 5) 终验
 Write-Host "`n[5/5] 校验产物…"
+
+# 内置插件完整性：清单与入口代码必须成对存在。
+# collect_data_files 默认 include_py_files=$false，只会带 plugin.json —— 漏带
+# hooks.py 时界面上插件全都在、都标"内置"，但一个也加载不了，且毫无报错。
+# 这种"看起来好好的"缺陷必须在出厂前拦住。
+$pluginSrc = Join-Path $root "automind\builtin_plugins"
+$pluginOut = "dist\AutoMind\_internal\automind\builtin_plugins"
+if (Test-Path $pluginSrc) {
+    $expected = Get-ChildItem $pluginSrc -Directory | Where-Object {
+        Test-Path (Join-Path $_.FullName "plugin.json") }
+    foreach ($p in $expected) {
+        foreach ($f in @("plugin.json", "hooks.py")) {
+            $target = Join-Path $pluginOut "$($p.Name)\$f"
+            if (-not (Test-Path $target)) {
+                throw "内置插件打包不完整：缺 $($p.Name)\$f —— 装上了但用不了，检查 automind.spec 的 datas"
+            }
+        }
+    }
+    Write-Host "  内置插件完整性: $($expected.Count) 个（清单 + 入口代码）✅"
+}
+
 $setup = "Output\AutoMind-Setup-$ver.exe"
 if (-not (Test-Path $setup)) { throw "安装包缺失: $setup" }
 if ($canSign) {
