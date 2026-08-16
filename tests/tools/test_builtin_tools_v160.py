@@ -108,7 +108,19 @@ class TestChartToolCorrectness:
         assert "长度不一致" in (r.error or "")
 
     async def test_chinese_title_renders_without_missing_glyphs(self, tmp_path):
-        """中文标题不能画成方框（matplotlib 会为此发 UserWarning）。"""
+        """中文标题不能画成方框（matplotlib 会为此发 UserWarning）。
+
+        断言的是"系统里有中文字体时必须用上它"，而不是"操作系统必须装中文字体"。
+        CI 用的 ubuntu-latest 只有 DejaVu，没有任何 CJK 字体 —— 那种环境下画方框
+        是没得选，不该判定为代码缺陷。
+        """
+        from matplotlib import font_manager
+
+        from automind.tools.media_tools import _CJK_FONTS
+        installed = {f.name for f in font_manager.fontManager.ttflist}
+        if not (installed & set(_CJK_FONTS)):
+            pytest.skip("本机未安装任何中文字体，无从验证字体选取")
+
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             r = await ChartTool().execute(
