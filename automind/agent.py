@@ -876,7 +876,7 @@ class AutoMindAgent:
         await self._emit({"type": "plan_backtrack", "goal_id": goal_id,
                           "reason": str(reason)[:300]})
 
-    async def _on_approval_needed(self, goal: Any, action: Any) -> bool:
+    async def _on_approval_needed(self, goal: Any, action: Any) -> Any:
         """请求人工批准；**任何异常一律按"拒绝"处理**。
 
         安全修复（v1.4.4）：此前 `except Exception: return True` —— 回调一出错就
@@ -884,13 +884,18 @@ class AutoMindAgent:
         于是"用户关掉页面"反而变成"后续所有敏感操作自动获批"，「询问」模式在
         最需要它的时候等同于「全批准」。审批是安全控制，只能 fail-closed：
         问不到人，就当作没批准。
+
+        返回 `ApprovalOutcome`：除批准/拒绝外，还能表达「改参数后批准」
+        （`ApprovalAction.MODIFY`）—— 调用方据此替换本次执行的参数。
         """
+        from automind.state.human_loop import ApprovalOutcome
+
         tool_name = getattr(action, "tool_name", "unknown")
         params = getattr(action, "parameters", {}) or {}
         # 优先走 Web 注入的审批回调
         if self.approval_callback is not None:
             try:
-                return bool(await self.approval_callback(
+                outcome = ApprovalOutcome.normalize(await self.approval_callback(
                     tool_name, params, "sensitive",
                     f"步骤需要批准：{getattr(goal, 'description', '')}"))
             except Exception as e:
@@ -901,7 +906,13 @@ class AutoMindAgent:
                     "type": "approval_failed", "tool": tool_name,
                     "reason": f"审批通道异常（{type(e).__name__}），按拒绝处理",
                 })
-                return False
+                return ApprovalOutcome(approved=False)
+            if outcome.approved and outcome.modified:
+                await self._emit({
+                    "type": "approval_modified", "tool": tool_name,
+                    "params": {k: str(v)[:200] for k, v in outcome.arguments.items()},
+                })
+            return outcome
         # 没有回调：交给 human_loop（CLI 交互）；非交互环境下它会拒绝，
         # 绝不会因为"没人可问"就自动放行。
         request = ApprovalRequest(
@@ -909,7 +920,12 @@ class AutoMindAgent:
             reason="Manual approval required",
         )
         response = await self.human_loop.request_approval(request)
-        return response.action == ApprovalAction.APPROVE
+        if response.action == ApprovalAction.MODIFY:
+            return ApprovalOutcome(approved=True,
+                                   arguments=dict(response.modifications or {}),
+                                   comment=response.comment)
+        return ApprovalOutcome(approved=response.action == ApprovalAction.APPROVE,
+                               comment=response.comment)
 
     # ═══════════════════════════════════════════════════════════
     # 辅助方法

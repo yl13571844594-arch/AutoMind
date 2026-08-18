@@ -2904,6 +2904,23 @@ _ws_tasks: dict[str, asyncio.Task] = {}
 _ws_approvals: dict[str, asyncio.Future] = {}
 
 
+def _jsonable(obj: Any, _depth: int = 0) -> Any:
+    """把工具参数转成可 JSON 序列化的形式（供审批弹窗回填编辑）。
+
+    参数里可能混着 Path、枚举、自定义对象 —— 直接 send_json 会整条消息发不出去，
+    审批请求发不到前端就等于任务卡死在那里。转不了的降级为字符串。
+    """
+    if _depth > 6:
+        return str(obj)
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, dict):
+        return {str(k): _jsonable(v, _depth + 1) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_jsonable(v, _depth + 1) for v in obj]
+    return str(obj)
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     # WebSocket 源校验 —— v1.4.6 起**默认开启**。
@@ -2955,7 +2972,14 @@ async def ws_endpoint(ws: WebSocket):
             elif action == "approval_response":
                 fut = _ws_approvals.get(data.get("approval_id", ""))
                 if fut and not fut.done():
-                    fut.set_result(bool(data.get("approved")))
+                    # 除批准/拒绝外还可携带 arguments（「修改后批准」）；
+                    # 结构化结果由 ApprovalOutcome.normalize 统一解析
+                    args = data.get("arguments")
+                    fut.set_result({
+                        "approved": bool(data.get("approved")),
+                        "arguments": args if isinstance(args, dict) else None,
+                        "comment": str(data.get("comment") or ""),
+                    })
     except WebSocketDisconnect:
         pass
     except Exception:
@@ -3030,7 +3054,11 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             await ws.send_json({
                 "type": "approval_request", "approval_id": approval_id,
                 "session_id": session_id, "tool": tool_name, "tier": tier,
-                "reason": reason, "params": {k: str(v)[:200] for k, v in (args or {}).items()},
+                "reason": reason,
+                # 截断版仅供展示；editable 是「修改后批准」要回填的原始值，
+                # 不能截断 —— 否则用户"没改的那些参数"会被截断值悄悄覆盖
+                "params": {k: str(v)[:200] for k, v in (args or {}).items()},
+                "editable": _jsonable(args or {}),
             })
             return await asyncio.wait_for(fut, timeout=300)
         except TimeoutError:

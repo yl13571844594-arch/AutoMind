@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from automind.core.logging import get_logger
 from automind.core.types import (
     Goal,
     GoalStatus,
@@ -16,6 +17,8 @@ from automind.planning.hierarchical_planner import HierarchicalPlanner
 from automind.planning.nonmonotonic import NonMonotonicReasoner
 from automind.tools.base import ToolRegistry
 from automind.tools.permissions import PermissionEngine
+
+logger = get_logger("automind.planning.plan_executor")
 
 
 @dataclass
@@ -262,7 +265,18 @@ class PlanExecutor:
                                "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）"),
                     )
                 try:
-                    approved = await on_approval_needed(goal, action)
+                    from automind.state.human_loop import ApprovalOutcome
+                    outcome = ApprovalOutcome.normalize(
+                        await on_approval_needed(goal, action))
+                    approved = outcome.approved
+                    if approved and outcome.modified:
+                        # 「修改后批准」：用用户改过的参数覆盖本步骤的动作参数
+                        action.parameters = dict(outcome.arguments or {})
+                        logger.info("approval_modified", goal=goal.id,
+                                    tool=action.tool_name,
+                                    keys=sorted(action.parameters))
+                    elif not approved and outcome.comment:
+                        reason = outcome.comment
                 except Exception as e:
                     approved = False   # 审批通道异常一律视为未批准
                     reason = f"审批通道异常（{type(e).__name__}）"

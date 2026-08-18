@@ -355,27 +355,79 @@ async function resumeLastTask() {
 }
 
 // ── 审批对话框 ──
-function showApprovalDialog(d) {
+// 当前待处理的审批请求与其原始参数（供「修改参数」表单回填与回传）。
+// 存在模块变量里而不是塞进 onclick 属性：参数里带引号/换行时，
+// 内联 JSON 会把 HTML 属性截断，按钮直接失效。
+let _approvalReq = null;
+let _approvalEditable = {};
+
+function showApprovalDialog(d, editing) {
   const overlay = document.getElementById('settings-modal');
   const content = document.getElementById('settings-content');
-  const params = Object.entries(d.params||{}).map(([k,v])=>`<div style="font-family:var(--mono);font-size:.8em;color:var(--text3)">${esc(k)} = ${esc(v)}</div>`).join('');
+  if (!editing) { _approvalReq = d; _approvalEditable = d.editable || {}; }
+  d = d || _approvalReq;
+  const src = _approvalEditable;
+  const keys = Object.keys(src);
+  const asText = (v) => v === null || v === undefined ? ''
+    : (typeof v === 'object' ? JSON.stringify(v, null, 2) : String(v));
+
+  const body = editing
+    ? keys.map((k) => {
+        const t = asText(src[k]);
+        const multi = t.length > 60 || t.includes('\n');
+        const el = multi
+          ? `<textarea id="apv-${esc(k)}" rows="3" style="width:100%;font-family:var(--mono);font-size:.8em">${esc(t)}</textarea>`
+          : `<input id="apv-${esc(k)}" value="${esc(t)}" style="width:100%;font-family:var(--mono);font-size:.8em">`;
+        return `<div style="margin-top:8px"><div style="font-size:.76em;color:var(--text2)">${esc(k)}</div>${el}</div>`;
+      }).join('')
+    : Object.entries(d.params || {}).map(([k, v]) =>
+        `<div style="font-family:var(--mono);font-size:.8em;color:var(--text3)">${esc(k)} = ${esc(v)}</div>`).join('');
+
+  // 「修改后批准」对应 ApprovalAction.MODIFY：Agent 将按改后的参数执行这一步
+  const buttons = editing
+    ? `<button onclick="showApprovalDialog(null,false)">取消修改</button>
+       <button class="btn-primary" onclick="respondApproval('${jsq(d.approval_id)}',true,true)">保存并批准</button>`
+    : `<button class="btn-danger" onclick="respondApproval('${jsq(d.approval_id)}',false)">拒绝</button>
+       ${keys.length ? '<button onclick="showApprovalDialog(null,true)">✎ 修改参数</button>' : ''}
+       <button class="btn-primary" onclick="respondApproval('${jsq(d.approval_id)}',true)">批准</button>`;
+
   content.innerHTML = `
 <h2>🙋 工具调用审批</h2>
 <div class="card lt-yellow" style="margin:12px 0">
   <b>${esc(d.tool)}</b> <span class="tag ${d.tier}">${d.tier}</span>
   <div style="font-size:.85em;color:var(--text2);margin-top:6px">${esc(d.reason||'')}</div>
-  ${params?`<div style="margin-top:8px">${params}</div>`:''}
+  ${editing ? '<div style="font-size:.76em;color:var(--text3);margin-top:8px">改完点「保存并批准」，Agent 将按修改后的参数执行。</div>' : ''}
+  ${body?`<div style="margin-top:8px">${body}</div>`:''}
 </div>
-<div class="btn-row">
-  <button class="btn-danger" onclick="respondApproval('${jsq(d.approval_id)}',false)">拒绝</button>
-  <button class="btn-primary" onclick="respondApproval('${jsq(d.approval_id)}',true)">批准</button>
-</div>`;
+<div class="btn-row">${buttons}</div>`;
   overlay.classList.add('show');
 }
-function respondApproval(id, approved) {
+
+function respondApproval(id, approved, withEdits) {
+  let args;
+  if (withEdits) {
+    args = {};
+    for (const k of Object.keys(_approvalEditable)) {
+      const el = document.getElementById('apv-' + k);
+      const raw = el ? el.value : '';
+      const orig = _approvalEditable[k];
+      // 按原值类型还原：输入框里的一切都是字符串，直接回传会让
+      // timeout=30 这类数字参数变成字符串，工具行为随之出错
+      if (typeof orig === 'number') { const n = Number(raw); args[k] = (raw.trim() !== '' && isFinite(n)) ? n : raw; }
+      else if (typeof orig === 'boolean') { args[k] = ['1','true','yes','y','on','是','真'].includes(raw.trim().toLowerCase()); }
+      else if (orig && typeof orig === 'object') { try { args[k] = JSON.parse(raw); } catch (e) { args[k] = raw; } }
+      else args[k] = raw;
+    }
+  }
   if (ws && ws.readyState === WebSocket.OPEN)
-    ws.send(JSON.stringify({action:'approval_response', approval_id:id, approved}));
+    ws.send(JSON.stringify({
+      action: 'approval_response', approval_id: id, approved,
+      ...(args ? { arguments: args, comment: '用户修改参数后批准' } : {}),
+    }));
+  _approvalReq = null;
+  _approvalEditable = {};
   closeModal();
-  toast(approved ? '已批准' : '已拒绝', approved?'success':'info');
+  toast(approved ? (withEdits ? '已按修改后的参数批准' : '已批准') : '已拒绝',
+        approved ? 'success' : 'info');
 }
 

@@ -155,7 +155,11 @@ class TestApprovalFailsClosed:
 
         stub.approval_callback = boom
         got = asyncio.run(AutoMindAgent._on_approval_needed(stub, G(), A()))
-        assert got is False, "回调异常必须按拒绝处理，而不是放行"
+        # 返回值现在是 ApprovalOutcome（为支持「修改后批准」）。既要 .approved
+        # 为假，也要在**布尔上下文里为假** —— 否则任何 `if not approved:`
+        # 都会把拒绝当成放行。
+        assert got.approved is False, "回调异常必须按拒绝处理，而不是放行"
+        assert not got, "未批准的结果在布尔上下文中必须为假"
         assert emitted and emitted[0]["type"] == "approval_failed"
 
     def test_non_interactive_denies(self):

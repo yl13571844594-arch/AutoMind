@@ -1,11 +1,94 @@
-"""浏览器自动化工具 — Playwright 异步封装。"""
+"""浏览器自动化工具 — Playwright 异步封装。
+
+浏览器从哪来（§按此顺序回退）
+-----------------------------
+Playwright 的 Python 包**不含浏览器本体**，要另跑一次 ``playwright install``
+下载约 150MB 的 Chromium。装了包却没下载二进制时，用户会撞上一大段英文：
+
+    BrowserType.launch: Executable doesn't exist at ...\\chrome-headless-shell.exe
+    ╔═══ Looks like Playwright was just installed or updated. ═══╗
+    ║     playwright install                                     ║
+
+对桌面版用户尤其难办 —— 冻结包里没有可用的 ``playwright`` 命令行，那句提示
+照着做也做不了。
+
+所以改成三级回退：
+  1. Playwright 自带的 Chromium（``playwright install`` 下载过就用它）；
+  2. **系统已装的 Edge / Chrome**（Windows 上 Edge 是系统组件，几乎必然存在，
+     零下载即可用；macOS/Linux 上有 Chrome 也能命中）；
+  3. 三者都没有 → 给一句中文说明 + 可照抄的安装命令。
+
+`browser_status()` 供界面做"浏览器就绪状态"自检。
+"""
 
 from __future__ import annotations
 
 from typing import Any
 
+from automind.core.logging import get_logger
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools.base import AbstractTool
+
+logger = get_logger("automind.tools.browser")
+
+#: 系统浏览器回退通道，按优先级。msedge 在 Win10/11 上是系统自带组件。
+SYSTEM_CHANNELS: tuple[str, ...] = ("msedge", "chrome", "chrome-beta", "msedge-beta")
+
+_MISSING_HINT = (
+    "浏览器自动化不可用：既没有 Playwright 下载的 Chromium，也没有检测到系统"
+    "已安装的 Edge / Chrome。\n"
+    "解决办法（任选其一）：\n"
+    "  · 装一个 Chrome 或 Edge（Windows 10/11 自带 Edge，通常无需此步）；\n"
+    "  · 下载 Playwright 自带的 Chromium：python -m playwright install chromium"
+)
+
+
+def _is_missing_executable(exc: Exception) -> bool:
+    """判断异常是不是"浏览器二进制不存在"（而非启动参数/权限等其它错）。"""
+    msg = str(exc)
+    return ("Executable doesn't exist" in msg
+            or "playwright install" in msg
+            or "Chromium distribution" in msg)
+
+
+async def browser_status() -> dict:
+    """探测浏览器可用性，供界面自检与 /api/browser/status 使用。
+
+    Returns:
+        ``{"ready": bool, "source": "bundled"|"msedge"|..., "detail": str}``
+    """
+    try:
+        from playwright.async_api import async_playwright
+    except ImportError:
+        return {"ready": False, "source": "", "sdk": False,
+                "detail": "未安装 playwright 库：pip install playwright"}
+
+    pw = None
+    try:
+        pw = await async_playwright().start()
+        for source, kwargs in _launch_candidates():
+            try:
+                b = await pw.chromium.launch(headless=True, **kwargs)
+                await b.close()
+                return {"ready": True, "source": source, "sdk": True,
+                        "detail": "自带 Chromium" if source == "bundled"
+                                  else f"系统浏览器（{source}）"}
+            except Exception:
+                continue
+        return {"ready": False, "source": "", "sdk": True, "detail": _MISSING_HINT}
+    except Exception as e:
+        return {"ready": False, "source": "", "sdk": True, "detail": str(e)[:300]}
+    finally:
+        if pw is not None:
+            try:
+                await pw.stop()
+            except Exception:
+                pass
+
+
+def _launch_candidates() -> list[tuple[str, dict]]:
+    """按优先级列出启动方案：自带 Chromium → 系统 Edge/Chrome。"""
+    return [("bundled", {})] + [(c, {"channel": c}) for c in SYSTEM_CHANNELS]
 
 
 class BrowserTool(AbstractTool):
@@ -50,26 +133,49 @@ class BrowserTool(AbstractTool):
         self._playwright = None
         self._browser = None
         self._page = None
+        #: 本次实际用上的浏览器来源（bundled / msedge / chrome…），供结果标注
+        self.browser_source: str = ""
 
     async def _ensure_browser(self) -> None:
-        """延迟初始化浏览器。"""
+        """延迟初始化浏览器：自带 Chromium → 系统 Edge/Chrome → 明确报错。"""
         if self._page is not None:
             return
         try:
             from playwright.async_api import async_playwright
-            self._playwright = await async_playwright().start()
-            self._browser = await self._playwright.chromium.launch(
-                headless=self._headless
-            )
-            self._page = await self._browser.new_page()
         except ImportError as e:
             raise ImportError(
-                "playwright is not installed. Install it with: "
-                "pip install playwright && playwright install"
+                "未安装 playwright 库。请执行：pip install playwright"
             ) from e
-        except Exception as e:
+
+        try:
+            self._playwright = await async_playwright().start()
+        except Exception:
             await self._cleanup()
-            raise e
+            raise
+
+        last_exc: Exception | None = None
+        for source, kwargs in _launch_candidates():
+            try:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=self._headless, **kwargs)
+                self._page = await self._browser.new_page()
+                self.browser_source = source
+                if source != "bundled":
+                    # 用的是系统浏览器而非自带 Chromium，记一笔便于排查行为差异
+                    logger.info("browser_fallback_to_system", channel=source)
+                return
+            except Exception as e:
+                last_exc = e
+                if not _is_missing_executable(e):
+                    # 不是"没这个浏览器"，而是启动本身出错（权限/沙箱/参数）——
+                    # 继续换通道只会掩盖真正的原因
+                    await self._cleanup()
+                    raise
+                continue
+
+        await self._cleanup()
+        raise RuntimeError(_MISSING_HINT + (
+            f"\n（最后一次尝试的报错：{str(last_exc)[:200]}）" if last_exc else ""))
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         action = kwargs["action"]

@@ -309,8 +309,19 @@ class ReActExecutor:
             return False, (f"{reason}；当前没有可用的审批通道，已按拒绝处理"
                            "（若需无人值守运行，请将审批模式设为「自动」或「全批准」）")
         try:
-            approved = await self.approval_cb(tc.name, tc.arguments, tier.value, reason)
-            return bool(approved), reason if approved else f"用户拒绝：{reason}"
+            from automind.state.human_loop import ApprovalOutcome
+            outcome = ApprovalOutcome.normalize(
+                await self.approval_cb(tc.name, tc.arguments, tier.value, reason))
+            if outcome.approved and outcome.modified:
+                # 「修改后批准」：就地替换本次调用的参数。必须改 tc.arguments
+                # 本身 —— 后续真正执行工具时读的是它。
+                logger.info("approval_modified", tool=tc.name,
+                            keys=sorted(outcome.arguments or {}))
+                tc.arguments = dict(outcome.arguments or {})
+                return True, f"{reason}；用户修改参数后批准"
+            return outcome.approved, (
+                reason if outcome.approved
+                else f"用户拒绝：{outcome.comment or reason}")
         except Exception as e:
             logger.warning("react_approval_failed", tool=tc.name,
                            error=str(e), decision="denied")
