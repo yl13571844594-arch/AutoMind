@@ -1,0 +1,12 @@
+# 代码所有者 —— 这些路径的 PR 会自动请求对应人员评审。
+# 语法见 https://docs.github.com/articles/about-code-owners
+
+# 默认：所有改动都由维护者过目
+*                       @yl13571844594-arch
+
+# 安全相关：权限引擎、沙箱、审批、脱敏 —— 改动务必谨慎评审
+/automind/tools/permissions.py    @yl13571844594-arch
+/automind/tools/sandbox.py        @yl13571844594-arch
+/automind/state/human_loop.py     @yl13571844594-arch
+/automind/core/redact.py          @yl13571844594-arch
+/.github/                         @yl13571844594-arch

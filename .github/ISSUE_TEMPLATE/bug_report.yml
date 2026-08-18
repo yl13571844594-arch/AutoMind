@@ -1,0 +1,92 @@
+name: 🐛 Bug 报告 / Bug report
+description: 某个功能的表现和预期不一致
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈！**请先确认已升级到最新版**（`pip install -U automind-agent`，
+        或从 Releases 下载最新安装包）—— 很多问题在新版里已经修掉了。
+
+        ⚠️ 安全漏洞请**不要**发在这里，走
+        [私密报告通道](https://github.com/yl13571844594-arch/AutoMind/security/advisories/new)。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 发生了什么 / What happened?
+      description: 描述**现象**：你看到的实际结果，以及你预期的结果。
+      placeholder: |
+        我在「工作」模式下让它整理一个 Excel，结果……
+        我预期的是……
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 复现步骤 / Steps to reproduce
+      description: 越具体越好。能贴出原始任务描述与模型回复最佳。
+      placeholder: |
+        1. 打开「工具面板」→「MCP」
+        2. 点击 GitHub 预设的「添加」
+        3. 界面提示……
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 报错信息 / Error output
+      description: |
+        贴完整报错。**贴之前请把 API Key、令牌、个人路径等敏感信息删掉。**
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: AutoMind 版本
+      description: 界面左上角版本号，或 `automind --version`
+      placeholder: "1.6.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: install
+    attributes:
+      label: 安装方式 / How did you install it?
+      options:
+        - 桌面版安装包（Windows .exe）
+        - 桌面版安装包（macOS .dmg）
+        - 桌面版安装包（Linux .deb）
+        - pip install automind-agent
+        - 从源码运行
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: 操作系统 / OS
+      options: [Windows, macOS, Linux, 其他]
+    validations:
+      required: true
+
+  - type: input
+    id: model
+    attributes:
+      label: 使用的模型 / Model
+      description: 与模型相关的问题请务必填写
+      placeholder: "deepseek / deepseek-chat"
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我已升级到最新版本，问题依然存在
+          required: true
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true
+        - label: 我已从贴出的日志里删除了 API Key 等敏感信息
+          required: true

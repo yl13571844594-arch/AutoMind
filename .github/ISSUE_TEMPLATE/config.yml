@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 使用问题与讨论 / Questions & Discussions
+    url: https://github.com/yl13571844594-arch/AutoMind/discussions
+    about: 不确定是不是 bug？想问怎么用？先来这里聊聊。
+  - name: 🔒 报告安全漏洞 / Report a security vulnerability
+    url: https://github.com/yl13571844594-arch/AutoMind/security/advisories/new
+    about: 安全问题请走私密通道，不要发公开 Issue。
+  - name: 📖 使用手册 / User manual
+    url: https://github.com/yl13571844594-arch/AutoMind/blob/main/%E4%BD%BF%E7%94%A8%E6%89%8B%E5%86%8C.md
+    about: 完整功能说明与更新日志。

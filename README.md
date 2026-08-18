@@ -1,10 +1,50 @@
-# AutoMind — 通用自动化 Agent 框架（社区版）
+<div align="center">
+
+# AutoMind
+
+**通用自动化 Agent 框架 · 社区版**
+
+聊天、干活、写代码 —— 一个能自己规划、调工具、纠错的本地 Agent 工作台。
+
+[![CI](https://github.com/yl13571844594-arch/AutoMind/actions/workflows/ci.yml/badge.svg)](https://github.com/yl13571844594-arch/AutoMind/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/automind-agent?logo=pypi&logoColor=white)](https://pypi.org/project/automind-agent/)
+[![Python](https://img.shields.io/pypi/pyversions/automind-agent?logo=python&logoColor=white)](https://pypi.org/project/automind-agent/)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Downloads](https://static.pepy.tech/badge/automind-agent)](https://pepy.tech/project/automind-agent)
+[![Release](https://img.shields.io/github/v/release/yl13571844594-arch/AutoMind?logo=github)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+
+[English](README.en.md) · [使用手册](使用手册.md) · [更新日志](CHANGELOG.md) · [下载安装包](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+
+</div>
+
+![对话工作台](docs/images/chat.png)
 
 融合 Claude Code、OpenAI Codex 与 Reasonix 的核心能力，
 支持 MCP 协议、Skill 技能系统、分层规划、符号推理与自我纠错。
 内置 **Web 工作台**（v1.0 起为 React 18 + TypeScript + Ant Design 现代化前端，
 源码在 `web/`，构建产物随包内置开箱即用），可聊天、可工作、可编程，
 并带 **📚 RAG 知识库**（上传文档，对话自动检索引用）。
+
+> **数据不出本机。** 模型 API Key 存在本地配置文件，任务历史存在本地 SQLite，
+> 知识库向量索引存在本地目录 —— 除了你自己配置的模型服务商，不向任何第三方发送数据。
+
+## 界面一览
+
+<table>
+<tr>
+<td width="50%"><img src="docs/images/tools.png" alt="工具面板"><br>
+<b>🔧 工具面板</b> —— 31 个内置工具、技能、MCP 与插件，按来源标注，可搜索可开关</td>
+<td width="50%"><img src="docs/images/observe.png" alt="观测中心"><br>
+<b>📈 观测中心</b> —— 当前任务的实时执行 DAG，看得见每一步在干什么</td>
+</tr>
+<tr>
+<td width="50%"><img src="docs/images/plan.png" alt="计划视图"><br>
+<b>📋 计划视图</b> —— 分层目标树、每步状态、前置条件与预期结果</td>
+<td width="50%"><img src="docs/images/kb.png" alt="知识库"><br>
+<b>📚 RAG 知识库</b> —— 传文档进去，对话时自动检索引用</td>
+</tr>
+</table>
 
 ## 版本说明：社区版 / 专业版 / 企业版
 
@@ -197,5 +237,17 @@ python demo/e2e_demo.py
   未安装扩展时以社区版完整运行。安全能力永久保留在社区版。
 - **隐私**：AutoMind 本地运行，API Key 与聊天记录只存在你自己的机器上
   （`.automind_config.json` / `.automind/`），不会上传任何遥测。
-- **参与贡献**：见 [CONTRIBUTING.md](CONTRIBUTING.md)；版本变更见 [CHANGELOG.md](CHANGELOG.md)；
-  安全漏洞请通过 GitHub Security Advisories 私下报告。
+- **参与贡献**：见 [CONTRIBUTING.md](CONTRIBUTING.md)；版本变更见 [CHANGELOG.md](CHANGELOG.md)。
+
+## 参与社区
+
+| 我想…… | 去这里 |
+|---|---|
+| 🐛 报个 bug | [新建 Issue](https://github.com/yl13571844594-arch/AutoMind/issues/new?template=bug_report.yml) |
+| ✨ 提个功能建议 | [新建 Issue](https://github.com/yl13571844594-arch/AutoMind/issues/new?template=feature_request.yml) |
+| 💬 问怎么用 / 不确定是不是 bug | [Discussions](https://github.com/yl13571844594-arch/AutoMind/discussions) |
+| 🔒 报告安全漏洞 | [私密通道](https://github.com/yl13571844594-arch/AutoMind/security/advisories/new) —— 请勿发公开 Issue |
+| 🛠 提交代码 | [贡献指南](CONTRIBUTING.md) · [行为准则](.github/CODE_OF_CONDUCT.md) |
+
+安全策略与威胁模型（哪些算漏洞、哪些是设计内行为）见
+[SECURITY.md](.github/SECURITY.md)。

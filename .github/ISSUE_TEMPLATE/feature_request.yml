@@ -1,0 +1,47 @@
+name: ✨ 功能建议 / Feature request
+description: 希望 AutoMind 能多做点什么
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题 / What problem does this solve?
+      description: |
+        先说**遇到的实际困难**，而不是直接给方案 —— 这样我们更可能找到
+        比你我最初设想都更好的做法。
+      placeholder: |
+        我每天要把十几份 Word 周报汇总成一张表，现在得手动一个个打开……
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的方案 / Proposed solution
+      placeholder: 比如：批量文档处理时能指定一个目录，自动递归处理……
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 试过的替代做法 / Alternatives considered
+      description: 现在你是怎么绕过去的？为什么不够好？
+
+  - type: dropdown
+    id: edition
+    attributes:
+      label: 这更像哪个版本的能力？
+      description: 不确定就选"不清楚"，我们会判断。
+      options:
+        - 社区版（基础能力，人人可用）
+        - 专业版 / 企业版（进阶或团队能力）
+        - 不清楚
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 确认事项
+      options:
+        - label: 我已搜索过现有 Issue，没有重复
+          required: true

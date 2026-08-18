@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.6.0</title>
+<title>AutoMind 使用手册 — v1.6.1</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.6.0</div>
+  <div class="ver">使用手册 · v1.6.1</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.6.0</b></span>
+    <span class="chip">版本 <b>v1.6.1</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -942,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.0</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1062,8 +1062,33 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.6.0</span><span class="cl-date">2026-08-13</span>
+      <span class="cl-ver">v1.6.1</span><span class="cl-date">2026-08-18</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">开箱可用性与社区门面：浏览器零配置、审批可改参数、界面细节收拾干净</div>
+    <ul>
+      <li><b>🙋 「修改后批准」真的能用了</b>：以前审批只有「批准」「拒绝」两个选择 ——
+        遇到"命令基本对、就是路径写错了"，只能拒绝再让模型重来一轮。现在弹窗里多了
+        <b>✎ 修改参数</b>：逐项改、标出改过哪几项，Agent 就按你改后的参数执行。
+        命令行下按 <code>M</code> 同理，会一项一项问你（回车表示不改）。</li>
+      <li><b>🌐 浏览器不用再单独装了</b>：以前网页自动化要另外下载约 150MB 的浏览器，
+        没装就是一大段英文报错，桌面版用户照着提示也做不了。现在会自动改用你电脑上
+        已有的 Edge 或 Chrome（Win10/11 自带 Edge），<b>零下载即可用</b>。</li>
+      <li><b>📈 观测中心的字不再画到框外</b>：中文步骤名比英文宽一倍，原来按字数截断，
+        22 个汉字远超节点宽度，文字糊到隔壁节点上。现在按实际显示宽度截断，
+        完整内容鼠标悬停可见。</li>
+      <li><b>🌓 启动不再闪一下黑屏</b>：用浅色主题时，每次打开都会先闪一下近黑的启动画面
+        再跳成白色。现在启动画面在第一帧就用对配色，深色浅色都不再闪。</li>
+      <li><b>📋 计划视图重做</b>：以前只有一列灰字。现在有进度概览（目标总数/已完成/
+        进行中/失败），每一步能展开看前置条件与预期结果，带工具标签与状态，
+        还能看到计划被修订过几次。</li>
+      <li><b>🤝 开源门面补齐</b>：安全策略、行为准则、Issue/PR 模板，README 补上徽章与界面截图。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.6.0</span><span class="cl-date">2026-08-13</span>
     </div>
     <div class="cl-sum">开箱即用能力大扩容：内置插件 / 工具 / 技能 / MCP 适配 + 界面美化</div>
     <ul>
@@ -1374,7 +1399,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.6.0 同步 ·
+  AutoMind 使用手册 · 与软件 v1.6.1 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 
