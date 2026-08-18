@@ -29,10 +29,49 @@ const STATUS_STYLE: Record<string, { fill: string; stroke: string; label: string
   cancelled: { fill: 'var(--bg3)', stroke: 'var(--text3)', label: '已中断' },
 };
 
-const NODE_W = 190;
-const NODE_H = 46;
+const NODE_W = 232;
+const NODE_H = 50;
 const GAP_Y = 26;
 const GAP_X = 34;
+/** 节点内文字左右各留的内边距 */
+const NODE_PAD = 11;
+
+/**
+ * 估算一段文本在给定字号下的渲染宽度（px）。
+ *
+ * SVG 的 <text> 不会自动换行也不会自动省略，超出部分就直接画到节点框外面去。
+ * 而按**字符数**截断（原来的 `.slice(0, 22)`）对中文完全失效：CJK 是全角，
+ * 22 个汉字≈275px，节点才 190px 宽，必然溢出；换成英文又截得过早、浪费空间。
+ * 这里按字符类别估宽：CJK/全角≈1em，其余≈0.55em。
+ */
+function textWidth(s: string, fontSize: number): number {
+  let w = 0;
+  for (const ch of s) {
+    const c = ch.codePointAt(0) || 0;
+    const wide = (c >= 0x1100 && c <= 0x115f) || (c >= 0x2e80 && c <= 0xa4cf)
+      || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff)
+      || (c >= 0xfe30 && c <= 0xfe6f) || (c >= 0xff00 && c <= 0xff60)
+      || (c >= 0xffe0 && c <= 0xffe6) || c > 0x1f000;      // emoji
+    w += fontSize * (wide ? 1.0 : 0.55);
+  }
+  return w;
+}
+
+/** 按可用像素宽度截断文本，超出部分以省略号收尾（完整内容见节点 tooltip）。 */
+function fitText(s: string, maxPx: number, fontSize: number): string {
+  if (!s) return '';
+  if (textWidth(s, fontSize) <= maxPx) return s;
+  const ellipsis = textWidth('…', fontSize);
+  let w = 0;
+  let out = '';
+  for (const ch of s) {
+    const cw = textWidth(ch, fontSize);
+    if (w + cw + ellipsis > maxPx) break;
+    out += ch;
+    w += cw;
+  }
+  return out + '…';
+}
 
 interface Placed extends DagNode { x: number; y: number }
 
@@ -158,12 +197,15 @@ function DagCanvas({ onSelect, selected }: { onSelect: (id: string) => void; sel
                   <animate attributeName="opacity" values="0.9;0.25;0.9" dur="1.3s" repeatCount="indefinite" />
                 </rect>
               )}
-              <text x={n.x + 11} y={n.y + 19} fontSize={11} fill="var(--text3)">
-                {n.kind === 'task' ? '任务' : n.kind === 'action' ? '🛠 工具' : '步骤'}
-                {n.tool && n.kind !== 'action' ? ` · ${String(n.tool).slice(0, 12)}` : ''}
+              {/* 两行文字都按可用像素宽度裁剪；完整内容在上面的 <title> 里 */}
+              <text x={n.x + NODE_PAD} y={n.y + 20} fontSize={11} fill="var(--text3)">
+                {fitText(
+                  (n.kind === 'task' ? '任务' : n.kind === 'action' ? '🛠 工具' : '步骤')
+                  + (n.tool && n.kind !== 'action' ? ` · ${n.tool}` : ''),
+                  NODE_W - NODE_PAD * 2, 11)}
               </text>
-              <text x={n.x + 11} y={n.y + 35} fontSize={12.5} fill="var(--text)">
-                {(n.label || '').slice(0, 22)}{(n.label || '').length > 22 ? '…' : ''}
+              <text x={n.x + NODE_PAD} y={n.y + 38} fontSize={12.5} fill="var(--text)">
+                {fitText(n.label || '', NODE_W - NODE_PAD * 2, 12.5)}
               </text>
             </g>
           );
@@ -262,9 +304,14 @@ export default function ObserveView() {
       </Card>
 
       {sel && (
-        <Card size="small" title={`节点详情 · ${sel.label || sel.id}`}
+        <Card size="small" title="节点详情"
           extra={<Button size="small" type="text" onClick={() => useObserve.getState().select(null)}>关闭</Button>}>
           <Space direction="vertical" size={4} style={{ width: '100%' }}>
+            {/* 图上的节点按宽度截断了，完整描述放这里换行显示 —— 否则长步骤名
+                在图上看不全，点开详情也还是看不全 */}
+            <div style={{ fontWeight: 600, overflowWrap: 'anywhere', lineHeight: 1.6 }}>
+              {sel.label || sel.id}
+            </div>
             <Text type="secondary">类型：{sel.kind === 'task' ? '任务' : sel.kind === 'action' ? '工具调用' : '计划步骤'}
               {sel.tool ? ` · 工具 ${sel.tool}` : ''}</Text>
             <Text type="secondary">状态：{(STATUS_STYLE[sel.status] || {}).label || sel.status}</Text>

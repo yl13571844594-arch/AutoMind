@@ -970,6 +970,27 @@ async def api_stats():
 # 降级路由返回 403 + 升级提示（若专业版已激活，其路由先注册故优先匹配）。
 
 
+@app.post("/api/config/ui")
+async def api_config_ui(data: dict):
+    """保存界面偏好（目前只有主题）。
+
+    桌面版的启动画面在浏览器起来之前就要决定用深色还是浅色，它读不到
+    localStorage，只能读配置文件 —— 否则浅色主题用户每次启动都会先看到
+    一屏近黑的启动画面再跳成白色，就是所谓"启动黑屏闪烁"。
+    """
+    theme = str(data.get("theme") or "").lower()
+    if theme not in ("dark", "light"):
+        return JSONResponse({"error": "theme 只能是 dark 或 light"}, status_code=400)
+
+    def _save() -> None:
+        cfg = _read_config()
+        cfg.setdefault("ui", {})["theme"] = theme
+        _write_config(cfg)
+
+    await asyncio.to_thread(_save)
+    return {"status": "ok", "theme": theme}
+
+
 @app.get("/api/config/full")
 async def api_config_full():
     agent = get_agent()

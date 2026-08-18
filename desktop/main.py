@@ -285,23 +285,53 @@ def _tray_icon_image():
     return img
 
 
-# 启动画面：双击后窗口立即出现（冷启动 + 杀软扫描可能要几十秒，
-# 没有即时反馈用户会以为没点上而反复双击 → 多实例雪崩）
-_SPLASH_HTML = """<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-html,body{height:100%;margin:0;background:#060913;color:#e8ecf7;
-  font-family:'Segoe UI','Microsoft YaHei',sans-serif;overflow:hidden}
-.wrap{height:100%;display:flex;flex-direction:column;align-items:center;
-  justify-content:center;gap:18px}
-.dot{width:52px;height:52px;border-radius:50%;
+def _saved_theme() -> str:
+    """读用户上次选的主题（Web 端切换时会写进同一份 config.json）。
+
+    启动画面必须在浏览器起来之前就决定配色。读不到就按深色 —— 那是默认主题。
+    """
+    try:
+        import json as _json
+
+        from automind.core.paths import config_file
+        data = _json.loads(config_file().read_text(encoding="utf-8"))
+        theme = str((data.get("ui") or {}).get("theme") or "").lower()
+        return theme if theme in ("dark", "light") else "dark"
+    except Exception:
+        return "dark"
+
+
+#: 启动画面与窗口底色的两套配色。窗口 background_color 也要跟着换，
+#: 否则浅色主题下窗口先闪一下近黑的底再变白。
+_THEME_COLORS = {
+    "dark": {"bg": "#060913", "fg": "#e8ecf7", "sub": "#8e9abb", "track": "#1f2740"},
+    "light": {"bg": "#f4f6fb", "fg": "#1b2136", "sub": "#5a6485", "track": "#dfe4f2"},
+}
+
+
+def _splash_html(theme: str = "dark") -> str:
+    """启动画面：双击后窗口立即出现。
+
+    冷启动 + 杀软扫描可能要几十秒，没有即时反馈用户会以为没点上而反复双击
+    → 多实例雪崩。配色跟随用户上次选择，避免"深色启动画面 → 浅色主界面"
+    这一下明显的闪白。
+    """
+    c = _THEME_COLORS.get(theme, _THEME_COLORS["dark"])
+    return f"""<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+html,body{{height:100%;margin:0;background:{c['bg']};color:{c['fg']};
+  font-family:'Segoe UI','Microsoft YaHei',sans-serif;overflow:hidden}}
+.wrap{{height:100%;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:18px}}
+.dot{{width:52px;height:52px;border-radius:50%;
   background:linear-gradient(135deg,#7b9fff,#b594ff);
-  box-shadow:0 0 44px rgba(123,159,255,.55);animation:pulse 1.6s ease infinite}
-@keyframes pulse{50%{transform:scale(.86);box-shadow:0 0 20px rgba(123,159,255,.35)}}
-h1{font-size:1.25em;font-weight:600;margin:0}
-p{color:#8e9abb;font-size:.85em;margin:0}
-.bar{width:220px;height:4px;border-radius:2px;background:#1f2740;overflow:hidden}
-.bar i{display:block;height:100%;width:40%;border-radius:2px;
-  background:linear-gradient(90deg,#7b9fff,#b594ff);animation:slide 1.4s ease-in-out infinite}
-@keyframes slide{0%{margin-left:-40%}100%{margin-left:100%}}
+  box-shadow:0 0 44px rgba(123,159,255,.55);animation:pulse 1.6s ease infinite}}
+@keyframes pulse{{50%{{transform:scale(.86);box-shadow:0 0 20px rgba(123,159,255,.35)}}}}
+h1{{font-size:1.25em;font-weight:600;margin:0}}
+p{{color:{c['sub']};font-size:.85em;margin:0}}
+.bar{{width:220px;height:4px;border-radius:2px;background:{c['track']};overflow:hidden}}
+.bar i{{display:block;height:100%;width:40%;border-radius:2px;
+  background:linear-gradient(90deg,#7b9fff,#b594ff);animation:slide 1.4s ease-in-out infinite}}
+@keyframes slide{{0%{{margin-left:-40%}}100%{{margin-left:100%}}}}
 </style></head><body><div class="wrap">
 <div class="dot"></div><h1>AutoMind 正在启动</h1>
 <div class="bar"><i></i></div>
@@ -688,9 +718,11 @@ def main() -> None:
         try:
             import webview
 
+            _theme = _saved_theme()
             win = webview.create_window(
-                APP_TITLE, html=_SPLASH_HTML, width=1360, height=860,
-                min_size=(960, 640), background_color="#060913")
+                APP_TITLE, html=_splash_html(_theme), width=1360, height=860,
+                min_size=(960, 640),
+                background_color=_THEME_COLORS[_theme]["bg"])
             window_ref.append(win)
 
             if tray is not None:

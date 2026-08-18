@@ -108,8 +108,20 @@ export function sendRun(task: string, images: string[]) {
 export function sendStop() {
   if (wsReady()) { ws!.send(JSON.stringify({ action: 'stop' })); message.info('正在中断任务...'); }
 }
-export function sendApproval(approvalId: string, approved: boolean) {
-  if (wsReady()) ws!.send(JSON.stringify({ action: 'approval_response', approval_id: approvalId, approved }));
+/**
+ * 回传审批结果。
+ *
+ * `args` 非空即「修改后批准」（ApprovalAction.MODIFY）：服务端会用这份参数
+ * 替换本次工具调用的实参，而不是拿模型原来给的那份去执行。
+ */
+export function sendApproval(
+  approvalId: string, approved: boolean, args?: Record<string, any>,
+) {
+  if (!wsReady()) return;
+  ws!.send(JSON.stringify({
+    action: 'approval_response', approval_id: approvalId, approved,
+    ...(args ? { arguments: args, comment: '用户修改参数后批准' } : {}),
+  }));
 }
 
 // ── 面板/气泡工具 ──────────────────────────────────────
@@ -313,6 +325,8 @@ function handle(data: any) {
       panel().setApproval({
         approval_id: data.approval_id, tool: data.tool, tier: data.tier,
         reason: data.reason || '', params: data.params || {},
+        // editable 是未截断的原始参数，供「修改参数」表单回填
+        editable: data.editable || {},
       });
       break;
 

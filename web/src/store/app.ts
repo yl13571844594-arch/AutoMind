@@ -120,6 +120,9 @@ export const useApp = create<AppState>((set, get) => ({
     const next = get().theme === 'dark' ? 'light' : 'dark';
     localStorage.setItem('automind_theme', next);
     set({ theme: next });
+    // 同步给服务端：桌面版启动画面在浏览器起来之前就要知道该用深色还是浅色，
+    // 它读不到 localStorage，只能读配置文件。失败无所谓（纯外观降级）。
+    apiPost('/config/ui', { theme: next }).catch(() => {});
   },
 
   setWorkspace: (name, suffix) => {

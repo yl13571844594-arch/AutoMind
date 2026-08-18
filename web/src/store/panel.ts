@@ -27,6 +27,7 @@ interface PanelState {
   refreshTick: number;          // 任务完成后 +1 → 各观测区拉新
   approval: null | {
     approval_id: string; tool: string; tier: string; reason: string;
+    editable?: Record<string, any>;
     params: Record<string, string>;
   };
   teamFeed: any[];

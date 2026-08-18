@@ -5,15 +5,41 @@
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AutoMind — 通用自动化 Agent</title>
+  <script>
+    /* 主题必须在**首次绘制之前**定下来。
+       此前 body 的 .light 类是在 App.tsx 挂载后才加的，而这里的兜底样式又硬编码
+       了深色 #060913 —— 浅色主题用户每次打开/刷新都会先看到近黑的启动画面，
+       React 一挂载再猛地跳成白色，就是"启动黑屏闪烁"。
+       这段脚本同步执行（在任何绘制之前），把主题类与背景色一次定好。 */
+    (function () {
+      try {
+        var s = localStorage.getItem('automind_theme');
+        var light = s === 'light' || (!s && window.matchMedia
+          && window.matchMedia('(prefers-color-scheme: light)').matches);
+        var bg = light ? '#f4f6fb' : '#060913';
+        var fg = light ? '#1b2136' : '#e8ecf7';
+        if (light) document.documentElement.classList.add('light', 'pre-light');
+        document.documentElement.style.background = bg;
+        document.documentElement.style.setProperty('--boot-bg', bg);
+        document.documentElement.style.setProperty('--boot-fg', fg);
+        /* body 还没解析出来，用 DOM ready 前的 style 注入兜住 */
+        document.write('<style>body{background:' + bg + ';color:' + fg + '}</style>');
+      } catch (e) { /* localStorage 被禁用时用默认深色 */ }
+    })();
+  </script>
   <style>
     /* 首屏占位 + 白屏兜底（React 挂载成功后其内容被替换）。
        任何原因（脚本加载失败 / 运行时异常 / 内核过旧）导致 React 未挂载时，
        用户看到可读的提示与操作，而非纯空白页。 */
     html, body { height: 100%; margin: 0; }
     body {
-      background: #060913; color: #e8ecf7;
+      background: var(--boot-bg, #060913); color: var(--boot-fg, #e8ecf7);
       font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
     }
+    /* 浅色主题下启动画面的辅助文字与代码块也要跟着换，否则白底白字 */
+    .pre-light #boot p { color: #5a6485; }
+    .pre-light #boot code { background: #e6e9f5; color: #1b2136; }
+    .pre-light #boot button.ghost { background: #e6e9f5; color: #333c5c; }
     #boot {
       position: fixed; inset: 0; display: flex; flex-direction: column;
       align-items: center; justify-content: center; gap: 16px; padding: 0 40px;
@@ -39,8 +65,8 @@
     }
     #boot button.ghost { background: #1f2740; color: #c8d2ee; }
   </style>
-  <script type="module" crossorigin src="/static/dist/assets/index-BN8KhFGS.js"></script>
-  <link rel="stylesheet" crossorigin href="/static/dist/assets/index-CthfvVog.css">
+  <script type="module" crossorigin src="/static/dist/assets/index-CYx9pqZ2.js"></script>
+  <link rel="stylesheet" crossorigin href="/static/dist/assets/index-oyemTR85.css">
 </head>
 <body>
   <div id="root">

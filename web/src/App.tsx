@@ -68,6 +68,8 @@ export default function App() {
   const fontScale = usePrefs((s) => s.fontScale);
 
   useEffect(() => {
+    // 两处都要切：html.light 负责首绘前的配色，body.light 保持既有选择器兼容
+    document.documentElement.classList.toggle('light', theme === 'light');
     document.body.classList.toggle('light', theme === 'light');
   }, [theme]);
 
