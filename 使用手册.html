@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.6.1</title>
+<title>AutoMind 使用手册 — v1.6.2</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.6.1</div>
+  <div class="ver">使用手册 · v1.6.2</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.6.1</b></span>
+    <span class="chip">版本 <b>v1.6.2</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -942,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.1</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1062,8 +1062,30 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.6.1</span><span class="cl-date">2026-08-18</span>
+      <span class="cl-ver">v1.6.2</span><span class="cl-date">2026-08-19</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">把"看起来没事"的失败都变成看得见的</div>
+    <ul>
+      <li><b>⏳ 审批弹窗有倒计时了</b>：以前审批框可以一直挂着，但后台 5 分钟没等到你点就
+        按「拒绝」处理、任务悄悄失败了。现在弹窗显示剩余时间（最后 1 分钟变红），
+        超时会明确告诉你"已按拒绝处理"，而不是让你对着一个早已失效的框继续等。</li>
+      <li><b>📡「加载失败」不再伪装成「没有数据」</b>：以前服务没起来、令牌过期、接口报错，
+        界面统统显示"暂无数据"，你根本没法判断出了什么事。现在会分别告诉你
+        <i>正在加载</i> / <i>加载失败（可重试，带具体原因）</i> / <i>确实一条都没有</i>。</li>
+      <li><b>⏳ 首屏不再把"正在加载"画成"空"</b>：慢一点的机器上，知识库、任务历史、
+        统计分析会空好几秒，看着像数据丢了。现在有明确的加载骨架屏。</li>
+      <li><b>🛡 单个面板出错不再整页白屏</b>：以前任何一处渲染异常都会让整个界面变成一片空白。
+        现在只有那个面板显示错误提示（可重试、可复制诊断信息），侧边栏与正在跑的任务都还在，
+        可以直接切到别的页面继续用。</li>
+      <li><b>🧪 自我纠错补上测试</b>：顺带修好两个真 bug —— 自我纠错的公开接口此前
+        <b>每次调用都会报错</b>；重试的等待时间会超出设定的上限。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.6.1</span><span class="cl-date">2026-08-18</span>
     </div>
     <div class="cl-sum">开箱可用性与社区门面：浏览器零配置、审批可改参数、界面细节收拾干净</div>
     <ul>
@@ -1399,7 +1421,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.6.1 同步 ·
+  AutoMind 使用手册 · 与软件 v1.6.2 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 
