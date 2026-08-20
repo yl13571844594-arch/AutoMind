@@ -36,11 +36,16 @@ function fromText(text: string, original: any): any {
   return text;
 }
 
+/** 剩余秒数 → "4 分 12 秒" */
+const fmtLeft = (s: number) =>
+  s >= 60 ? `${Math.floor(s / 60)} 分 ${String(s % 60).padStart(2, '0')} 秒` : `${s} 秒`;
+
 export default function ApprovalModal() {
   const approval = usePanel((s) => s.approval);
   const setApproval = usePanel((s) => s.setApproval);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [left, setLeft] = useState<number | null>(null);
 
   // 可编辑的原始值优先；老服务端只发截断过的 params，退而求其次
   const source: Record<string, any> = useMemo(
@@ -55,6 +60,17 @@ export default function ApprovalModal() {
     setEditing(false);
     setDraft(Object.fromEntries(Object.entries(source).map(([k, v]) => [k, toText(v)])));
   }, [approval?.approval_id, source]);
+
+  // 倒计时：后端等待上限到点后会按「拒绝」处理并结束任务。不显示的话，
+  // 弹窗看起来可以一直等 —— 用户去泡杯茶回来，任务早已失败。
+  useEffect(() => {
+    if (!approval?.timeoutS || !approval.askedAt) { setLeft(null); return; }
+    const deadline = approval.askedAt + approval.timeoutS * 1000;
+    const tick = () => setLeft(Math.max(0, Math.round((deadline - Date.now()) / 1000)));
+    tick();
+    const id = window.setInterval(tick, 1000);
+    return () => window.clearInterval(id);
+  }, [approval?.approval_id, approval?.timeoutS, approval?.askedAt]);
 
   if (!approval) return null;
 
@@ -99,6 +115,17 @@ export default function ApprovalModal() {
         <div style={{ fontSize: '.85em', color: 'var(--text2)', marginTop: 6 }}>
           {approval.reason}
         </div>
+        {left !== null && (
+          <div style={{
+            marginTop: 8, fontSize: '.8em', fontWeight: 600,
+            color: left <= 60 ? 'var(--red)' : left <= 120 ? 'var(--yellow)' : 'var(--text3)',
+          }}>
+            ⏳ 剩余 {fmtLeft(left)}
+            <span style={{ fontWeight: 400, color: 'var(--text3)' }}>
+              {' '}—— 超时将按「拒绝」处理并结束本次任务
+            </span>
+          </div>
+        )}
 
         {!editing && Object.entries(approval.params || {}).map(([k, v]) => (
           <div key={k} className="mono hint-text" style={{ marginTop: 4, overflowWrap: 'anywhere' }}>

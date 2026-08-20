@@ -2,8 +2,10 @@
 import { App, Button, Card, Input, Space, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
 import { chatSid } from '../../store/app';
 import { usePanel } from '../../store/panel';
+import { ErrorPanel } from '../ui/AsyncBoundary';
 import { Badge, EmptyState, EntityCard, Tile, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
@@ -15,13 +17,16 @@ const COLS: Record<string, { label: string; icon: string; tone?: 'green' | 'yell
 
 export default function TeamView() {
   const { message, modal } = App.useApp();
-  const [tasks, setTasks] = useState<any[]>([]);
+  const st = useAsync<any[]>(
+    () => apiGet('/team/tasks').then((r) => r.tasks || []), []);
+  const tasks = st.data || [];
   const [title, setTitle] = useState('');
   const [assignee, setAssignee] = useState('');
   const feed = usePanel((s) => s.teamFeed);
 
-  const reload = () => apiGet('/team/tasks').then((r) => setTasks(r.tasks || [])).catch(() => {});
-  useEffect(() => { reload(); }, [feed.length]);
+  const reload = st.reload;
+  // 有同事的活动推送进来时刷新看板
+  useEffect(() => { if (feed.length) reload(); }, [feed.length, reload]);
 
   const doneCount = tasks.filter((t) => t.status === 'done').length;
   const done = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0;
@@ -66,6 +71,11 @@ export default function TeamView() {
         </Space.Compact>
       </Card>
 
+      {/* 取任务列表失败时明说 —— 否则三列全空，看起来像"团队还没建任务" */}
+      {st.error && !st.loaded && (
+        <ErrorPanel error={st.error} onRetry={reload} what="团队任务" />
+      )}
+
       {/* 看板三列：列内卡片自适应，标题长了在卡内换行而不撑破布局 */}
       <div className="kanban">
         {(['todo', 'doing', 'done'] as const).map((s) => {
@@ -96,7 +106,9 @@ export default function TeamView() {
                   </>}
                 />
               ))}
-              {!list.length && <div className="kanban-empty">暂无</div>}
+              {!list.length && (
+                <div className="kanban-empty">{st.loading && !st.loaded ? "加载中…" : "暂无"}</div>
+              )}
             </div>
           );
         })}

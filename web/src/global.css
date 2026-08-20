@@ -679,6 +679,53 @@ html.light body .ent-card:hover , body.light .ent-card:hover { box-shadow: 0 6px
 }
 .pv-tag { flex: 0 0 auto; font-size: .7em; margin: 0; }
 
+/* ── 加载 / 失败 / 崩溃 三种非正常态 ─────────────────── */
+.load-skeleton { padding: 10px 4px; }
+.load-error {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 6px; padding: 34px 20px; text-align: center;
+  background: var(--red-bg); border: 1px solid rgba(255, 107, 107, .28);
+  border-radius: var(--radius);
+}
+.load-error .le-icon { font-size: 1.7em; line-height: 1; }
+.load-error .le-title { font-size: .95em; font-weight: 650; color: var(--text); }
+.load-error .le-msg {
+  font-size: .82em; color: var(--text2); max-width: 520px; line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+.load-error .le-meta { font-size: .74em; color: var(--text3); margin-top: 2px; }
+.load-error .le-meta code {
+  background: var(--bg2); border-radius: 4px; padding: 1px 5px; font-family: var(--mono);
+}
+/* 刷新失败但仍有旧数据时的顶部提示条 */
+.load-stale {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+  margin-bottom: 10px; padding: 7px 12px; font-size: .78em;
+  color: var(--yellow); background: var(--yellow-bg);
+  border: 1px solid rgba(245, 197, 66, .3); border-radius: var(--radius-sm);
+}
+
+/* ── 渲染异常兜底 ── */
+.err-boundary {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; padding: 40px 24px; text-align: center;
+  border: 1px dashed var(--border); border-radius: var(--radius); background: var(--bg1);
+}
+.err-boundary.page { height: 100vh; border: none; border-radius: 0; }
+.err-boundary .eb-icon { font-size: 2.1em; line-height: 1; }
+.err-boundary .eb-title { font-size: 1.02em; font-weight: 700; }
+.err-boundary .eb-msg {
+  font-size: .84em; color: var(--text2); max-width: 560px; line-height: 1.75;
+}
+.err-boundary .eb-detail {
+  display: block; max-width: 90%; margin-top: 4px; padding: 6px 10px;
+  font-family: var(--mono); font-size: .76em; color: var(--red);
+  background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+.err-boundary .eb-acts { display: flex; gap: 8px; margin-top: 8px; }
+.err-boundary .eb-hint { font-size: .74em; color: var(--text3); margin-top: 2px; }
+
 /* ── 看板（团队协作）── */
 .kanban {
   display: grid; gap: 12px; margin-bottom: 18px;

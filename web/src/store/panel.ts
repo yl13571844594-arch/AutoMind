@@ -28,6 +28,8 @@ interface PanelState {
   approval: null | {
     approval_id: string; tool: string; tier: string; reason: string;
     editable?: Record<string, any>;
+    timeoutS?: number;
+    askedAt?: number;
     params: Record<string, string>;
   };
   teamFeed: any[];

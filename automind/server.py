@@ -178,6 +178,9 @@ _task_history: list[dict] = []
 _token_totals = {"prompt": 0, "completion": 0, "total": 0, "tasks": 0}
 _running_tasks = {"count": 0}  # 并发任务计数（资源保护）
 _MAX_CONCURRENT = int(os.environ.get("AUTOMIND_MAX_CONCURRENT", "8"))
+#: 「询问」模式下等待人工审批的上限（秒）。超时按拒绝处理，并**明确告知前端**。
+#: 前端拿它做倒计时，用户能看见还剩多久，而不是对着一个看似能永远等的弹窗。
+_APPROVAL_TIMEOUT_S = int(os.environ.get("AUTOMIND_APPROVAL_TIMEOUT", "300"))
 _START_TIME = time.time()
 
 
@@ -3080,9 +3083,27 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                 # 不能截断 —— 否则用户"没改的那些参数"会被截断值悄悄覆盖
                 "params": {k: str(v)[:200] for k, v in (args or {}).items()},
                 "editable": _jsonable(args or {}),
+                # 前端据此显示倒计时：不给期限的话，弹窗看起来可以一直等，
+                # 而实际上后端 300 秒就按拒绝处理了
+                "timeout_s": _APPROVAL_TIMEOUT_S,
             })
-            return await asyncio.wait_for(fut, timeout=300)
+            return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT_S)
         except TimeoutError:
+            # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
+            # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
+            logger.warning("approval_timeout", tool=tool_name,
+                           timeout_s=_APPROVAL_TIMEOUT_S, session=session_id)
+            try:
+                await ws.send_json({
+                    "type": "approval_timeout", "approval_id": approval_id,
+                    "session_id": session_id, "tool": tool_name,
+                    "timeout_s": _APPROVAL_TIMEOUT_S,
+                    "message": (f"审批等待超过 {_APPROVAL_TIMEOUT_S // 60} 分钟未响应，"
+                                f"已按「拒绝」处理工具 {tool_name}。"
+                                "如需无人值守运行，请把审批模式改为「自动」或「全批准」。"),
+                })
+            except Exception:
+                pass          # 连接已断时发不出去很正常，日志已经记下了
             return False
         finally:
             _ws_approvals.pop(approval_id, None)

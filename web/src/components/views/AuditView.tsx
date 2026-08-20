@@ -1,19 +1,28 @@
 // 🛡️ 安全审计：工具调用风险评估与授权决策记录；专业版可导出 PDF。
 import { App, Button, Card, Space, Tag, Typography } from 'antd';
-import { useEffect, useState } from 'react';
 import { apiDelete, apiGet } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
 import { useApp } from '../../store/app';
+import { AsyncBoundary } from '../ui/AsyncBoundary';
 
 const { Text } = Typography;
 
 export default function AuditView() {
+  // 三态取数：此前失败时 data 恒为 null，`if (!data) return <Card loading />`
+  // 会让界面**永远转圈**——服务挂了和加载慢在界面上完全无法区分。
+  const st = useAsync<any>(() => apiGet('/audit'), []);
+  const reload = st.reload;
+
+  return (
+    <AsyncBoundary state={st} what="审计日志">
+      {(data) => <AuditBody data={data} reload={reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function AuditBody({ data, reload }: { data: any; reload: () => void }) {
   const { message, modal } = App.useApp();
   const featureOn = useApp((s) => s.featureOn);
-  const [data, setData] = useState<any>(null);
-
-  const reload = () => apiGet('/audit').then(setData).catch(() => {});
-  useEffect(() => { reload(); }, []);
-  if (!data) return <Card loading />;
   const s = data.summary || {};
 
   return (

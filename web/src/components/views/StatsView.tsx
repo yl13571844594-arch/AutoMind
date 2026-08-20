@@ -2,6 +2,8 @@
 import { App, Button, Card, Space, Tag } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
+import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { MODE_LABELS } from '../../store/app';
 import { Badge, EmptyState, EntityCard, SectionTitle, Tile, ViewHead } from '../ui/Panel';
 
@@ -70,22 +72,32 @@ function Metric({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export default function StatsView() {
+  // `/stats` 是必需的；detail / history 是专业版接口，失败或被门控都不影响主体，
+  // 因此单独兜住。此前三个一起 try/catch，任一失败就整页卡在 loading。
+  const st = useAsync(async () => {
+    const base = await apiGet('/stats');
+    const [d, h] = await Promise.all([
+      apiGet('/stats/detail').catch(() => null),
+      apiGet('/stats/history').catch(() => null),
+    ]);
+    return {
+      base,
+      detail: d && (d as any).feature === 'advanced_stats' ? null : d,
+      hist: h && (h as any).feature ? null : h,
+    };
+  }, []);
+
+  return (
+    <AsyncBoundary state={st} what="统计数据">
+      {(d) => <StatsBody base={d.base} detail={d.detail} hist={d.hist} reload={st.reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function StatsBody({ base, detail, hist, reload }: {
+  base: any; detail: any; hist: any; reload: () => void;
+}) {
   const { message } = App.useApp();
-  const [base, setBase] = useState<any>(null);
-  const [detail, setDetail] = useState<any>(null);
-  const [hist, setHist] = useState<any>(null);
-
-  const reload = async () => {
-    try {
-      const [b, d, h] = await Promise.all([apiGet('/stats'), apiGet('/stats/detail'), apiGet('/stats/history')]);
-      setBase(b);
-      setDetail(d && d.feature === 'advanced_stats' ? null : d);
-      setHist(h && h.feature ? null : h);
-    } catch { /* ignore */ }
-  };
-  useEffect(() => { reload(); }, []);
-
-  if (!base) return <Card loading />;
 
   const tk = base.tokens || {};
   const toolTags = Object.entries(base.tool_usage || {}).slice(0, 8).map(([t, n]: any) => (

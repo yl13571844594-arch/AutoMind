@@ -327,7 +327,20 @@ function handle(data: any) {
         reason: data.reason || '', params: data.params || {},
         // editable 是未截断的原始参数，供「修改参数」表单回填
         editable: data.editable || {},
+        // 后端等待上限：弹窗据此倒计时。不给期限的话，用户会以为可以一直等，
+        // 而实际上超时后这一步已按拒绝处理、任务也失败了
+        timeoutS: data.timeout_s || 0,
+        askedAt: Date.now(),
       });
+      break;
+
+    case 'approval_timeout':
+      // 超时此前是静默的：弹窗还挂着，用户以为系统仍在等他点
+      panel().setApproval(null);
+      // duration 0 = 不自动消失：这一步已按拒绝处理、任务多半也失败了，
+      // 一闪而过的提示等于没提示
+      message.warning(
+        data.message || `工具 ${data.tool} 的审批等待超时，已按「拒绝」处理。`, 0);
       break;
 
     case 'team_activity': {

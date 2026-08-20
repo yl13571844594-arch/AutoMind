@@ -7,6 +7,8 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
+import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { EmptyState, Tile, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
@@ -14,8 +16,18 @@ const { Text, Paragraph } = Typography;
 const fmtSize = (n: number) => n > 1024 * 1024 ? (n / 1024 / 1024).toFixed(1) + ' MB' : (n / 1024).toFixed(1) + ' KB';
 
 export default function KbView() {
+  // 加载失败时此前 data 恒为 null → `<Card loading />` 永远转圈
+  const st = useAsync<any>(() => apiGet('/kb'), []);
+  return (
+    <AsyncBoundary state={st} what="知识库">
+      {(d) => <KbBody data={d} reloadOuter={st.reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function KbBody({ data: initial, reloadOuter }: { data: any; reloadOuter: () => void }) {
   const { message, modal } = App.useApp();
-  const [data, setData] = useState<any>(null);
+  const [data, setData] = useState<any>(initial);
   const [kbSel, setKbSel] = useState('default');
   const [query, setQuery] = useState('');
   const [results, setResults] = useState<any>(null);
@@ -31,11 +43,19 @@ export default function KbView() {
         apiGet('/kb/stats').then(setStats).catch(() => {});
         apiGet('/kb/search-log?limit=50').then((r) => setLog(r.log || [])).catch(() => {});
       }
-    }).catch(() => {});
+    }).catch((e) => {
+      // 刷新失败要说出来 —— 静默吞掉会让用户以为刚上传的文档没生效
+      message.error(`知识库刷新失败：${e?.friendly || e?.message || e}`);
+      reloadOuter();
+    });
   };
-  useEffect(() => { reload(); }, []);
-
-  if (!data) return <Card loading />;
+  useEffect(() => {
+    if (data?.enterprise) {
+      apiGet('/kb/stats').then(setStats).catch(() => {});
+      apiGet('/kb/search-log?limit=50').then((r) => setLog(r.log || [])).catch(() => {});
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const { limits, pro, enterprise } = data;
   const docs = data.docs || [];

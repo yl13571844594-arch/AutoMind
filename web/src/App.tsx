@@ -25,6 +25,7 @@ import StatsView from './components/views/StatsView';
 import TeamView from './components/views/TeamView';
 import ToolsView from './components/views/ToolsView';
 import ShortcutsModal from './components/modals/ShortcutsModal';
+import { ErrorBoundary } from './components/ui/ErrorBoundary';
 import { installHotkeys } from './lib/hotkeys';
 import { useApp } from './store/app';
 import { ANTD_BASE_FONT, initPrefs, usePrefs } from './store/prefs';
@@ -35,6 +36,13 @@ const VIEWS: Record<string, React.ComponentType> = {
   plan: PlanView, tools: ToolsView, experts: ExpertsView, team: TeamView,
   kb: KbView, stats: StatsView, schedule: ScheduleView, history: HistoryView,
   audit: AuditView, router: RouterView, observe: ObserveView,
+};
+
+//: 视图中文名 —— 渲染异常时用它告诉用户"是哪个面板出了问题"
+const VIEW_NAMES: Record<string, string> = {
+  plan: '计划视图', tools: '工具面板', experts: '专家市场', team: '团队协作',
+  kb: '知识库', stats: '统计分析', schedule: '定时任务', history: '任务历史',
+  audit: '安全审计', router: '路由与成本', observe: '观测中心',
 };
 
 // 启动后静默检查更新（每会话一次，走服务端 6h 缓存）；有新版给出可点通知
@@ -165,10 +173,17 @@ export default function App() {
                   --bg0 底色 —— 用户看到的就是"黑屏闪几下"。
                   改为**始终挂载**、只切显示：DOM 不重建，滚动位置也不再丢。 */}
               <div className="view-slot" style={{ display: ViewComp ? 'none' : 'flex' }}>
-                <ChatPanel />
+                <ErrorBoundary name="对话工作台"><ChatPanel /></ErrorBoundary>
               </div>
               {ViewComp && (
-                <div className="messages view-fade" style={{ flex: 1 }}><ViewComp /></div>
+                <div className="messages view-fade" style={{ flex: 1 }}>
+                  {/* 单个面板的渲染异常只毁掉这一块：侧边栏、顶栏、正在跑的任务
+                      都还在，用户可以直接切到别的页面继续用。
+                      resetKey=view：切走再切回来时错误自动复位。 */}
+                  <ErrorBoundary name={VIEW_NAMES[view] || view} resetKey={view}>
+                    <ViewComp />
+                  </ErrorBoundary>
+                </div>
               )}
               <RightPanel />
             </div>

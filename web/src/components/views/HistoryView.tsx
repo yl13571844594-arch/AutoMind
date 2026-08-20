@@ -6,9 +6,11 @@
 //   2) 没有搜索，且把取到的记录一次性全渲染成 antd Card。
 // 现在：一次取满 200 条（这个量在内存里做检索毫无压力），关键词 + 模式 + 状态
 // 三重筛选，**只渲染当前页**，翻页步进 20。
-import { App, Button, Card, Empty, Input, Modal, Pagination, Segmented, Space, Typography } from 'antd';
+import { App, Button, Card, Empty, Input, Modal, Pagination, Segmented, Skeleton, Space, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { apiDelete, apiGet } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
+import { ErrorPanel } from '../ui/AsyncBoundary';
 import { copyText } from '../../lib/clipboard';
 import { renderMarkdown } from '../../lib/markdown';
 import { MODE_LABELS, useApp, type Mode } from '../../store/app';
@@ -23,17 +25,17 @@ const FETCH_LIMIT = 200;
 
 export default function HistoryView() {
   const { message, modal } = App.useApp();
-  const [history, setHistory] = useState<any[]>([]);
+  // 三态：加载中 ≠ 没有历史 ≠ 加载失败。此前三者都渲染成"暂无历史"。
+  const st = useAsync<any[]>(
+    () => apiGet(`/history?limit=${FETCH_LIMIT}`).then((r) => (Array.isArray(r) ? r : [])), []);
+  const history = st.data || [];
   const [detail, setDetail] = useState<any>(null);
   const [q, setQ] = useState('');
   const [modeFilter, setModeFilter] = useState<string>('all');
   const [okFilter, setOkFilter] = useState<string>('all');
   const [page, setPage] = useState(1);
 
-  const reload = () => apiGet(`/history?limit=${FETCH_LIMIT}`)
-    .then((r) => setHistory(Array.isArray(r) ? r : []))
-    .catch(() => {});
-  useEffect(() => { reload(); }, []);
+  const reload = st.reload;
 
   // 最新的排前面；筛选与搜索都在这一份上做
   const filtered = useMemo(() => {
@@ -141,7 +143,13 @@ export default function HistoryView() {
         />
       </Space>
 
-      {filtered.length === 0 && (
+      {/* 加载中 / 加载失败 / 真的没有 —— 三者必须分开说。
+          此前它们都渲染成"还没有任务记录"，服务挂了也长这样。 */}
+      {st.loading && !st.loaded && <Skeleton active paragraph={{ rows: 5 }} />}
+      {!st.loading && st.error && !st.loaded && (
+        <ErrorPanel error={st.error} onRetry={reload} what="任务历史" />
+      )}
+      {st.loaded && filtered.length === 0 && (
         history.length
           ? <EmptyState icon="🔍" title="没有匹配的记录"
                         hint="换个关键词，或把模式/状态筛选放宽到「全部」。" />
