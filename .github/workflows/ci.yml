@@ -1,17 +1,44 @@
 name: CI
 
+# 此前 CI 只有 `ruff check` + `pytest`（且只在 ubuntu 上），有三处盲区，
+# 每一处都真实地漏过缺陷：
+#
+#   1) **前端从不构建**：web/ 的 TypeScript 类型错误与构建失败只有本地或用户
+#      才会撞上。而 dist/ 产物是随包分发的 —— 构建挂了等于界面挂了。
+#   2) **只在 Linux 跑**：本项目主力形态是 Windows 桌面版，历史上已经栽过两次
+#      （updater 的 creationflags、断言里裸引用 DETACHED_PROCESS），
+#      都是本地全绿、Linux CI 才炸；反过来 Windows 专有路径同样无人守。
+#   3) **打包产物从不验证**：wheel 里到底有没有静态资源、内置插件、手册，
+#      装完能不能 import、`automind` 命令在不在 —— 只有发版当天才知道。
+#      v1.6.0 就漏过"插件清单在、代码不在"（collect_data_files 不带 .py）。
+
 on:
   push:
     branches: [main, master]
   pull_request:
 
+concurrency:
+  # 同一分支的新推送取消上一次未跑完的 run，省额度也更快拿到结果
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  # ── 1. Python 测试：跨平台矩阵 ──────────────────────────
   test:
-    runs-on: ubuntu-latest
+    name: 测试 (${{ matrix.os }} · py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os: [ubuntu-latest]
         python-version: ["3.11", "3.12"]
+        include:
+          # Windows 是桌面版主力平台，必须有一档真实跑过
+          - os: windows-latest
+            python-version: "3.12"
+          # macOS 只跑一档兜住 POSIX 差异（路径/信号/subprocess）
+          - os: macos-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -31,4 +58,125 @@ jobs:
         run: ruff check .
 
       - name: Run tests
-        run: pytest tests/
+        # 中文输出在 Windows 控制台默认 GBK 下会崩，CI 里显式锁 UTF-8
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: pytest tests/ -q
+
+  # ── 2. 前端：类型检查 + 真实构建 ────────────────────────
+  web:
+    name: 前端构建
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 与 desktop-build.yml 保持一致：本项目用 pnpm，且 pnpm-workspace.yaml
+      # 用了 10+ 语法；pnpm 11 需要 Node ≥ 22.13
+      - uses: pnpm/action-setup@v4
+        with: { version: 11 }
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+
+      - name: Install
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        working-directory: web
+        run: pnpm exec tsc --noEmit
+
+      - name: Build
+        working-directory: web
+        run: pnpm build
+
+      - name: 构建产物完整性
+        # index.html 引用的资源必须真实存在 —— 两者来自不同次构建时，
+        # 用户会看到"界面未能加载"（线上真实发生过）
+        run: |
+          python - <<'EOF'
+          import re, sys, pathlib
+          idx = pathlib.Path("automind/static/dist/index.html")
+          assert idx.exists(), "构建没有产出 dist/index.html"
+          html = idx.read_text(encoding="utf-8")
+          refs = re.findall(r'/static/(dist/assets/[\w.-]+)', html)
+          assert refs, "index.html 未引用任何构建产物"
+          missing = [r for r in refs
+                     if not (pathlib.Path("automind/static") / r).exists()]
+          if missing:
+              sys.exit(f"index.html 引用了不存在的产物: {missing}")
+          print(f"产物完整：{len(refs)} 个引用全部命中")
+          EOF
+
+  # ── 3. 打包产物：装完真的能用吗 ─────────────────────────
+  package:
+    name: 打包与安装验证
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build sdist + wheel
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: 审计：社区包里不能混入商业代码
+        run: |
+          python - <<'EOF'
+          import sys, zipfile, tarfile, pathlib
+          markers = ("automind_pro", ".automind_config.json",
+                     ".automind_license", "LICENSE-COMMERCIAL")
+          bad = []
+          for art in pathlib.Path("dist").iterdir():
+              names = (zipfile.ZipFile(art).namelist() if art.suffix == ".whl"
+                       else tarfile.open(art).getnames())
+              bad += [f"{art.name}: {n}" for n in names
+                      if any(m in n for m in markers)]
+          if bad:
+              sys.exit("包内含商业代码:\n" + "\n".join(bad))
+          print("审计通过")
+          EOF
+
+      - name: 装到干净环境并冒烟
+        # 只验证"装完能不能用"，不重复跑单测（那是 test 作业的事）。
+        # 重点盯随包数据：静态资源、内置插件的 plugin.json **与 hooks.py**、
+        # 手册 —— v1.6.0 就漏过 hooks.py 没进包，界面上插件全在、一个也加载不了。
+        run: |
+          python -m venv /tmp/venv
+          /tmp/venv/bin/pip install -q --upgrade pip
+          /tmp/venv/bin/pip install -q "$(ls dist/*.whl)[web]"
+          /tmp/venv/bin/python - <<'EOF'
+          import json, pathlib, sys
+          import automind
+          print("版本:", automind.__version__)
+
+          from automind.core.plugin import PluginManager, builtin_plugin_dir
+          pm = PluginManager()
+          want = {"cost_tracker", "pii_guard", "task_notify", "hello_hooks"}
+          found = {m.name for m in pm.discover()}
+          missing = want - found
+          assert not missing, f"内置插件未随包分发: {sorted(missing)}"
+          for name in sorted(want):
+              assert pm.load(name) is not None, f"内置插件装上了却加载失败: {name}"
+
+          from automind.tools.mcp_presets import MCP_PRESETS
+          assert len(MCP_PRESETS) >= 5, "MCP 官方适配缺失"
+
+          from automind.skills.skill_registry import SkillRegistry
+          r = SkillRegistry(); r.register_builtin_skills()
+          assert len(r.list_all()) >= 12, "内置技能缺失"
+
+          root = pathlib.Path(automind.__file__).parent
+          for rel in ("static/dist/index.html", "static/manual.html"):
+              assert (root / rel).is_file(), f"随包资源缺失: {rel}"
+          print("随包资源与内置能力齐备")
+          EOF
+          # README 里承诺的命令必须真的存在
+          /tmp/venv/bin/automind --version

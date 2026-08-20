@@ -147,6 +147,12 @@ class RetryHandler:
     # ── 内部方法 ──────────────────────────────────────────
 
     def _compute_delay(self, attempt: int) -> float:
+        """指数退避 + 抖动，且**保证不超过 max_delay**。
+
+        原实现先 min(max_delay) 再乘 (0.5 + random())，抖动因子最大 1.5 ——
+        于是实际等待可以超出上限 50%（配 60s 上限实际能等到 90s）。
+        max_delay 是"最长等这么久"的承诺，抖动必须在封顶之内取值。
+        """
         delay = self.retry_config.base_delay * (
             self.retry_config.exponential_base ** attempt
         )
@@ -154,7 +160,9 @@ class RetryHandler:
         if self.retry_config.jitter:
             import random
             delay = delay * (0.5 + random.random())
-        return delay
+            # 抖动之后再夹一次，确保不越过上限
+            delay = min(delay, self.retry_config.max_delay)
+        return max(0.0, delay)
 
     def _on_failure(self) -> None:
         self._failure_count += 1

@@ -22,11 +22,18 @@ class CorrectionRecord:
 
 @dataclass
 class CorrectionResult:
-    """完整纠错结果。"""
+    """完整纠错结果。
+
+    `fixed` / `iterations` 必须有默认值：`correct()` 一上来就是
+    `CorrectionResult(original_error=...)`，两者没默认值时**每次调用都
+    直接 TypeError** —— 自我纠错这条路径等于从来没能跑通过。
+    （该模块目前未被 Agent 装配，实际生效的纠错在
+    `planning/plan_executor.py::_handle_failure`；此处修好以免后续接线时踩坑。）
+    """
 
     original_error: str
-    fixed: bool
-    iterations: int
+    fixed: bool = False
+    iterations: int = 0
     records: list[CorrectionRecord] = field(default_factory=list)
     final_result: ToolResult | None = None
     final_analysis: str = ""
