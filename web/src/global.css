@@ -94,6 +94,27 @@ html.light body .msg.user .bubble , body.light .msg.user .bubble {
 }
 .msg .time { font-size: .7em; color: var(--text3); margin-top: 5px; padding: 0 4px; }
 .msg .bubble .cursor { animation: blink 1s steps(1) infinite; color: var(--accent); }
+/* 流式尾巴：还没定稿的那一小段按纯文本直出（不走 Markdown 解析），
+   所以换行要靠 CSS 保住，否则打字过程中段落会挤成一行、定稿瞬间又跳开。 */
+.msg .bubble .stream-tail { white-space: pre-wrap; word-break: break-word; }
+/* 长会话的"载入更早"分隔条 */
+.msg-older {
+  display: flex; align-items: center; gap: 10px; margin: 4px 0 12px;
+  font-size: .78em; color: var(--text3);
+}
+.msg-older::before, .msg-older::after {
+  content: ''; flex: 1; height: 1px; background: var(--border);
+}
+.msg-older button {
+  border: 1px solid var(--border); background: var(--bg2); color: var(--text2);
+  border-radius: 999px; padding: 3px 12px; cursor: pointer; font-size: 1em;
+}
+.msg-older button:hover { color: var(--text); border-color: var(--accent); }
+/* 执行轨迹被截断时的提示 */
+.trace-clipped {
+  font-size: .76em; color: var(--text3); padding: 4px 0 2px;
+  border-bottom: 1px dashed var(--border); margin-bottom: 6px;
+}
 @keyframes blink { 50% { opacity: 0; } }
 /* ── 气泡悬停操作条（复制 / 编辑 / 删除） ──
    浮在气泡右上角外沿的胶囊；不占文档流，不会把气泡内容顶开。 */

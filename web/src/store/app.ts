@@ -1,6 +1,7 @@
 // 全局应用状态（Zustand）：版本/特性、模式、连接、状态徽标、主题、工作区、限额。
+import { message } from 'antd';
 import { create } from 'zustand';
-import { apiGet, apiPost } from '../api/client';
+import { apiGet, apiPost, errText } from '../api/client';
 
 export type Mode = 'chat' | 'work' | 'coding' | 'multi' | 'loop';
 export type View = 'chat' | 'plan' | 'tools' | 'experts' | 'team' | 'kb'
@@ -85,7 +86,10 @@ export const useApp = create<AppState>((set, get) => ({
     if (!featureOn(MODE_FEATURE[m])) return;   // 调用侧提示升级
     set({ mode: m, view: 'chat' });
     get().loadStatus(m);
-    apiPost('/config', { interaction: m }).catch(() => {});
+    // 模式没存到服务端就静默过去，下次开界面又跳回旧模式 —— 说清楚。
+    apiPost('/config', { interaction: m }).catch((e) => {
+      message.warning(`模式已在本地切换，但未能保存到服务端：${errText(e)}`);
+    });
   },
 
   // 任务跑完回到 connected 时，不能把"已断开/重连中"覆盖成"已连接"——
@@ -122,7 +126,10 @@ export const useApp = create<AppState>((set, get) => ({
     set({ theme: next });
     // 同步给服务端：桌面版启动画面在浏览器起来之前就要知道该用深色还是浅色，
     // 它读不到 localStorage，只能读配置文件。失败无所谓（纯外观降级）。
-    apiPost('/config/ui', { theme: next }).catch(() => {});
+    apiPost('/config/ui', { theme: next }).catch((e) => {
+      // 纯外观降级（只影响桌面版启动画面的配色），不打断用户，记一条即可
+      console.warn('[automind] 主题未能同步到服务端:', errText(e));
+    });
   },
 
   setWorkspace: (name, suffix) => {

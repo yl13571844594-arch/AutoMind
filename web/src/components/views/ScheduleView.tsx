@@ -1,7 +1,9 @@
 // ⏰ 定时任务（专业版 scheduler；社区版显示升级卡片）。
 import { App, Button, Card, Input, Select, Space, Tag, Typography } from 'antd';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
+import { ErrorPanel } from '../ui/AsyncBoundary';
 import { MODE_LABELS, useApp } from '../../store/app';
 
 const { Text } = Typography;
@@ -12,15 +14,17 @@ const fmtInterval = (s: number) => s >= 86400 ? Math.round(s / 86400) + '天'
 export default function ScheduleView() {
   const { message } = App.useApp();
   const featureOn = useApp((s) => s.featureOn);
-  const [list, setList] = useState<any[]>([]);
   const [form, setForm] = useState({ name: '', task: '', interaction: 'chat', interval: 3600 });
 
   const locked = !featureOn('scheduler');
-  const reload = () => {
-    if (locked) return;
-    apiGet('/schedule').then((r) => setList(Array.isArray(r) ? r : [])).catch(() => {});
-  };
-  useEffect(() => { reload(); }, [locked]);
+  // 加载失败不能再画成"还没有定时任务"——那会让人以为任务被删了，
+  // 于是重复创建一遍。
+  const st = useAsync<any[]>(
+    () => (locked ? Promise.resolve([])
+                  : apiGet('/schedule').then((r) => (Array.isArray(r) ? r : []))),
+    [locked]);
+  const list = st.data || [];
+  const reload = st.reload;
 
   if (locked) {
     return (
@@ -78,7 +82,11 @@ export default function ScheduleView() {
             </Space>
           </Card>
         ))}
-        {!list.length && <em className="hint-text">暂无定时任务</em>}
+        {st.loading && !st.loaded && <em className="hint-text">正在读取定时任务…</em>}
+        {st.error && !st.loaded && (
+          <ErrorPanel error={st.error} onRetry={reload} what="定时任务" />
+        )}
+        {st.loaded && !list.length && <em className="hint-text">暂无定时任务</em>}
       </div>
     </div>
   );

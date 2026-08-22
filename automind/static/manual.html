@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.6.2</title>
+<title>AutoMind 使用手册 — v1.6.3</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.6.2</div>
+  <div class="ver">使用手册 · v1.6.3</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.6.2</b></span>
+    <span class="chip">版本 <b>v1.6.3</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -942,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.3</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1062,8 +1062,42 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.6.2</span><span class="cl-date">2026-08-19</span>
+      <span class="cl-ver">v1.6.3</span><span class="cl-date">2026-08-22</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">别再为看不见的东西付钱；长会话与长任务不再卡</div>
+    <ul>
+      <li><b>🧰 每一步不再重发整本工具说明书</b>：以前 Agent 每走一步，都要把全部 31 个
+        工具的说明重新发给模型一遍（约 6000~8000 token/步）—— 跑二十步，光"介绍自己有
+        哪些工具"就烧掉十几万 token，而其中绝大多数跟你的任务毫无关系。现在只发跟当前
+        任务相关的那批，其余留一份"名字 + 一句话"的目录；模型需要哪个，说一声下一步就
+        补上。<b>能做的事一件没少，账单直接对半砍。</b></li>
+      <li><b>🗜「省钱功能」以前在花冤枉钱</b>：用量到 80% 时系统会调用一次 AI 生成摘要来
+        "压缩上下文"，但压的根本不是真正每轮重发的那份内容 —— 摘要的钱花了，请求一点
+        没变小。现在改为直接折叠早前的工具执行结果，<b>不额外花一分钱</b>，而且随用量
+        上涨可以反复压。</li>
+      <li><b>📚 知识库不再每轮重复注入</b>：围绕同一份文档连问五个问题，以前那几段参考
+        资料就要重复发送五遍（每轮约 500~900 token）。现在同一段只发一次；换了话题检索
+        到新内容才会补充，被挤出上下文后会自动补发。你的原话也不会再被改写。</li>
+      <li><b>📡 又一批「加载失败」不再伪装成「没有数据」</b>：工具面板、专家市场、定时
+        任务、工作区、右侧观测栏、路由与成本、知识库统计，现在都会分别告诉你
+        <i>正在加载</i> / <i>加载失败（可重试，带原因）</i> / <i>确实一条都没有</i>。
+        <b>工具面板加载中不再显示「没有匹配的工具」</b> —— 上一版最误导的一处。</li>
+      <li><b>✍️ 保存失败不再一声不吭</b>：以前保存设置、启用插件、添加 MCP、删除文档失败
+        时，界面什么都不说，你以为改好了其实没有。现在会明确弹出失败原因。清空会话时若
+        服务端没清掉，也会直说而不是谎报「已清空」。</li>
+      <li><b>💬 聊到 100 多条不再卡</b>：消息列表默认只渲染最近 40 条（可点「载入更早」
+        逐批展开，展开时你正看的那条不会跑掉），新消息进来不再牵动整个页面重排。</li>
+      <li><b>⌨️ 长回答尾部不再一个字一个字往外蹦</b>：流式输出改为只处理新长出来的部分，
+        不再每 50 毫秒把整篇回答重新排版一遍。</li>
+      <li><b>📈 长任务的执行过程面板不再卡死</b>：单个面板保留最近 300 条执行轨迹并标明
+        折叠了多少条；完整过程在「任务历史」与「观测中心」里照常可查。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.6.2</span><span class="cl-date">2026-08-19</span>
     </div>
     <div class="cl-sum">把"看起来没事"的失败都变成看得见的</div>
     <ul>
@@ -1421,7 +1455,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.6.2 同步 ·
+  AutoMind 使用手册 · 与软件 v1.6.3 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

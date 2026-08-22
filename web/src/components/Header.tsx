@@ -3,6 +3,7 @@
 import { App, Select, Tooltip } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiPost } from '../api/client';
+import { writeAction } from '../lib/writeAction';
 import { chatSid, EDITION_LABELS, MODE_FEATURE, MODE_LABELS, useApp, type Mode } from '../store/app';
 import { useChat } from '../store/chat';
 import { usePanel } from '../store/panel';
@@ -102,15 +103,22 @@ export default function Header() {
     modal.confirm({
       title: `清空${MODE_LABELS[mode]}模式会话？`,
       content: '仅清空当前模式的会话内容，不影响其它模式。',
-      onOk: async () => {
+      onOk: writeAction('清空会话', async () => {
         if (mode === 'chat') {
-          await apiDelete(`/chat/history?session_id=${encodeURIComponent(chatSid())}`).catch(() => {});
+          // 服务端没清掉却报"已清空"是最坏的结果：本地空了，下次进来
+          // 历史又从服务端回来了。清不掉就直说。
+          try {
+            await apiDelete(`/chat/history?session_id=${encodeURIComponent(chatSid())}`);
+          } catch (e: any) {
+            message.error(`服务端会话未能清空：${e?.friendly || e?.message || e}`);
+            return;
+          }
         }
         useChat.getState().clearMode(mode);
         usePanel.getState().setPlan(null);
         usePanel.getState().setStats({ steps: 0, backtracks: 0, tokens: 0, duration_ms: 0 });
         message.info(`已清空${MODE_LABELS[mode]}模式会话`);
-      },
+      }),
     });
   };
 

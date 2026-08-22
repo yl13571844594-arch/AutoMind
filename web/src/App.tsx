@@ -1,6 +1,7 @@
 import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
 import { useEffect } from 'react';
+import { installGlobalApiErrorToast } from './api/client';
 import ConnectionBanner from './components/ConnectionBanner';
 import Header from './components/Header';
 import ChatPanel from './components/chat/ChatPanel';
@@ -69,6 +70,20 @@ function useUpdateNotify() {
 }
 
 function UpdateNotifier() { useUpdateNotify(); return null; }
+
+/**
+ * 写操作失败的兜底提示。
+ *
+ * `apiPost` / `apiDelete` 此前拿到 500/403 也照样 `return r.json()`，
+ * 于是"保存设置""启用插件""删除文档"失败时界面**一声不吭** ——
+ * 用户以为改好了。现在它们会抛 ApiError；就地没接住的，在这里统一 toast。
+ */
+function ApiErrorToaster() {
+  const { message } = AntApp.useApp();
+  useEffect(() => installGlobalApiErrorToast(
+    (text) => message.error({ content: text, duration: 5 })), [message]);
+  return null;
+}
 
 export default function App() {
   const theme = useApp((s) => s.theme);
@@ -161,6 +176,7 @@ export default function App() {
     >
       <AntApp>
         <UpdateNotifier />
+        <ApiErrorToaster />
         <div className="app-shell">
           <Sidebar />
           <div className="app-main">

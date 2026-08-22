@@ -248,10 +248,16 @@ export default function ObserveView() {
       .catch(() => { /* 社区版首次无数据属正常 */ });
   }, []);
 
+  const [proErr, setProErr] = useState<string>('');
   const loadPro = () => {
     if (!hasPro) return;
-    apiGet(`/observe/dashboard?window_h=${windowH}`).then(setDash).catch(() => {});
-    apiGet('/observe/runs?limit=50').then((r) => setRuns(r?.runs || [])).catch(() => {});
+    setProErr('');
+    // 失败必须说出来：此前吞掉异常后看板画的是"0 次任务、0 个失败"，
+    // 那是一份**看起来一切正常的假数据**，比空白更危险。
+    apiGet(`/observe/dashboard?window_h=${windowH}`).then(setDash)
+      .catch((e) => setProErr(e?.friendly || e?.message || String(e)));
+    apiGet('/observe/runs?limit=50').then((r) => setRuns(r?.runs || []))
+      .catch((e) => setProErr(e?.friendly || e?.message || String(e)));
   };
   useEffect(() => { loadPro(); }, [hasPro, windowH, st.status]);
 
@@ -338,6 +344,12 @@ export default function ObserveView() {
           导出 JSON
         </Button>
       </Space>
+      {proErr && (
+        <div className="hint-text" style={{ color: 'var(--red)' }}>
+          ⚠️ 观测数据加载失败：{proErr} —— 下方数字可能是旧的或不完整的。
+          <a style={{ marginLeft: 6, cursor: 'pointer' }} onClick={loadPro}>重试</a>
+        </div>
+      )}
       {dash && (
         <>
           <Space size="large" wrap>

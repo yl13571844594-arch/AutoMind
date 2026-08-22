@@ -198,13 +198,34 @@ function planStepInfo(goalId: any): { idx: number; text: string } {
     : { idx: at + 1, text: (rows[at].text || '').replace(/^\d+\.\s*/, '') };
 }
 
+/**
+ * 单个执行面板最多保留的轨迹条数。
+ *
+ * 此前无上限：一个跑几百步的长任务能攒出上万条轨迹，每条都带已渲染的 HTML
+ * （截图那种还是整张 base64 图）。累积到后面，**每来一条新轨迹**都要复制整个
+ * 数组并重排上万个 DOM 节点 —— 观测面板直接卡死，滚都滚不动。
+ * 保留最近 300 条足够看清"现在在干什么、刚才为什么失败"；更早的执行记录
+ * 在「任务历史」与「观测中心」里有完整留存，不靠这里兜底。
+ */
+const MAX_TRACES = 300;
+
+function pushTrace(item: any, t: TraceItem) {
+  const traces = [...item.traces, t];
+  const over = traces.length - MAX_TRACES;
+  if (over <= 0) return { ...item, traces };
+  // 一次多丢一些（丢到 90%），避免此后每条新轨迹都触发一次数组截断
+  const drop = over + Math.floor(MAX_TRACES * 0.1);
+  return {
+    ...item,
+    traces: traces.slice(drop),
+    traceDropped: (item.traceDropped || 0) + drop,
+  };
+}
+
 function execTrace(mode: Mode, label: string, body: string, kind: string) {
   const t: TraceItem = { label, body, kind };
-  if (live.loop) {
-    chat().update(mode, live.loop, (i: any) => ({ ...i, traces: [...i.traces, t] }));
-  } else if (live.exec) {
-    chat().update(mode, live.exec, (i: any) => ({ ...i, traces: [...i.traces, t] }));
-  }
+  const target = live.loop || live.exec;
+  if (target) chat().update(mode, target, (i: any) => pushTrace(i, t));
 }
 
 function finalizeAll(mode: Mode, data?: any) {

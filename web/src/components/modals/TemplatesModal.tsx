@@ -2,6 +2,7 @@
 import { App, Button, Input, Modal, Select, Space, Tag, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
 import { TEMPLATES } from '../../lib/templates';
 import { EDITION_LABELS, MODE_FEATURE, MODE_LABELS, useApp, type Mode } from '../../store/app';
 import { useChat } from '../../store/chat';
@@ -77,7 +78,10 @@ export default function TemplatesModal() {
                   e.stopPropagation();
                   modal.confirm({
                     title: '删除该自定义模板？',
-                    onOk: async () => { await apiDelete(`/templates/custom/${encodeURIComponent(t.id)}`); message.info('已删除'); reload(); },
+                    onOk: writeAction('删除模板', async () => {
+                      await apiDelete(`/templates/custom/${encodeURIComponent(t.id)}`);
+                      message.info('已删除'); reload();
+                    }),
                   });
                 }}>✕</Button>
               )))}

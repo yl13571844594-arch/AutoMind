@@ -1,8 +1,8 @@
 // 各类消息气泡：普通消息 / 流式 / 打字 / 执行过程 / 协同 / 循环 / 续跑按钮 / 欢迎页。
 import { App } from 'antd';
-import { memo, useState } from 'react';
+import { memo, useRef, useState } from 'react';
 import { copyText } from '../../lib/clipboard';
-import { isSafeUrl, renderMarkdown } from '../../lib/markdown';
+import { esc, isSafeUrl, renderMarkdown, splitStream } from '../../lib/markdown';
 import { MODE_LABELS, useApp } from '../../store/app';
 import type { ChatItem, LoopIter, MaStep, PlanRow, TraceItem } from '../../store/chat';
 import { TEMPLATES } from '../../lib/templates';
@@ -116,21 +116,52 @@ export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
   );
 });
 
-export function StreamBubble({ item }: { item: Extract<ChatItem, { kind: 'stream' }> }) {
+/**
+ * 流式正文：已定稿的部分**增量**解析并累积，尾巴按纯文本直出。
+ *
+ * 此前是 `renderMarkdown(item.buf)` —— 每 50ms 把整个回答重解析一遍。
+ * 一篇 8000 字的回答意味着几百次全量解析，总开销是 O(长度²)，
+ * 表现就是"前面很顺，越往后越卡，最后几百字一个一个往外蹦"。
+ * 改成累积后总开销回落到 O(长度)：每段只解析一次。
+ */
+function StreamBody({ buf }: { buf: string }) {
+  const acc = useRef({ at: 0, html: '' });
+  const [prefix, tail] = splitStream(buf);
+  if (prefix.length > acc.current.at) {
+    // 只解析新长出来的那一段，接到已有 HTML 后面
+    // （切点取在块边界上，所以分段解析与整体解析等价）
+    acc.current.html += renderMarkdown(prefix.slice(acc.current.at));
+    acc.current.at = prefix.length;
+  } else if (prefix.length < acc.current.at) {
+    // 缓冲区变短了（重发/回退）：整段重来。正常流式不会走到这里。
+    acc.current = { at: prefix.length, html: renderMarkdown(prefix) };
+  }
+  return (
+    <>
+      {acc.current.html && <span dangerouslySetInnerHTML={{ __html: acc.current.html }} />}
+      {/* 尾巴只做转义 —— 它每 50ms 都在变，绝不能走 Markdown 解析 */}
+      <span className="stream-tail" dangerouslySetInnerHTML={{ __html: esc(tail) }} />
+    </>
+  );
+}
+
+export const StreamBubble = memo(function StreamBubble(
+  { item }: { item: Extract<ChatItem, { kind: 'stream' }> },
+) {
   return (
     <div className="msg agent">
       <Avatar role="agent" />
       <div className="col">
         <div className="bubble">
-          <span dangerouslySetInnerHTML={{ __html: renderMarkdown(item.buf) }} />
+          <StreamBody buf={item.buf} />
           <span className="cursor">▍</span>
         </div>
       </div>
     </div>
   );
-}
+});
 
-export function TypingBubble() {
+export const TypingBubble = memo(function TypingBubble() {
   return (
     <div className="msg agent">
       <Avatar role="agent" />
@@ -139,11 +170,19 @@ export function TypingBubble() {
       </div>
     </div>
   );
-}
+});
 
-function Traces({ traces }: { traces: TraceItem[] }) {
+const Traces = memo(function Traces(
+  { traces, dropped = 0 }: { traces: TraceItem[]; dropped?: number },
+) {
   return (
     <div className="exec-trace">
+      {dropped > 0 && (
+        <div className="trace-clipped">
+          ⋯ 更早的 {dropped} 条执行轨迹已折叠（面板只保留最近 300 条以免卡顿）；
+          完整过程见「任务历史」与「观测中心」。
+        </div>
+      )}
       {traces.map((t, i) => (
         <div key={i} className={`trace-item trace-${t.kind || 'info'}`}>
           <div className="trace-label" dangerouslySetInnerHTML={{ __html: t.label }} />
@@ -152,11 +191,11 @@ function Traces({ traces }: { traces: TraceItem[] }) {
       ))}
     </div>
   );
-}
+});
 
 const PLAN_ICON: Record<PlanRow['state'], string> = { pending: '○', run: '◐', ok: '✓', fail: '✗' };
 
-export function ExecBubble({ item }: { item: Extract<ChatItem, { kind: 'exec' }> }) {
+export const ExecBubble = memo(function ExecBubble({ item }: { item: Extract<ChatItem, { kind: 'exec' }> }) {
   return (
     <div className="msg agent">
       <Avatar role="agent" />
@@ -173,19 +212,19 @@ export function ExecBubble({ item }: { item: Extract<ChatItem, { kind: 'exec' }>
               ))}
             </div>
           )}
-          <Traces traces={item.traces} />
+          <Traces traces={item.traces} dropped={item.traceDropped} />
           {!item.done && <div className="typing-dots" style={{ marginTop: 6 }}><span /><span /><span /></div>}
         </div>
       </div>
     </div>
   );
-}
+});
 
 const MA_ROLES: Record<string, string> = {
   planner: '🧭 规划', researcher: '🔎 研究', coder: '💻 编程', writer: '✍️ 写作', reviewer: '🧐 审阅',
 };
 
-export function MultiBubble({ item }: { item: Extract<ChatItem, { kind: 'multi' }> }) {
+export const MultiBubble = memo(function MultiBubble({ item }: { item: Extract<ChatItem, { kind: 'multi' }> }) {
   return (
     <div className="msg agent">
       <div className="avatar">🤝</div>
@@ -209,14 +248,14 @@ export function MultiBubble({ item }: { item: Extract<ChatItem, { kind: 'multi' 
       </div>
     </div>
   );
-}
+});
 
 const LOOP_STOP: Record<string, string> = {
   completed: '✅ 已完成', no_progress: '⏹ 连续无进展，已停止', converged: '🔄 输出已收敛，已停止',
   idle: '💤 连续多轮未执行操作，已停止', max_iterations: '⛔ 达到最大轮数',
 };
 
-export function LoopBubble({ item }: { item: Extract<ChatItem, { kind: 'loop' }> }) {
+export const LoopBubble = memo(function LoopBubble({ item }: { item: Extract<ChatItem, { kind: 'loop' }> }) {
   return (
     <div className="msg agent">
       <Avatar role="agent" />
@@ -233,7 +272,7 @@ export function LoopBubble({ item }: { item: Extract<ChatItem, { kind: 'loop' }>
               {it.done === false && it.obs && <div style={{ color: 'var(--yellow)', marginTop: 4 }}>↻ 观察：{it.obs}</div>}
             </div>
           ))}
-          <Traces traces={item.traces} />
+          <Traces traces={item.traces} dropped={item.traceDropped} />
           {item.done && item.stopReason && LOOP_STOP[item.stopReason] && (
             <div style={{ marginTop: 8, fontWeight: 600 }}>{LOOP_STOP[item.stopReason]}</div>
           )}
@@ -242,9 +281,9 @@ export function LoopBubble({ item }: { item: Extract<ChatItem, { kind: 'loop' }>
       </div>
     </div>
   );
-}
+});
 
-export function ResumeBubble({ item, onResume }: {
+export const ResumeBubble = memo(function ResumeBubble({ item, onResume }: {
   item: Extract<ChatItem, { kind: 'resume' }>; onResume: () => void;
 }) {
   return (
@@ -260,7 +299,7 @@ export function ResumeBubble({ item, onResume }: {
       </div>
     </div>
   );
-}
+});
 
 // 常见失败给一句"该怎么办"，而不是把原始报错甩给用户就完事
 function diagnose(err: string): string | null {
@@ -278,7 +317,7 @@ function diagnose(err: string): string | null {
   return null;
 }
 
-export function ErrorBubble({ item, onResume, onRetry }: {
+export const ErrorBubble = memo(function ErrorBubble({ item, onResume, onRetry }: {
   item: Extract<ChatItem, { kind: 'error' }>;
   onResume: (item: Extract<ChatItem, { kind: 'error' }>) => void;
   onRetry: (item: Extract<ChatItem, { kind: 'error' }>) => void;
@@ -347,7 +386,7 @@ export function ErrorBubble({ item, onResume, onRetry }: {
       </div>
     </div>
   );
-}
+});
 
 export function WelcomeBubble({ onTemplate, onAllTemplates }: {
   onTemplate: (i: number) => void; onAllTemplates: () => void;

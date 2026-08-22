@@ -1,7 +1,10 @@
 // 🗂 工作区管理：每个工作区 = 独立目录 + 独立上下文；含版本数量限额展示。
 import { App, Button, Input, Modal, Space, Tag, Typography } from 'antd';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
+import { useAsync } from '../../lib/useAsync';
+import { ErrorPanel } from '../ui/AsyncBoundary';
 import { useApp } from '../../store/app';
 import { useChat } from '../../store/chat';
 import { useUi } from '../../store/ui';
@@ -20,16 +23,18 @@ export default function WorkspacesModal() {
   const close = useUi((s) => s.closeModal);
   const running = useApp((s) => s.running);
   const wsActive = useApp((s) => s.wsActive);
-  const [data, setData] = useState<any>({ workspaces: [], active: '' });
-  const [quota, setQuota] = useState<any>(null);
   const [name, setName] = useState('');
   const [path, setPath] = useState('');
 
-  const reload = () => {
-    apiGet('/workspaces').then(setData).catch(() => {});
-    apiGet('/quota').then(setQuota).catch(() => {});
-  };
-  useEffect(() => { if (open) reload(); }, [open]);
+  // 打开弹窗才取数；失败时明说 —— 此前会画成"一个工作区都没有"，
+  // 用户以为配置丢了，于是重新建一遍。
+  const st = useAsync<any>(
+    () => (open ? apiGet('/workspaces') : Promise.resolve(null)), [open]);
+  const quotaSt = useAsync<any>(
+    () => (open ? apiGet('/quota') : Promise.resolve(null)), [open]);
+  const data = st.data || { workspaces: [], active: '' };
+  const quota = quotaSt.data;
+  const reload = () => { st.reload(); quotaSt.reload(); };
 
   const switchTo = async (n: string) => {
     if (running) { message.error('有任务正在执行，请先停止再切换工作区'); return; }
@@ -80,13 +85,19 @@ export default function WorkspacesModal() {
               <Button size="small" danger onClick={() => {
                 modal.confirm({
                   title: `删除工作区「${w.name}」？`, content: '只删记录，不删磁盘目录',
-                  onOk: async () => { await apiDelete(`/workspaces/${encodeURIComponent(w.name)}`); message.info('已删除'); reload(); },
+                  onOk: writeAction('删除工作区', async () => {
+                    await apiDelete(`/workspaces/${encodeURIComponent(w.name)}`);
+                    message.info('已删除'); reload();
+                  }),
                 });
               }}>删除</Button>
             </div>
           );
         })}
-        {!(data.workspaces || []).length && <em className="hint-text">暂无已保存的工作区。在下方添加第一个 →</em>}
+        {st.error && !st.loaded && <ErrorPanel error={st.error} onRetry={reload} what="工作区列表" />}
+        {st.loading && !st.loaded && <em className="hint-text">正在读取工作区…</em>}
+        {st.loaded && !(data.workspaces || []).length
+          && <em className="hint-text">暂无已保存的工作区。在下方添加第一个 →</em>}
         {wsActive && <Button size="small" style={{ alignSelf: 'flex-start' }} onClick={() => switchTo('')}>↩ 回到默认工作区</Button>}
         <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12 }}>
           <Text strong style={{ fontSize: '.9em' }}>➕ 新增工作区</Text>

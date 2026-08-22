@@ -1,22 +1,33 @@
 // 🎓 专家市场：官方精选 / 我的专家 / 激活；专业版进阶（分享/导入导出/统计）。
 import { App, Button, Card, Input, Modal, Space, Tag, Typography, Upload } from 'antd';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
+import { useAsync } from '../../lib/useAsync';
 import { chatSid, useApp } from '../../store/app';
+import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { Badge, EmptyState, EntityCard, SectionTitle, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
 
 export default function ExpertsView() {
+  // 此前是 `.catch(() => {})` + `if (!data) return <Card loading />` ——
+  // 取数失败时 data 永远是 null，专家市场就**永远转圈**，
+  // 界面上"加载慢"和"接口挂了"长得一模一样。
+  const st = useAsync<any>(
+    () => apiGet(`/experts?session_id=${encodeURIComponent(chatSid())}`), []);
+  return (
+    <AsyncBoundary state={st} what="专家市场" rows={5}>
+      {(data) => <ExpertsBody data={data} reload={st.reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function ExpertsBody({ data, reload }: { data: any; reload: () => void }) {
   const { message, modal } = App.useApp();
-  const [data, setData] = useState<any>(null);
   const [form, setForm] = useState({ icon: '🎓', name: '', desc: '', prompt: '' });
   const [statsOpen, setStatsOpen] = useState(false);
   const [stats, setStats] = useState<any[]>([]);
-
-  const reload = () => apiGet(`/experts?session_id=${encodeURIComponent(chatSid())}`).then(setData).catch(() => {});
-  useEffect(() => { reload(); }, []);
-  if (!data) return <Card loading />;
 
   const active = data.active || '';
   const custom = data.installed.filter((e: any) => e.source === 'custom');
@@ -32,7 +43,10 @@ export default function ExpertsView() {
 
   const del = (id: string) => modal.confirm({
     title: '删除/卸载该专家？',
-    onOk: async () => { await apiDelete(`/experts/${encodeURIComponent(id)}`); message.info('已删除'); reload(); useApp.getState().refreshExpert(); },
+    onOk: writeAction('删除专家', async () => {
+      await apiDelete(`/experts/${encodeURIComponent(id)}`);
+      message.info('已删除'); reload(); useApp.getState().refreshExpert();
+    }),
   });
 
   const expertCard = (e: any, actions: React.ReactNode) => (

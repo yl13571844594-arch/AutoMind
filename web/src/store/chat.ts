@@ -17,9 +17,11 @@ export type ChatItem =
   | { kind: 'welcome'; id: string }
   | { kind: 'stream'; id: string; buf: string }
   | { kind: 'typing'; id: string }
-  | { kind: 'exec'; id: string; traces: TraceItem[]; plan: PlanRow[]; done: boolean }
+  // traceDropped：轨迹是有上限的（见 ws.ts MAX_TRACES）。超出后丢最旧的，
+  // 并把丢掉的条数记在这里明说 —— 悄悄少几步会让人误判 Agent 漏做了事。
+  | { kind: 'exec'; id: string; traces: TraceItem[]; plan: PlanRow[]; done: boolean; traceDropped?: number }
   | { kind: 'multi'; id: string; steps: MaStep[]; done: boolean }
-  | { kind: 'loop'; id: string; iters: LoopIter[]; stopReason?: string; done: boolean; traces: TraceItem[] }
+  | { kind: 'loop'; id: string; iters: LoopIter[]; stopReason?: string; done: boolean; traces: TraceItem[]; traceDropped?: number }
   | { kind: 'resume'; id: string; why: string }
   // 任务失败/中断。**自带任务快照**（task/taskMode）而不是只指向易失的 lastTask：
   // 这样重启应用后历史里的失败卡片仍然能续跑，不会变成一个点了报

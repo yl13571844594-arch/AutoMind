@@ -1,7 +1,7 @@
 // 对话工作台：消息流（各类气泡）+ 输入区（附件/语音/发送/停止）。
 // 首次进入对话模式时从服务端恢复历史；其它模式恢复本地持久化内容。
 import { App } from 'antd';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../../api/client';
 import { chatSid, MODE_LABELS, useApp, type Mode } from '../../store/app';
 import { uid, useChat, type ChatItem } from '../../store/chat';
@@ -18,6 +18,11 @@ import TaskProgress from './TaskProgress';
 // zustand v5 的 getSnapshot 需返回稳定引用：空列表复用同一常量，
 // 否则每次渲染生成新数组会触发 React #185（无限重渲染）。
 const EMPTY_ITEMS: ChatItem[] = [];
+
+//: 默认只渲染最近这么多条；更早的折起来，点一下再放出一批。
+//  聊到 100+ 条时，全量渲染意味着每来一个流式分片浏览器都要把上百个气泡
+//  （每个都含已渲染的 Markdown DOM）重新排版一遍 —— 滚动和打字都会卡。
+const WINDOW_STEP = 40;
 
 export default function ChatPanel() {
   const { message } = App.useApp();
@@ -93,7 +98,11 @@ export default function ChatPanel() {
               : (Array.isArray(m.content) ? m.content.filter((p: any) => p.type === 'text').map((p: any) => p.text).join('') : ''),
           })));
         }
-      }).catch(() => {});
+      }).catch((e) => {
+        // 历史拉不回来时**必须说**：静默失败会让人以为"聊天记录没了"，
+        // 而实际只是服务没起来 / 令牌过期，刷新一下就有。
+        message.error(`会话历史加载失败：${e?.friendly || e?.message || e}（本地内容不受影响）`);
+      });
     }
   }, [mode]);
 
@@ -203,6 +212,27 @@ export default function ChatPanel() {
   };
 
   const showWelcome = items.length === 0;
+  // 可见窗口：切模式/切工作区时收回默认值，避免带着上一个会话展开的量过来
+  const [windowSize, setWindowSize] = useState(WINDOW_STEP);
+  useEffect(() => { setWindowSize(WINDOW_STEP); }, [mode, wsSuffix]);
+  const hidden = Math.max(0, items.length - windowSize);
+  const shown = hidden ? items.slice(hidden) : items;
+
+  // 展开更早的消息时保持视线不动：新内容加在**上方**，若不补偿滚动位置，
+  // 用户正看着的那条会被顶到屏幕外，读到一半的地方就找不回来了。
+  const keepAnchor = useRef<number | null>(null);
+  const loadOlder = () => {
+    const el = listRef.current;
+    keepAnchor.current = el ? el.scrollHeight - el.scrollTop : null;
+    setWindowSize((n) => n + WINDOW_STEP * 2);
+  };
+  useLayoutEffect(() => {
+    const el = listRef.current;
+    if (el && keepAnchor.current != null) {
+      el.scrollTop = el.scrollHeight - keepAnchor.current;
+      keepAnchor.current = null;
+    }
+  }, [windowSize]);
 
   return (
     // minHeight: 0 不能省 —— flex 子项的自动最小尺寸是 auto，即"不小于内容高度"。
@@ -214,7 +244,14 @@ export default function ChatPanel() {
         {showWelcome && (
           <WelcomeBubble onTemplate={useTemplate} onAllTemplates={() => useUi.getState().openModal('templates')} />
         )}
-        {items.map((item) => {
+        {hidden > 0 && (
+          <div className="msg-older">
+            <button onClick={loadOlder}>
+              ↑ 载入更早的消息（还有 {hidden} 条）
+            </button>
+          </div>
+        )}
+        {shown.map((item) => {
           switch (item.kind) {
             case 'msg': return (
               <MsgBubble

@@ -1,6 +1,7 @@
 // 🛡️ 安全审计：工具调用风险评估与授权决策记录；专业版可导出 PDF。
 import { App, Button, Card, Space, Tag, Typography } from 'antd';
 import { apiDelete, apiGet } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
 import { useApp } from '../../store/app';
 import { AsyncBoundary } from '../ui/AsyncBoundary';
@@ -37,7 +38,9 @@ function AuditBody({ data, reload }: { data: any; reload: () => void }) {
             }}>📄 导出报告{featureOn('audit_export') ? '' : ' 🔒'}</Button>
           <Button size="small" danger onClick={() => modal.confirm({
             title: '清空审计日志？',
-            onOk: async () => { await apiDelete('/audit'); reload(); message.info('审计日志已清空'); },
+            onOk: writeAction('清空审计日志', async () => {
+              await apiDelete('/audit'); reload(); message.info('审计日志已清空');
+            }),
           })}>清空</Button>
         </Space>
       </Space>

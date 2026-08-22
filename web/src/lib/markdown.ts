@@ -67,6 +67,31 @@ function renderMdBlocks(text: string): string {
   return out.join('').replace(/(<br>)+$/, '');
 }
 
+const SEP = String.fromCharCode(10, 10);   // 空行 = 块边界
+
+/**
+ * 把流式缓冲区切成「已定稿的前缀」和「还在长的尾巴」。
+ *
+ * 流式输出此前每 50ms 就把**整个缓冲区**重新 Markdown 解析一遍：回答越长，
+ * 每次解析越贵，于是"越到后面越卡、逐字往外蹦"。切开之后：
+ *   · 前缀只在**跨过一个块边界**时才增量解析一次（见 StreamBubble 的累积渲染）；
+ *   · 尾巴按纯文本原样显示 —— 转义一下就完事，几乎不花时间。
+ *
+ * 边界取最后一个空行，且要求它之前的 ``` 成对 —— 否则会从代码块中间切开，
+ * 前缀渲染出一个永远闭合不上的代码块。
+ */
+export function splitStream(buf: string): [prefix: string, tail: string] {
+  // 短回答整体解析就够快，不值得为它引入"两段拼接"的额外复杂度
+  if (buf.length < 600) return ['', buf];
+  let idx = buf.lastIndexOf(SEP);
+  while (idx > 0) {
+    const head = buf.slice(0, idx);
+    if ((head.match(/```/g) || []).length % 2 === 0) return [head, buf.slice(idx)];
+    idx = buf.lastIndexOf(SEP, idx - 1);
+  }
+  return ['', buf];
+}
+
 /** Markdown → 安全 HTML（含代码块 / HTML 沙箱预览按钮 / 表格 / 列表）。 */
 export function renderMarkdown(text: string): string {
   const htmlBlocks: string[] = [];

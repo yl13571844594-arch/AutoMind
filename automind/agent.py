@@ -144,6 +144,8 @@ class AutoMindAgent:
         self._usage_total: dict[str, int] = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
         self._budget_warned = False
+        # 下一次触发上下文压缩的用量比例（每压一次往后推 5%）
+        self._next_compact_at = self._BUDGET_WARN_AT
         self._attach_usage_sink()
         self.tool_registry = ToolRegistry()
         self.permissions = PermissionEngine(
@@ -623,16 +625,21 @@ class AutoMindAgent:
                 })
                 logger.error("token_budget_exhausted",
                              used=rm.tokens.tokens_used.total, budget=rm.tokens.budget)
-            elif frac >= self._BUDGET_WARN_AT and not self._budget_warned:
-                self._budget_warned = True
-                await self._emit({
-                    "type": "budget_warning",
-                    "used": rm.tokens.tokens_used.total,
-                    "budget": rm.tokens.budget,
-                    "percent": round(frac * 100, 1),
-                })
-                logger.warning("token_budget_high", percent=round(frac * 100, 1))
-                await self._compress_context()
+            elif frac >= self._BUDGET_WARN_AT:
+                if not self._budget_warned:
+                    self._budget_warned = True
+                    await self._emit({
+                        "type": "budget_warning",
+                        "used": rm.tokens.tokens_used.total,
+                        "budget": rm.tokens.budget,
+                        "percent": round(frac * 100, 1),
+                    })
+                    logger.warning("token_budget_high", percent=round(frac * 100, 1))
+                # 压缩可以反复做（ReAct 那条路是纯本地折叠，不花钱），
+                # 但别每次调用都做 —— 每再涨 5% 额度才压一次。
+                if frac >= self._next_compact_at:
+                    self._next_compact_at = frac + 0.05
+                    await self._compress_context()
             # 速率限制 + 硬性预算（超了会抛 RuntimeError，由此拒绝本次调用）
             await rm.before_llm_call()
 
@@ -654,11 +661,39 @@ class AutoMindAgent:
     _BUDGET_WARN_AT = 0.8
 
     async def _compress_context(self) -> None:
-        """预算吃紧时压缩上下文（能压则压，压不了不影响主流程）。
+        """预算吃紧时压缩**真正会被重发的那份上下文**。
 
-        ContextManager.compress 是**协程** —— 早先这里同步调用它，既没真的
-        压缩，还留下一个未 await 的协程（RuntimeWarning）。必须 await。
+        v1.6.2 之前这里只压 ContextManager —— 而 ContextManager 存的是
+        "用户说了什么、Agent 答了什么"的流水账，`get_messages_for_llm()`
+        在 ReAct 路径上**从来没有被调用过**。于是预算告警时会去调一次 LLM
+        生成摘要（真金白银），而下一轮 ReAct 请求体一个 token 都没少 ——
+        **花了摘要的钱，压不到 ReAct 头上**。
+
+        正确的顺序：
+          1. 先压正在跑的 ReAct 消息列表（那才是每轮重发的东西），且是
+             纯本地的字符串折叠，**不花一分钱**；
+          2. 只有在没有 ReAct 在跑（对话 / Plan-and-Execute 路径）时，
+             才退回到 ContextManager 的摘要压缩。
         """
+        ex = getattr(self, "react_executor", None)
+        # 必须是**正在跑**的那个执行器：任务跑完后 messages 还留着，
+        # 去折叠一份不会再发出去的旧列表，等于什么都没省。
+        if ex is not None and getattr(ex, "running", False) and ex.messages:
+            stat = None
+            try:
+                stat = ex.compact()
+                logger.info("react_context_compacted_for_budget", **stat)
+            except Exception as e:
+                logger.warning("react_compact_failed", error=str(e))
+            if stat and stat.get("folded"):
+                # 事件推送失败不能把"已经省下来了"这个事实一起吞掉 ——
+                # 否则又会退回去花钱做一次无用的摘要。
+                try:
+                    await self._emit({"type": "context_compacted",
+                                      "scope": "react", **stat})
+                except Exception as e:
+                    logger.warning("compact_event_emit_failed", error=str(e))
+                return   # 已经省下来了，不必再花钱做摘要
         try:
             mgr = getattr(self, "context_mgr", None)
             fn = getattr(mgr, "compress", None)
@@ -775,6 +810,8 @@ class AutoMindAgent:
             permissions=self.permissions,
             approval_cb=self.approval_callback,
             auto_validate=self.config.execution.auto_test,  # TDD 内环开关
+            # 工具 schema 每一步都要重发；只发与任务相关的那批（0 = 不限）
+            tool_budget=getattr(self.config.execution, "react_tool_budget", 14),
         )
         # 编程模式下注入面向编程的引导
         if self._interaction == InteractionMode.CODING:
@@ -1087,6 +1124,7 @@ class AutoMindAgent:
         clone._usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
                               "total_tokens": 0, "calls": 0}
         clone._budget_warned = False
+        clone._next_compact_at = self._BUDGET_WARN_AT
         clone.llm = clone._init_llm()
         clone.resources = ResourceManager(token_budget=clone.config.llm.max_tokens * 10)
         clone._attach_usage_sink()

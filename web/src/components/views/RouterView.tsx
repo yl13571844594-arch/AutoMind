@@ -5,6 +5,8 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { useAsync } from '../../lib/useAsync';
+import { ErrorPanel } from '../ui/AsyncBoundary';
 import { useApp } from '../../store/app';
 
 const { Text, Paragraph } = Typography;
@@ -21,9 +23,6 @@ function UpgradeCard({ label, tier }: { label: string; tier: string }) {
 export default function RouterView() {
   const { message } = App.useApp();
   const featureOn = useApp((s) => s.featureOn);
-  const [cache, setCache] = useState<any>(null);
-  const [router, setRouter] = useState<any>(null);
-  const [costs, setCosts] = useState<any>(null);
   const [preview, setPreview] = useState<any>(null);
   const [previewTask, setPreviewTask] = useState('');
 
@@ -31,19 +30,30 @@ export default function RouterView() {
   const hasRouter = featureOn('model_router');
   const hasCosts = featureOn('cost_dashboard');
 
-  const reload = () => {
-    if (hasCache) apiGet('/cache').then(setCache).catch(() => {});
-    if (hasRouter) apiGet('/router').then(setRouter).catch(() => {});
-    if (hasCosts) apiGet('/costs').then(setCosts).catch(() => {});
-  };
-  useEffect(() => { reload(); }, [hasCache, hasRouter, hasCosts]);
+  // 三块各自取数、各自报错。此前统一 `.catch(() => {})` + `cache && (...)`：
+  // 接口一挂，整块**凭空消失**，看起来就像"这个功能没了"。
+  const cacheSt = useAsync<any>(
+    () => (hasCache ? apiGet('/cache') : Promise.resolve(null)), [hasCache]);
+  const routerSt = useAsync<any>(
+    () => (hasRouter ? apiGet('/router') : Promise.resolve(null)), [hasRouter]);
+  const costsSt = useAsync<any>(
+    () => (hasCosts ? apiGet('/costs') : Promise.resolve(null)), [hasCosts]);
+  const cache = cacheSt.data;
+  const router = routerSt.data;
+  const costs = costsSt.data;
+  const setCache = (v: any) => cacheSt.setData(v);
+  const reload = () => { cacheSt.reload(); routerSt.reload(); costsSt.reload(); };
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
       <h3>🧭 智能路由与成本</h3>
 
       {/* 语义缓存 */}
-      {!hasCache ? <UpgradeCard label="语义缓存（相似问题秒回，省 Token）" tier="专业版" /> : cache && (
+      {!hasCache ? <UpgradeCard label="语义缓存（相似问题秒回，省 Token）" tier="专业版" />
+        : cacheSt.error && !cacheSt.loaded
+          ? <ErrorPanel error={cacheSt.error} onRetry={cacheSt.reload} what="语义缓存" />
+        : cacheSt.loading && !cacheSt.loaded ? <Card size="small" loading />
+        : cache && (
         <Card size="small" title={<span>⚡ 语义缓存 {cache.advanced ? <Tag color="purple">企业版 · 高级</Tag> : <Tag color="blue">专业版 · 基础</Tag>}</span>}
           extra={<Space>
             <Switch size="small" checked={cache.enabled} onChange={async (v) => {
@@ -73,7 +83,11 @@ export default function RouterView() {
       )}
 
       {/* 模型路由 */}
-      {!hasRouter ? <UpgradeCard label="模型智能路由（按任务复杂度分级选模型）" tier="专业版" /> : router && (
+      {!hasRouter ? <UpgradeCard label="模型智能路由（按任务复杂度分级选模型）" tier="专业版" />
+        : routerSt.error && !routerSt.loaded
+          ? <ErrorPanel error={routerSt.error} onRetry={routerSt.reload} what="路由配置" />
+        : routerSt.loading && !routerSt.loaded ? <Card size="small" loading />
+        : router && (
         <RouterConfig router={router} onChange={reload} />
       )}
 
@@ -98,7 +112,11 @@ export default function RouterView() {
       )}
 
       {/* 成本仪表盘 */}
-      {!hasCosts ? <UpgradeCard label="成本仪表盘（模型成本 / 缓存节省分析）" tier="企业版" /> : costs && (
+      {!hasCosts ? <UpgradeCard label="成本仪表盘（模型成本 / 缓存节省分析）" tier="企业版" />
+        : costsSt.error && !costsSt.loaded
+          ? <ErrorPanel error={costsSt.error} onRetry={costsSt.reload} what="成本仪表盘" />
+        : costsSt.loading && !costsSt.loaded ? <Card size="small" loading />
+        : costs && (
         <Card size="small" title="💰 成本仪表盘（企业版）" extra={<Button size="small" onClick={reload}>🔄 刷新</Button>}>
           <Space size="large" wrap style={{ marginBottom: 12 }}>
             <Statistic title="累计估算成本" value={costs.total_cost} prefix="¥" precision={4} />
@@ -138,7 +156,13 @@ function RouterConfig({ router, onChange }: { router: any; onChange: () => void 
     { name: '强力', provider: 'deepseek', model: 'deepseek-reasoner', max_score: 100 },
   ]);
   const [providers, setProviders] = useState<any>(null);
-  useEffect(() => { apiGet('/providers').then(setProviders).catch(() => {}); }, []);
+  // 供应商清单拉不回来时，档位里的模型下拉会是空的 —— 那时必须说清楚
+  // "是没取到"，而不是让用户以为"一个供应商都没配"。
+  const [provErr, setProvErr] = useState('');
+  useEffect(() => {
+    apiGet('/providers').then(setProviders)
+      .catch((e) => setProvErr(e?.friendly || e?.message || String(e)));
+  }, []);
   const maxTiers = router.max_tiers;
   const allP = providers ? [...(providers.cloud || []), ...(providers.local || []), ...(providers.custom || [])] : [];
 
@@ -158,6 +182,11 @@ function RouterConfig({ router, onChange }: { router: any; onChange: () => void 
         按任务复杂度（0~100 启发式打分）自动选择模型档位：简单问答走便宜小模型、复杂任务走强模型。
         档位按 max_score 升序命中第一个满足 score ≤ max_score 的档。
       </Paragraph>
+      {provErr && (
+        <div className="hint-text" style={{ color: 'var(--red)', marginBottom: 8 }}>
+          ⚠️ 供应商清单加载失败：{provErr} —— 下方模型下拉可能是空的。
+        </div>
+      )}
       {tiers.map((t, i) => (
         <Space key={i} style={{ marginBottom: 6 }} wrap>
           <Input size="small" style={{ width: 90 }} placeholder="档位名" value={t.name}

@@ -1657,11 +1657,42 @@ async def api_kb_auto(data: dict):
     return {"status": "ok", "auto_retrieve": cfg["kb_auto"]}
 
 
-def _apply_kb(task: str) -> str:
-    """对话前自动检索知识库，把相关片段注入任务上下文。
+#: 对话历史里参与"这段是不是已经注入过"判定的窗口长度。
+#  必须与 Agent.chat 真正发出去的窗口一致（messages = [system, *hist[-20:]]），
+#  否则会出现"以为模型还看得见、其实早被挤出去了"的漏注入。
+_KB_HISTORY_WINDOW = 20
+#: 用片段开头这么多字符做"已在场"的判定指纹
+_KB_FINGERPRINT = 80
+
+
+def _kb_already_visible(hist: list, text: str) -> bool:
+    """该片段是否已经在模型看得见的窗口里。"""
+    fp = (text or "")[:_KB_FINGERPRINT]
+    if not fp:
+        return True
+    for m in hist[-_KB_HISTORY_WINDOW:]:
+        c = m.get("content")
+        if isinstance(c, str) and fp in c:
+            return True
+    return False
+
+
+def _apply_kb(task: str, hist: list | None = None) -> str:
+    """对话前自动检索知识库，把**尚未在场**的片段注入对话上下文。
 
     专业版（rag_pro）：启用 Reranker，注入内容带编号引用（引用溯源），
     并要求模型回答时标注来源；社区版注入纯参考片段。
+
+    v1.6.3 之前的做法是：把片段拼进用户这句话前面发出去，生成完再把历史里的
+    那条还原成用户原话。后果是**每一轮都要重新注入一遍**同样的片段 ——
+    连问五个关于同一份文档的问题，同样那 500~900 token 就付了五遍，
+    而模型在第二轮开始其实已经看不到第一轮的片段了（被还原掉了），
+    所以还非注入不可。
+
+    现在改成：片段作为一条独立的 system 消息**留在会话历史里**，并按
+    "这段是否已经在窗口内"逐条去重。同一份资料只付一次钱；换了话题、
+    检索到新片段时才会再注入新的那几段。用户原话始终原样保留（不再需要
+    事后还原），历史看起来也和用户实际说的一致。
     """
     try:
         if not _read_config().get("kb_auto", True):
@@ -1676,29 +1707,30 @@ def _apply_kb(task: str) -> str:
             return task
         if ent:
             store.log_search(task, hits, source="chat")
+        h = hist if isinstance(hist, list) else []
+        fresh = [x for x in hits if not _kb_already_visible(h, x["text"][:600])]
+        if not fresh:
+            # 命中的片段模型已经看得见了 —— 再发一遍纯属重复付费
+            logger.info("kb_injection_skipped", hits=len(hits), reason="already_in_context")
+            return task
         if pro:
             refs = "\n".join(
-                f"[{i+1}]（{h['doc_name']} · 第{h['seq']+1}段）{h['text'][:600]}"
-                for i, h in enumerate(hits))
-            return (f"【知识库参考】以下片段检索自用户知识库，回答时优先依据这些内容，"
-                    f"引用处请标注编号（如 [1]）与来源：\n{refs}\n---\n{task}")
-        refs = "\n".join(f"-（{h['doc_name']}）{h['text'][:600]}" for h in hits)
-        return (f"【知识库参考】以下片段检索自用户知识库，回答时优先参考：\n"
-                f"{refs}\n---\n{task}")
+                f"[{i+1}]（{x['doc_name']} · 第{x['seq']+1}段）{x['text'][:600]}"
+                for i, x in enumerate(fresh))
+            block = (f"【知识库参考】以下片段检索自用户知识库，回答时优先依据这些内容，"
+                     f"引用处请标注编号（如 [1]）与来源：\n{refs}")
+        else:
+            refs = "\n".join(f"-（{x['doc_name']}）{x['text'][:600]}" for x in fresh)
+            block = (f"【知识库参考】以下片段检索自用户知识库，回答时优先参考：\n{refs}")
+        if hist is None:
+            # 没有历史可挂（老调用方）→ 退回旧的"拼进本轮提问"方式
+            return f"{block}\n---\n{task}"
+        hist.append({"role": "system", "content": block})
+        logger.info("kb_injected", fresh=len(fresh), hits=len(hits))
+        return task
     except Exception as e:
         logger.warning("kb_apply_failed", error=str(e))
         return task
-
-
-def _restore_kb_history(hist: list, task: str, injected: str,
-                        images: list | None) -> None:
-    """知识库注入只用于本轮生成，回写历史时还原为用户原话（避免上下文膨胀）。"""
-    if injected == task or images:
-        return
-    for m in reversed(hist):
-        if m.get("role") == "user":
-            m["content"] = task
-            break
 
 
 def _apply_router(agent, raw_task: str, images: list | None):
@@ -2760,9 +2792,9 @@ async def api_run(data: dict):
                 }
                 _push_history(record)
                 return record
-            task_with_kb = _apply_kb(task)   # 知识库自动检索注入
+            # 知识库自动检索注入（片段挂进 hist，同一段不重复付费）
+            task_with_kb = _apply_kb(task, hist)
             reply = await agent.chat(task_with_kb, images=images, history=hist)
-            _restore_kb_history(hist, task, task_with_kb, images)
             await _save_history_notify(chat_sid)
             usage = agent.llm.usage
             _cache_store(raw_task, images, reply, usage.total)
@@ -3157,13 +3189,13 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                                     "duration_ms": record["duration_ms"]})
                 return
             chunks: list[str] = []
-            task_with_kb = _apply_kb(task)   # 知识库自动检索注入
+            # 知识库自动检索注入（片段挂进 hist，同一段不重复付费）
+            task_with_kb = _apply_kb(task, hist)
             async for delta in agent.chat_stream(task_with_kb, images=images,
                                                  history=hist):
                 chunks.append(delta)
                 await ws.send_json({"type": "chat_chunk", "session_id": session_id,
                                     "delta": delta})
-            _restore_kb_history(hist, task, task_with_kb, images)
             await _save_history_notify(chat_sid, ws)
             _cache_store(raw_task, images, "".join(chunks),
                          getattr(getattr(agent, "_last_stream_usage", None),

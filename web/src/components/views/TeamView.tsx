@@ -2,6 +2,7 @@
 import { App, Button, Card, Input, Space, Typography } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
 import { chatSid } from '../../store/app';
 import { usePanel } from '../../store/panel';
@@ -101,7 +102,9 @@ export default function TeamView() {
                     {s !== 'done' && <Button size="small" type="primary" title="标记完成" onClick={() => move(t.id, 'done')}>✓</Button>}
                     <Button size="small" danger type="text" title="删除" onClick={() => modal.confirm({
                       title: '删除该团队任务？',
-                      onOk: async () => { await apiDelete(`/team/tasks/${encodeURIComponent(t.id)}`); reload(); },
+                      onOk: writeAction('删除团队任务', async () => {
+                        await apiDelete(`/team/tasks/${encodeURIComponent(t.id)}`); reload();
+                      }),
                     })}>✕</Button>
                   </>}
                 />

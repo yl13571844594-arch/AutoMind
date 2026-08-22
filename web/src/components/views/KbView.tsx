@@ -7,6 +7,7 @@ import {
 } from 'antd';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
 import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { EmptyState, Tile, ViewHead } from '../ui/Panel';
@@ -36,13 +37,19 @@ function KbBody({ data: initial, reloadOuter }: { data: any; reloadOuter: () => 
   const [log, setLog] = useState<any[]>([]);
   const [importDir, setImportDir] = useState('');
 
+  // 企业版的热度统计与检索审计：失败要说出来 —— 静默吞掉的话，
+  // 界面显示"暂无检索记录"，用户会以为审计根本没在记。
+  const loadEnterprise = () => {
+    apiGet('/kb/stats').then(setStats)
+      .catch((e) => message.warning(`知识库统计加载失败：${e?.friendly || e?.message || e}`));
+    apiGet('/kb/search-log?limit=50').then((r) => setLog(r.log || []))
+      .catch((e) => message.warning(`检索审计日志加载失败：${e?.friendly || e?.message || e}`));
+  };
+
   const reload = () => {
     apiGet('/kb').then((d) => {
       setData(d);
-      if (d.enterprise) {
-        apiGet('/kb/stats').then(setStats).catch(() => {});
-        apiGet('/kb/search-log?limit=50').then((r) => setLog(r.log || [])).catch(() => {});
-      }
+      if (d.enterprise) loadEnterprise();
     }).catch((e) => {
       // 刷新失败要说出来 —— 静默吞掉会让用户以为刚上传的文档没生效
       message.error(`知识库刷新失败：${e?.friendly || e?.message || e}`);
@@ -50,10 +57,7 @@ function KbBody({ data: initial, reloadOuter }: { data: any; reloadOuter: () => 
     });
   };
   useEffect(() => {
-    if (data?.enterprise) {
-      apiGet('/kb/stats').then(setStats).catch(() => {});
-      apiGet('/kb/search-log?limit=50').then((r) => setLog(r.log || [])).catch(() => {});
-    }
+    if (data?.enterprise) loadEnterprise();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -140,22 +144,22 @@ function KbBody({ data: initial, reloadOuter }: { data: any; reloadOuter: () => 
               modal.confirm({
                 title: '新建知识库',
                 content: <Input placeholder="知识库名称（按主题分类）" onChange={(e) => { name = e.target.value; }} />,
-                onOk: async () => {
+                onOk: writeAction('新建知识库', async () => {
                   if (!name.trim()) return;
                   const r = await apiPost('/kb/kbs', { name });
                   if (r.error) message.error(r.error);
                   else { message.success('知识库已创建'); reload(); }
-                },
+                }),
               });
             }}>➕ 新建知识库</Button>
             {kbSel !== 'default' && (
               <Button danger onClick={() => modal.confirm({
                 title: '删除该知识库及其全部文档？',
-                onOk: async () => {
+                onOk: writeAction('删除知识库', async () => {
                   const r = await apiDelete(`/kb/kbs/${kbSel}`);
                   if (r.error) message.error(r.error);
                   else { message.info('已删除'); setKbSel('default'); reload(); }
-                },
+                }),
               })}>删除该库</Button>
             )}
             <Button onClick={async () => {
@@ -197,7 +201,9 @@ function KbBody({ data: initial, reloadOuter }: { data: any; reloadOuter: () => 
             render: (_: any, r: any) => (
               <Button size="small" danger type="text" onClick={() => modal.confirm({
                 title: `删除文档「${r.name}」？`,
-                onOk: async () => { await apiDelete(`/kb/doc/${r.id}`); message.info('已删除'); reload(); },
+                onOk: writeAction('删除文档', async () => {
+                  await apiDelete(`/kb/doc/${r.id}`); message.info('已删除'); reload();
+                }),
               })}>🗑</Button>
             ),
           },

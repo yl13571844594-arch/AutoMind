@@ -18,6 +18,8 @@ export interface AsyncState<T> {
   /** 是否已经至少成功加载过一次（用于"静默刷新"不闪 loading） */
   loaded: boolean;
   reload: () => void;
+  /** 就地替换数据 —— 写接口已经把最新状态回给我们时，不必再多跑一次 GET。 */
+  setData: (d: T) => void;
 }
 
 /**
@@ -66,5 +68,6 @@ export function useAsync<T>(fn: () => Promise<T>, deps: unknown[] = []): AsyncSt
   }, [...deps, tick]);
 
   const reload = useCallback(() => setTick((n) => n + 1), []);
-  return { data, loading, error, loaded, reload };
+  const replace = useCallback((d: T) => { setData(d); setLoaded(true); setError(null); }, []);
+  return { data, loading, error, loaded, reload, setData: replace };
 }

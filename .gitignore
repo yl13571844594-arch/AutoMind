@@ -55,6 +55,11 @@ BUGS_21_TO_FIX.md
 
 # ���ؿ����������ã����������ֿ⣩
 .claude/
+# 本地助手/工具的落地文件与随手截图 —— 里面是本机绝对路径与命令历史，
+# 一旦被 `git add -A` 带进公开仓库就是信息泄漏
+reasonix.toml
+.reasonix/
+scratch_ui/
 
 # v1.0 React 前端：构建产物需随仓库分发（覆盖上面的通用 dist/ 规则）
 !automind/static/dist/

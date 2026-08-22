@@ -1,8 +1,11 @@
 // 🔧 工具面板：工具 / 技能 / MCP / 插件 四个分栏。
 import { App, Button, Card, Input, Segmented, Space, Switch, Tabs, Typography, Upload } from 'antd';
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
+import { useAsync } from '../../lib/useAsync';
 import { SKILL_META, TOOL_META, toolDesc, toolLabel } from '../../lib/toolMeta';
+import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { Badge, EmptyState, EntityCard, SectionTitle, SourceBadge, Tile, ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
@@ -19,12 +22,21 @@ const TOOL_ICONS: Record<string, string> = {
 const TIER_LABEL: Record<string, string> = { safe: '安全', sensitive: '敏感', dangerous: '危险' };
 
 function ToolsTab() {
+  // 三态取数。此前是 `useState([])` + `.catch(() => {})`：首屏还在取数时
+  // `tools` 就是空数组，于是**加载中被画成「没有匹配的工具」**；接口 500 或
+  // 服务没起来时，画的还是同一句话 —— 用户完全无从判断到底出了什么事。
+  const st = useAsync<any[]>(() => apiGet('/tools').then((r) => (Array.isArray(r) ? r : [])), []);
+  return (
+    <AsyncBoundary state={st} what="工具列表" rows={6}>
+      {(tools) => <ToolsBody tools={tools} reload={st.reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function ToolsBody({ tools, reload }: { tools: any[]; reload: () => void }) {
   const { message } = App.useApp();
-  const [tools, setTools] = useState<any[]>([]);
   const [kw, setKw] = useState('');
   const [filter, setFilter] = useState('全部');
-  const reload = () => apiGet('/tools').then(setTools).catch(() => {});
-  useEffect(() => { reload(); }, []);
 
   const counts = useMemo(() => ({
     builtin: tools.filter((t) => t.source === 'builtin').length,
@@ -100,6 +112,11 @@ function ToolsTab() {
             />
           ))}
         </div>
+      ) : tools.length === 0 ? (
+        // 取回来了、但一个工具都没有 —— 这不是"没匹配上"，是装配出了问题
+        <EmptyState icon="🛠" title="没有注册任何工具"
+                    hint={<>内置工具本应随软件分发；若这里是空的，多半是安装包不完整。
+                      可点 <a onClick={reload}>重新加载</a> 再试一次。</>} />
       ) : (
         <EmptyState icon="🔍" title="没有匹配的工具"
                     hint={kw ? `换个关键词试试，或把筛选切回「全部」。` : '该分类下暂时没有工具。'} />
@@ -109,11 +126,11 @@ function ToolsTab() {
 }
 
 function SkillsTab() {
+  const st = useAsync<any[]>(() => apiGet('/skills').then((r) => (Array.isArray(r) ? r : [])), []);
   const { message, modal } = App.useApp();
-  const [skills, setSkills] = useState<any[]>([]);
   const [dir, setDir] = useState('');
-  const reload = () => apiGet('/skills').then(setSkills).catch(() => {});
-  useEffect(() => { reload(); }, []);
+  const reload = st.reload;
+  const skills = st.data || [];
   return (
     <>
       <Card size="small" style={{ marginBottom: 10 }}>
@@ -153,6 +170,12 @@ function SkillsTab() {
           message.error('未找到桌面 skills 文件夹，请用「加载目录」手动指定');
         }}>⬇️ 一键导入桌面 skills 文件夹</Button>
       </Card>
+      <AsyncBoundary state={st} what="技能列表" rows={3}
+                     isEmpty={(d) => d.length === 0}
+                     empty={<EmptyState icon="✨" title="还没有任何技能"
+                                        hint="内置技能本应随软件分发；自定义技能可用上方的「加载目录 / 导入 .py」添加。" />}>
+        {() => null}
+      </AsyncBoundary>
       {(['builtin', 'custom'] as const).map((group) => {
         const list = skills.filter((s) => (group === 'builtin' ? s.builtin : !s.builtin));
         if (!list.length) return null;
@@ -176,10 +199,10 @@ function SkillsTab() {
                   actions={!s.builtin && (
                     <Button size="small" danger type="text" onClick={() => modal.confirm({
                       title: `确定删除技能「${s.name}」？`,
-                      onOk: async () => {
+                      onOk: writeAction('删除技能', async () => {
                         const r = await apiDelete(`/skills/${encodeURIComponent(s.name)}`);
                         if (r.error) message.error(r.error); else { message.info('已删除'); reload(); }
-                      },
+                      }),
                     })}>🗑</Button>
                   )}
                 />
@@ -235,16 +258,14 @@ function McpPresetCard({ p, onAdded }: { p: any; onAdded: () => void }) {
 }
 
 function McpTab() {
+  const st = useAsync<any>(() => apiGet('/mcp'), []);
+  const presetSt = useAsync<any[]>(
+    () => apiGet('/mcp/presets').then((r) => r?.presets || []), []);
   const { message, modal } = App.useApp();
-  const [data, setData] = useState<any>({ servers: [] });
-  const [presets, setPresets] = useState<any[]>([]);
   const [importText, setImportText] = useState('');
   const [form, setForm] = useState({ name: '', transport: 'stdio', command: '', args: '', url: '' });
-  const reload = () => apiGet('/mcp').then(setData).catch(() => {});
-  useEffect(() => {
-    reload();
-    apiGet('/mcp/presets').then((r) => setPresets(r?.presets || [])).catch(() => {});
-  }, []);
+  const reload = st.reload;
+  const data = st.data || { servers: [] };
   return (
     <>
       {!data.sdk_installed && (
@@ -257,9 +278,16 @@ function McpTab() {
         <Paragraph type="secondary" style={{ fontSize: '.76em', margin: '4px 0 8px' }}>
           点「添加」即写入配置并尝试连接；需要密钥的服务请先在系统环境变量里设置（详见各卡片）。
         </Paragraph>
-        <div className="ent-grid wide">
-          {presets.map((p) => <McpPresetCard key={p.id} p={p} onAdded={reload} />)}
-        </div>
+        <AsyncBoundary state={presetSt} what="官方适配清单" rows={2}
+                       isEmpty={(d) => d.length === 0}
+                       empty={<EmptyState icon="🔌" title="没有可用的官方适配"
+                                          hint="可用下方的「批量导入」或「添加单个 MCP 服务器」手动接入。" />}>
+          {(presets) => (
+            <div className="ent-grid wide">
+              {presets.map((p) => <McpPresetCard key={p.id} p={p} onAdded={reload} />)}
+            </div>
+          )}
+        </AsyncBoundary>
       </Card>
       <Card size="small" style={{ marginBottom: 10 }}>
         <Text strong style={{ fontSize: '.9em' }}>📥 批量导入 (Claude Desktop 格式)</Text>
@@ -305,7 +333,8 @@ function McpTab() {
         </Space.Compact>
       </Card>
       <SectionTitle count={(data.servers || []).length}>🔗 已添加的 MCP 服务器</SectionTitle>
-      {(data.servers || []).length ? (
+      {st.loading && !st.loaded ? <div className="hint-text">正在读取已添加的 MCP 服务器…</div>
+       : (data.servers || []).length ? (
         <div className="ent-grid wide">
           {(data.servers || []).map((s: any) => (
             <EntityCard
@@ -324,7 +353,10 @@ function McpTab() {
               actions={
                 <Button size="small" danger type="text" onClick={() => modal.confirm({
                   title: `确定删除 MCP 服务器「${s.name}」？`,
-                  onOk: async () => { await apiDelete(`/mcp/${encodeURIComponent(s.name)}`); message.info('已删除'); reload(); },
+                  onOk: writeAction('删除 MCP 服务器', async () => {
+                    await apiDelete(`/mcp/${encodeURIComponent(s.name)}`);
+                    message.info('已删除'); reload();
+                  }),
                 })}>🗑</Button>
               }
             />
@@ -339,10 +371,16 @@ function McpTab() {
 }
 
 function PluginsTab() {
+  const st = useAsync<any>(() => apiGet('/plugins'), []);
+  return (
+    <AsyncBoundary state={st} what="插件列表" rows={4}>
+      {(data) => <PluginsBody data={data} reload={st.reload} />}
+    </AsyncBoundary>
+  );
+}
+
+function PluginsBody({ data, reload }: { data: any; reload: () => void }) {
   const { message } = App.useApp();
-  const [data, setData] = useState<any>({ plugins: [] });
-  const reload = () => apiGet('/plugins').then(setData).catch(() => {});
-  useEffect(() => { reload(); }, []);
   const plugins = data.plugins || [];
   const toggle = async (p: any) => {
     const act = p.loaded ? 'unload' : 'load';

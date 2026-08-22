@@ -95,6 +95,10 @@ class ExecutionConfig(BaseModel):
     parallel_execution: bool = True
     # 子任务缓存：同一任务内相同的只读工具调用结果复用
     subtask_cache: bool = True
+    # ReAct 单轮下发的工具 schema 上限。工具 schema 每一步都要重发一遍，
+    # 31 个内置工具约 6k~8k token/步；只发相关的那批可省掉一半以上。
+    # 设为 0 表示不限（全量下发，行为同 v1.6.2 及更早）。
+    react_tool_budget: int = 14
 
 
 class TUIConfig(BaseModel):

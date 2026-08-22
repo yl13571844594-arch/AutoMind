@@ -1,14 +1,26 @@
 // 右栏：📊 观测面板（实时状态 / Token 用量 / 文件改动 / 计划 / HTML 预览 / 审计）
 //      📄 代码标签（文件树 + Monaco 编辑器 + Diff）。
 import { App } from 'antd';
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { apiDelete, apiGet } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
+import { useAsync } from '../../lib/useAsync';
 import { estCost, fmtCost, setCustomPrice, clearCustomPrice, modelPrice } from '../../lib/pricing';
 import { esc } from '../../lib/markdown';
 import { useApp } from '../../store/app';
 import { usePanel } from '../../store/panel';
 import { useUi } from '../../store/ui';
 import CodeTab from './CodeTab';
+
+/** 右栏专用的一行式失败提示：窄栏放不下完整错误面板，但**必须说出来**。 */
+function LoadFail({ st }: { st: { error: Error | null; reload: () => void } }) {
+  return (
+    <div className="hint-text" style={{ color: 'var(--red)' }}>
+      ⚠️ 加载失败：{(st.error as any)?.friendly || st.error?.message || '未知错误'}
+      <a style={{ marginLeft: 6, cursor: 'pointer' }} onClick={st.reload}>重试</a>
+    </div>
+  );
+}
 
 function Section({ title, extra, children }: {
   title: string; extra?: React.ReactNode; children: React.ReactNode;
@@ -38,18 +50,22 @@ export default function RightPanel() {
   const plan = usePanel((s) => s.plan);
   const tick = usePanel((s) => s.refreshTick);
   const model = useApp((s) => s.status?.model || '');
-  const [tokens, setTokens] = useState<any>({});
-  const [changes, setChanges] = useState<any[]>([]);
-  const [htmlFiles, setHtmlFiles] = useState<any[]>([]);
-  const [audit, setAudit] = useState<any>(null);
+  // 四块各自三态。此前全是 `.catch(() => {})`：服务一挂，右栏就变成
+  // "0 个 Token、没有文件改动、没有审计记录"——一份**看起来正常的假快照**。
+  const tokensSt = useAsync<any>(() => apiGet('/tokens'), [tick]);
+  const changesSt = useAsync<any[]>(
+    () => apiGet('/changes').then((r) => r.changes || []), [tick]);
+  const htmlSt = useAsync<any[]>(
+    () => apiGet('/files/html').then((r) => (Array.isArray(r) ? r : [])), [tick]);
+  const auditSt = useAsync<any>(() => apiGet('/audit?limit=5'), [tick]);
+  const tokens = tokensSt.data || {};
+  const changes = changesSt.data || [];
+  const htmlFiles = htmlSt.data || [];
+  const audit = auditSt.data;
 
   const refresh = () => {
-    apiGet('/tokens').then(setTokens).catch(() => {});
-    apiGet('/changes').then((r) => setChanges(r.changes || [])).catch(() => {});
-    apiGet('/files/html').then((r) => setHtmlFiles(Array.isArray(r) ? r : [])).catch(() => {});
-    apiGet('/audit?limit=5').then(setAudit).catch(() => {});
+    tokensSt.reload(); changesSt.reload(); htmlSt.reload(); auditSt.reload();
   };
-  useEffect(refresh, [tick]);
 
   const cost = fmtCost(estCost(model, tokens.prompt, tokens.completion));
 
@@ -70,7 +86,7 @@ export default function RightPanel() {
     modal.confirm({
       title: path ? '撤销该文件的全部改动？' : '回滚全部文件改动？',
       content: path || '新建文件删除、修改文件恢复原内容，此操作不可撤销',
-      onOk: async () => {
+      onOk: writeAction(path ? '撤销文件改动' : '回滚全部改动', async () => {
         const r = await fetch('/api/changes/rollback', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(path ? { path } : { all: true }),
@@ -78,7 +94,7 @@ export default function RightPanel() {
         if (r.error) { message.error(r.error); return; }
         message.success(path ? '已恢复' : `已回滚 ${r.restored} 个文件`);
         refresh();
-      },
+      }),
     });
   };
 
@@ -121,6 +137,7 @@ export default function RightPanel() {
               await apiDelete('/tokens'); refresh(); message.info('Token 统计已重置');
             }}>重置</a>
           }>
+            {tokensSt.error && !tokensSt.loaded && <LoadFail st={tokensSt} />}
             <div className="stat-grid">
               <div className="stat-item"><div className="label">输入 (prompt)</div><div className="value" style={{ fontSize: '1em' }}>{(tokens.prompt || 0).toLocaleString()}</div></div>
               <div className="stat-item"><div className="label">输出 (completion)</div><div className="value" style={{ fontSize: '1em' }}>{(tokens.completion || 0).toLocaleString()}</div></div>
@@ -135,7 +152,9 @@ export default function RightPanel() {
           </Section>
 
           <Section title="↩️ 文件改动" extra={<a style={{ cursor: 'pointer' }} onClick={refresh}>⟳</a>}>
-            {dedupChanges.length === 0 ? (
+            {changesSt.error && !changesSt.loaded ? <LoadFail st={changesSt} /> :
+             changesSt.loading && !changesSt.loaded ? <em className="hint-text">正在读取…</em> :
+             dedupChanges.length === 0 ? (
               <em className="hint-text">Agent 改过的文件会列在这里，可一键撤销</em>
             ) : (
               <>
@@ -164,7 +183,9 @@ export default function RightPanel() {
           </Section>
 
           <Section title="🌐 HTML 预览" extra={<a style={{ cursor: 'pointer' }} onClick={refresh}>⟳</a>}>
-            {htmlFiles.length === 0 ? (
+            {htmlSt.error && !htmlSt.loaded ? <LoadFail st={htmlSt} /> :
+             htmlSt.loading && !htmlSt.loaded ? <em className="hint-text">正在读取…</em> :
+             htmlFiles.length === 0 ? (
               <em className="hint-text">项目中暂无 HTML 文件</em>
             ) : htmlFiles.slice(0, 8).map((f: any) => (
               <div key={f.path} style={{ padding: '4px 0', fontSize: '.8em', cursor: 'pointer', color: 'var(--text2)' }}
@@ -175,7 +196,9 @@ export default function RightPanel() {
           </Section>
 
           <Section title="🛡️ 审计概览">
-            {!audit || !audit.entries?.length ? (
+            {auditSt.error && !auditSt.loaded ? <LoadFail st={auditSt} /> :
+             auditSt.loading && !auditSt.loaded ? <em className="hint-text">正在读取…</em> :
+             !audit || !audit.entries?.length ? (
               <em className="hint-text">暂无工具调用记录</em>
             ) : (
               <>

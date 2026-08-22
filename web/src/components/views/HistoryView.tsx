@@ -9,6 +9,7 @@
 import { App, Button, Card, Empty, Input, Modal, Pagination, Segmented, Skeleton, Space, Typography } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import { apiDelete, apiGet } from '../../api/client';
+import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
 import { ErrorPanel } from '../ui/AsyncBoundary';
 import { copyText } from '../../lib/clipboard';
@@ -98,7 +99,9 @@ export default function HistoryView() {
                     title: '清空全部任务历史？',
                     content: '不可撤销，且会清掉全部记录（不只是当前筛选出的这些）。',
                     okText: '清空', okButtonProps: { danger: true }, cancelText: '取消',
-                    onOk: async () => { await apiDelete('/history'); reload(); message.info('历史已清空'); },
+                    onOk: writeAction('清空任务历史', async () => {
+                      await apiDelete('/history'); reload(); message.info('历史已清空');
+                    }),
                   })}>🗑 清空</Button>
                 } />
 
