@@ -116,13 +116,25 @@
 ## 快速开始
 
 ```bash
-# 安装方式 A：从 PyPI（推荐）
-pip install "automind-agent[web]"     # Web + OpenAI 兼容后端
-# 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
+# 方式 A：下载桌面安装包（推荐，不需要装 Python）
+#   https://github.com/yl13571844594-arch/AutoMind/releases/latest
+#   Windows .exe（代码签名） · macOS .dmg（通用二进制） · Linux .deb
 
-# 安装方式 B：从源码（git clone 本仓库后，在仓库目录执行）
+# 方式 B：从源码安装
+git clone https://github.com/yl13571844594-arch/AutoMind.git
+cd AutoMind
 pip install -e ".[web]"
 
+# 方式 C：从 PyPI 安装
+pip install "automind-agent[web]"     # Web + OpenAI 兼容后端
+# 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
+```
+
+> ⚠️ **PyPI 上的版本目前落后于本仓库。** PyPI 最新为 `1.3.2` —— 项目的 PyPI
+> Trusted Publisher 登记尚未完成，发布流水线的构建与审计每次都通过、只卡在最后
+> 一步上传。在此之前，想用最新版请走**方式 A 或方式 B**。
+
+```bash
 # 启动 Web 工作台（推荐）
 python -m automind.server --port 8765
 # 然后浏览器打开 http://localhost:8765
@@ -133,6 +145,14 @@ launch.bat
 # CLI 交互模式
 automind
 automind "你的任务描述"
+automind --version
+```
+
+### Docker
+
+```bash
+docker compose up --build
+# Web UI: http://localhost:8765
 ```
 
 ## 模型配置
