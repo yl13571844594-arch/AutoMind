@@ -5,21 +5,48 @@ Thanks for your interest in AutoMind Community Edition (MIT licensed). Issues, P
 
 ## 开发环境 / Development Setup
 
+### 后端 / Backend
+
 ```bash
-git clone https://github.com/yl13571844594-arch/automind.git
-cd automind
+git clone https://github.com/yl13571844594-arch/AutoMind.git
+cd AutoMind
 pip install -e ".[web,dev]"      # 或 ".[full,dev]" 安装全部模型后端
-pytest -q                        # 运行测试（应全部通过）
+pytest tests/ -q                 # 运行测试（应全部通过）
+ruff check .                     # 与 CI 同口径
 ```
 
-- Python ≥ 3.11。
-- 代码风格由 ruff 约束（配置见 `pyproject.toml`）：`ruff check automind tests`。
+- Python ≥ 3.11（CI 覆盖 3.11 / 3.12）。
+- 代码风格由 ruff 约束，配置见 `pyproject.toml`。
 - 新功能请附带 `tests/` 下的测试；修 bug 请先写能复现的失败用例。
+
+### 前端 / Frontend
+
+Web 工作台是独立的 React 18 + TypeScript + Ant Design 应用，源码在 `web/`，
+构建产物 `automind/static/dist/` **随仓库提交**（用户 pip 装完即可用）。
+改了界面就必须重新构建并把产物一起提交，否则用户看到的还是旧界面。
+
+```bash
+cd web
+pnpm install                     # 需要 pnpm 11 + Node ≥ 22.13
+pnpm dev                         # 开发服务器（热更新）
+pnpm exec tsc --noEmit           # 类型检查，CI 会卡这一步
+pnpm build                       # 产出到 automind/static/dist/
+```
 
 ## 提交 PR / Pull Requests
 
 1. Fork 并从 `main` 拉分支（`feat/xxx` 或 `fix/xxx`）。
-2. 保证 `pytest -q` 与 `ruff check` 通过。
+2. **本地跑一遍 CI 的四道关**，避免"本机绿、CI 红"：
+
+   ```bash
+   ruff check .
+   pytest tests/ -q
+   cd web && pnpm exec tsc --noEmit && pnpm build && cd ..
+   python -m build && python -m twine check dist/*
+   ```
+
+   CI 还会在 ubuntu / windows / macOS 三个系统上跑测试，并把 wheel 装进干净
+   环境冒烟。**涉及路径、子进程、信号、编码的改动尤其容易只在某一个系统上挂**。
 3. PR 描述里说明**动机**与**行为变化**；界面改动请附截图。
 4. 一个 PR 只做一件事，方便审阅与回滚。
 
