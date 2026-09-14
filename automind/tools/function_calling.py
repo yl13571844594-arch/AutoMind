@@ -6,6 +6,7 @@ from typing import Any
 
 from automind.core.types import ToolCall, ToolResult
 from automind.tools.base import ToolRegistry
+from automind.tools.output_budget import limited_tool_content, limits_from_config
 
 
 class FunctionCallHandler:
@@ -15,46 +16,45 @@ class FunctionCallHandler:
         1. 将 ToolCall 转换为 ToolRegistry.dispatch() 调用
         2. 将 ToolResult 转换为 LLM 可读的工具消息
         3. 跟踪工具调用历史
+
+    v1.6.4：结果转消息时**先按体积夹住**（见 ``tools/output_budget.py``）。
+    此前这里 ``str(content)`` 原样进上下文，一次大文件读取/长命令输出就会在
+    下一轮整体重发，是 token 成本与上下文超载的最大单一来源。
     """
 
-    def __init__(self, registry: ToolRegistry) -> None:
+    def __init__(self, registry: ToolRegistry, output_limits: dict[str, int] | None = None) -> None:
         self.registry = registry
         self.call_history: list[tuple[ToolCall, ToolResult]] = []
+        #: 工具输出体积限额（None = 按 ExecutionConfig 默认值）
+        self.output_limits = output_limits or limits_from_config()
+        #: 累积的截断账目（供观测中心展示"这次任务省下多少上下文"）
+        self.truncations: list[dict[str, Any]] = []
+        self.dropped_chars = 0
 
-    async def execute_tool_calls(
-        self,
-        tool_calls: list[ToolCall],
-    ) -> list[ToolResult]:
-        """执行 LLM 请求的所有工具调用。
+    # ── 结果 → 消息 ─────────────────────────────────────────
 
-        Returns:
-            按调用顺序的 ToolResult 列表。
-        """
-        results = []
-        for tc in tool_calls:
-            result = await self.registry.dispatch(tc.name, **tc.arguments)
-            self.call_history.append((tc, result))
-            results.append(result)
-        return results
+    def _content_of(self, tc: ToolCall, result: ToolResult) -> str:
+        """单条结果的最终文本（含体积夹取与截断账目）。"""
+        raw = result.output if result.success else f"Error: {result.error}"
+        text, stat = limited_tool_content(raw, self.output_limits, tool=tc.name)
+        if stat.get("truncated"):
+            self.truncations.append(stat)
+            self.dropped_chars += int(stat.get("dropped_chars", 0))
+        return text
 
     def tool_results_to_messages(
         self,
         tool_calls: list[ToolCall],
         results: list[ToolResult],
     ) -> list[dict[str, Any]]:
-        """将工具调用结果转换为 LLM 消息格式。"""
+        """将工具调用结果转换为 LLM 消息格式（自动限制单条体积）。"""
         messages = []
         for tc, result in zip(tool_calls, results):
-            content = result.output if result.success else f"Error: {result.error}"
-            if isinstance(content, dict):
-                import json
-                content = json.dumps(content, indent=2, ensure_ascii=False)
-
             # OpenAI 格式
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": str(content),
+                "content": self._content_of(tc, result),
             })
         return messages
 
@@ -63,19 +63,24 @@ class FunctionCallHandler:
         tool_calls: list[ToolCall],
         results: list[ToolResult],
     ) -> list[dict[str, Any]]:
-        """将工具调用结果转换为 Anthropic 消息格式。"""
+        """将工具调用结果转换为 Anthropic 消息格式（自动限制单条体积）。"""
         content_blocks = []
         for tc, result in zip(tool_calls, results):
-            output = result.output if result.success else f"Error: {result.error}"
-            if isinstance(output, dict):
-                import json
-                output = json.dumps(output, indent=2, ensure_ascii=False)
             content_blocks.append({
                 "type": "tool_result",
                 "tool_use_id": tc.id,
-                "content": str(output),
+                "content": self._content_of(tc, result),
             })
         return [{"role": "user", "content": content_blocks}]
+
+    def savings_report(self) -> dict[str, Any]:
+        """体积治理账目（推入观测中心用）。"""
+        return {
+            "truncated_results": len(self.truncations),
+            "dropped_chars": self.dropped_chars,
+            "est_tokens_saved": int(self.dropped_chars / 3.5),
+            "max_chars": int(self.output_limits.get("max_chars", 0)),
+        }
 
     def get_call_summary(self) -> str:
         """生成工具调用历史摘要。"""

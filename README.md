@@ -236,7 +236,11 @@ docker compose up --build
 - **健康检查**：`GET /api/health`（无需鉴权）返回版本、运行任务数、并发上限、uptime，供探活/负载均衡。
 - **资源保护**：并发任务超过 `AUTOMIND_MAX_CONCURRENT` 时返回 429。
 
-> 注：社区版对话模式为完整多用户隔离；工作/编程等执行态任务共享单 Agent。
+> 注：社区版对话模式为**完整多用户隔离**；工作/编程等执行态任务按会话缓存轻量克隆
+> （`clone_for_session`），交互模式、上下文、token 计数互不污染。
+> **目录仍是共享的** —— v1.6.4 起用「按路径串行化写入 + 外来改动检出 + 可选会话
+> 独立工作目录」三层防护，避免并发改同一工作区时静默互相覆盖（见
+> `execution.write_conflict_policy` / `execution.isolate_workspace`）。
 > **企业版**提供会话级 Agent 池（Session-Agent-Pool），执行态也按用户完全隔离，
 > 并可对接独立统计分析服务。详见 [docs/EDITIONS.md](docs/EDITIONS.md)。
 

@@ -150,6 +150,11 @@ class ToolResult(BaseModel):
     exit_code: int | None = None
     duration_ms: float = 0.0
     metadata: dict[str, Any] = Field(default_factory=dict)
+    #: 超时被杀（与"命令自己返回非零"是两回事：前者可加大 timeout 重试，
+    #: 后者要改命令）。上层据此给出可自愈的指引而不是笼统的失败。
+    timed_out: bool = False
+    #: 后台/异步执行的任务标识（长耗时命令改走后台通道时非空）
+    background_id: str = ""
 
 
 class LLMResponse(BaseModel):

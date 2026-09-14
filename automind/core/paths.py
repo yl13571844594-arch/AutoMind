@@ -93,6 +93,16 @@ def legacy_file(name: str) -> Path:
     return data_dir() / name
 
 
+def traces_dir() -> Path:
+    """执行轨迹（session trace）根目录 —— 每个会话一个子目录，每个 run 一个 JSONL。"""
+    return data_dir() / "traces"
+
+
+def session_workspaces_dir() -> Path:
+    """会话级隔离工作目录的根（开启目录级隔离时，各会话的工作副本放在这里）。"""
+    return data_dir() / "workspaces"
+
+
 def describe() -> dict:
     """诊断信息（/api/health 与桌面「打开数据目录」用）。"""
     return {

@@ -403,14 +403,100 @@ function InterfacePrefs() {
   );
 }
 
+// ── 🧾 轨迹面板 ─────────────────────────────────────────
+// 执行轨迹是磁盘证据（进程重启后仍在），与内存里的实时 DAG 互补。
+// 这里只做"看得见 + 拿得到"两件事：占用概览、最近几次运行、一键下载原始
+// JSONL（排障时可以直接发给同事或贴进工单，不用再靠截图复述）。
+function LinkedTracePanel() {
+  const { message } = App.useApp();
+  const [data, setData] = useState<any>(null);
+  const [sid, setSid] = useState('default');
+  const [busy, setBusy] = useState(false);
+
+  const load = async (id: string) => {
+    setBusy(true);
+    try {
+      setData(await apiGet(`/observe/traces?session_id=${encodeURIComponent(id)}`));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  useEffect(() => { load('default'); }, []);
+
+  const stats = data?.stats || {};
+  const runs: any[] = data?.runs || [];
+  const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
+
+  return (
+    <div>
+      {!stats.enabled ? (
+        <Alert type="warning" showIcon
+          message="轨迹落盘已关闭"
+          description="关闭后进程重启就查不到这次任务做过什么。上面「执行轨迹落盘」勾上即可恢复。" />
+      ) : (
+        <>
+          <Paragraph type="secondary" style={{ fontSize: '.78em', margin: '0 0 8px' }}>
+            目录 <span className="mono">{stats.dir}</span> · 共 {stats.runs ?? 0} 次运行 ·
+            {' '}{kb(stats.bytes ?? 0)}
+            {stats.write_errors > 0 && ` · ⚠ 写入失败 ${stats.write_errors} 次`}
+          </Paragraph>
+          <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
+            <Input placeholder="会话 ID（默认 default）" value={sid}
+              onChange={(e) => setSid(e.target.value)}
+              onPressEnter={() => load(sid.trim() || 'default')} />
+            <Button loading={busy} onClick={() => load(sid.trim() || 'default')}>查询</Button>
+          </Space.Compact>
+          <div style={{ maxHeight: 160, overflowY: 'auto' }}>
+            {runs.length === 0 && <div className="hint-text">该会话暂无落盘轨迹（跑一个任务后就会产生）</div>}
+            {runs.map((r) => (
+              <div key={r.run_id} style={{ display: 'flex', gap: 8, alignItems: 'center', padding: '2px 0' }}>
+                <span className="mono" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {r.run_id} · {kb(r.bytes)}
+                </span>
+                <Button size="small" onClick={() => {
+                  const who = data?.session_id || 'default';
+                  window.open(`/api/observe/traces/${encodeURIComponent(who)}/${encodeURIComponent(r.run_id)}/download`, '_blank');
+                }}>⬇ 下载</Button>
+                <Button size="small" onClick={async () => {
+                  const who = data?.session_id || 'default';
+                  const ev = await apiGet(`/observe/traces/${encodeURIComponent(who)}/${encodeURIComponent(r.run_id)}?limit=50`);
+                  message.info(`最近 ${ev.count} 条事件：${(ev.events || []).slice(-3).map((x: any) => x.type).join(' → ')}`);
+                }}>👁 看尾部</Button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── ⚙ 通用设置 ──────────────────────────────────────────
 const AUTOPILOT_LABELS: Record<string, [string, string]> = {
-  auto_review: ['🧐 多Agent审查', '工作模式完成后由审阅者角色复核'],
-  auto_verify: ['✅ Loop 验收', '语义判定是否真正完成，未过带反馈自动修复'],
+  auto_review: ['🧐 多Agent审查', '工作模式完成后由审阅者角色复核（设施故障时如实标注"未执行"，不伪装成通过）'],
+  auto_verify: ['✅ Loop 验收', '产物断言 + 语义判定是否真正完成；不可用时如实说明而不谎报"未过"'],
   auto_test: ['🧪 TDD 测试', '编程模式：改 .py 自动语法验证；收尾自动跑 pytest'],
-  parallel_execution: ['⚡ 并行执行', '计划中互不依赖的步骤并发执行'],
+  parallel_execution: ['⚡ 并行执行', '计划中互不依赖的步骤并发执行（单步异常不会连累同批其它步骤）'],
   subtask_cache: ['📦 子任务缓存', '同一任务内相同的只读工具调用结果复用'],
 };
+
+// v1.6.4 治理开关：默认**不改变行为的**默认开启，会改变产物落点的默认关闭
+const GOVERNANCE_LABELS: Record<string, [string, string]> = {
+  terminal_background_enabled: ['⏱ 后台命令通道', '安装/编译/长测试可后台执行并轮询，不再"超时即失败、只能盲目重跑"'],
+  release_slot_on_approval_wait: ['🎫 审批等待让槽', '等待人工审批期间释放并发执行槽，不再白占名额'],
+  trace_enabled: ['🧾 执行轨迹落盘', '把 Agent 行为逐条写成 JSONL 证据（进程重启后仍可取证、下载）'],
+  isolate_workspace: ['🗂 会话独立工作目录', '每个会话一份工作副本，从根上消除跨会话覆盖；会改变产物落点，默认关闭'],
+};
+
+// 数值型执行参数（超时 / 输出上限）：排障时不必重建 Agent 即可调整
+const NUMERIC_KNOBS: Array<[string, string, number, number, number, string]> = [
+  ['tool_timeout_seconds', '终端默认超时(秒)', 30, 3600, 10, '模型未显式指定时的默认值；安装/编译类命令建议 600+'],
+  ['tool_timeout_max_seconds', '终端超时上限(秒)', 60, 7200, 60, '模型可通过 timeout 参数申请的上限'],
+  ['tool_output_max_chars', '单条工具输出上限(字符)', 0, 200000, 1000, '0 = 不限制。这是 token 成本与上下文超载的最大单一来源'],
+  ['approval_timeout_seconds', '审批等待上限(秒)', 30, 3600, 30, '超时按下方策略处置，并明确告知'],
+  ['auto_verify_max_rounds', '验收修复轮上限', 0, 10, 1, '0 = 验收不通过也不自动修复'],
+];
 
 // 通用设置里的分组小节：图标标题 + 说明 + 内容，视觉统一。
 function Section({ icon, title, desc, children }: {
@@ -520,6 +606,67 @@ function GeneralModal() {
                 message.info(`${label} 已${e.target.checked ? '开启' : '关闭'}`);
               }}>{label}</Checkbox>
             ))}
+          </div>
+        </Section>
+
+        <Divider style={{ margin: 0 }} />
+
+        <Section icon="📊" title="观测与轨迹" desc="执行证据落盘 + 本轮省下的 token 账目：让「这次任务到底做了什么、花了多少、省了多少」可查可举证">
+          <LinkedTracePanel />
+        </Section>
+
+        <Divider style={{ margin: 0 }} />
+
+        <Section icon="🛡" title="执行治理" desc="超时 / 上下文体积 / 并发写冲突 / 审批等待 —— 这些是「看不见的损失」最常发生的地方">
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
+            {Object.entries(GOVERNANCE_LABELS).map(([k, [label, tip]]) => (
+              <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={async (e) => {
+                await apiPost('/config/autopilot', { [k]: e.target.checked });
+                setAutopilot({ ...autopilot, [k]: e.target.checked });
+                message.info(`${label} 已${e.target.checked ? '开启' : '关闭'}`);
+              }}>{label}</Checkbox>
+            ))}
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px', marginTop: 12 }}>
+            {NUMERIC_KNOBS.map(([k, label, min, max, step, tip]) => (
+              <div key={k} title={tip}>
+                <Text style={{ fontSize: '.82em' }}>{label}</Text>
+                <InputNumber style={{ width: '100%' }} min={min} max={max} step={step}
+                  value={autopilot[k]} onChange={async (v) => {
+                    if (v === null || v === undefined) return;
+                    await apiPost('/config/autopilot', { [k]: v });
+                    setAutopilot({ ...autopilot, [k]: v });
+                  }} />
+              </div>
+            ))}
+            <div title="超时后如何处置：自动拒绝更安全（fail-closed）；自动批准只适合完全可信的环境">
+              <Text style={{ fontSize: '.82em' }}>审批超时处置</Text>
+              <Select style={{ width: '100%' }} value={autopilot.approval_timeout_action || 'reject'}
+                onChange={async (v) => {
+                  await apiPost('/config/autopilot', { approval_timeout_action: v });
+                  setAutopilot({ ...autopilot, approval_timeout_action: v });
+                  message.info(`审批超时改为「${v === 'approve' ? '自动批准' : '自动拒绝'}」`);
+                }}
+                options={[
+                  { value: 'reject', label: '自动拒绝（推荐，fail-closed）' },
+                  { value: 'approve', label: '自动批准（仅在完全可信环境使用）' },
+                ]} />
+            </div>
+            <div title="并发写冲突策略：warn 仍写入但明确提示；block 直接拒绝并回显当前内容">
+              <Text style={{ fontSize: '.82em' }}>并发写冲突策略</Text>
+              <Select style={{ width: '100%' }} value={autopilot.write_conflict_policy || 'warn'}
+                onChange={async (v) => {
+                  await apiPost('/config/autopilot', { write_conflict_policy: v });
+                  setAutopilot({ ...autopilot, write_conflict_policy: v });
+                  message.info(`并发写冲突策略：${v}`);
+                }}
+                options={[
+                  { value: 'warn', label: 'warn — 写入并提示冲突（默认）' },
+                  { value: 'block', label: 'block — 冲突即拒绝写入' },
+                  { value: 'off', label: 'off — 不检测（仅串行化写入）' },
+                ]} />
+            </div>
           </div>
         </Section>
 

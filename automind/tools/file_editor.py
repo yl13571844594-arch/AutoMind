@@ -9,6 +9,8 @@ from typing import Any
 
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools.base import AbstractTool
+from automind.tools.write_guard import content_hash as _content_hash
+from automind.tools.write_guard import path_lock
 
 
 class FileChangeJournal:
@@ -105,6 +107,12 @@ class _RootGuard:
 
     采用 ``resolved == root or root in resolved.parents`` 的严格包含判断，
     避免 ``str.startswith`` 的前缀碰撞漏洞（如 ``/srv/app`` 与 ``/srv/app-evil``）。
+
+    v1.6.4：**会话级隔离工作目录**。当开启了目录级隔离
+    （``ExecutionConfig.isolate_workspace``）时，当前会话通过 contextvar 声明了
+    自己的私有工作目录；相对路径优先解析到那里，从而让并发会话不再改同一批
+    文件。绝对路径仍按 ``project_root`` 校验（隔离工作区也建在它之内），
+    越界照旧拒绝 —— 隔离不放松任何安全边界。
     """
 
     def __init__(self, project_root: str | Path | None = None) -> None:
@@ -112,19 +120,88 @@ class _RootGuard:
             Path(project_root).resolve() if project_root is not None else None
         )
 
+    @property
+    def root(self) -> Path | None:
+        return self._root
+
+    def _session_root(self) -> Path | None:
+        try:
+            from automind.core.session_ctx import workspace
+
+            ws = workspace()
+        except Exception:
+            return None
+        if not ws:
+            return None
+        try:
+            p = Path(ws).resolve()
+        except Exception:
+            return None
+        return p
+
     def resolve(self, path: str | Path) -> Path:
-        """解析并校验路径；越界时抛出 PermissionError。"""
+        """解析并校验路径；越界时抛出 PermissionError。
+
+        相对路径的基准在会话隔离开启时是**该会话的私有工作目录**（见
+        ``core/workspace.py``），否则是 ``project_root``。
+        """
         p = Path(path)
         if self._root is None:
             return p
+        session_root = self._session_root()
         if not p.is_absolute():
-            p = self._root / p
+            # 会话私有工作目录优先：同一相对路径在不同会话里落到不同目录
+            p = (session_root or self._root) / p
         resolved = p.resolve()
-        if resolved != self._root and self._root not in resolved.parents:
-            raise PermissionError(
-                f"路径越界：'{path}' 解析到 project_root 之外，已拒绝访问。"
-            )
-        return resolved
+        # 放行两种合法根：project_root，以及**被显式采纳的**会话隔离目录。
+        # 隔离目录由服务端/测试显式传入（workspace.prepare / contextvar），
+        # 不是模型可控的输入；这里如实放行，而不是用"必须在 project_root 之内"
+        # 去拒绝它 —— 那会让隔离目录里的每一次写入都被自己的防护挡下。
+        allowed = [self._root]
+        if session_root is not None:
+            allowed.append(session_root)
+        for root in allowed:
+            if resolved == root or root in resolved.parents:
+                return resolved
+        raise PermissionError(
+            f"路径越界：'{path}' 解析到允许范围之外，已拒绝访问。"
+        )
+
+
+def _write_guard() -> Any:
+    """构造本次写入的冲突守卫（会话身份 + 策略均来自 contextvar/配置）。
+
+    会话身份走 contextvar 而不是实例属性：工具注册表在会话克隆之间是**共享**
+    的，把 session 挂到工具实例上会被并发会话互相覆盖。
+    """
+    from automind.tools.write_guard import WriteGuard
+
+    try:
+        from automind.core.session_ctx import session_id as _sid
+
+        sid = _sid() or ""
+    except Exception:
+        sid = ""
+    policy = "warn"
+    try:
+        from automind.core.config import ExecutionConfig
+
+        policy = ExecutionConfig().write_conflict_policy
+    except Exception:
+        pass
+    return WriteGuard(session=sid, policy=policy)
+
+
+def _conflict_note(conflict: dict[str, Any]) -> str:
+    """把冲突判定渲染成给模型的明确提示（可照做，而不是含糊警告）。"""
+    if not conflict or conflict.get("ok") and not conflict.get("foreign"):
+        return ""
+    return (
+        "\n\n⚠ 并发写冲突提示：" + str(conflict.get("reason") or "") +
+        "（本次写入已完成，但请立刻重新读取该文件核对内容；"
+        "若发现不是你预期的版本，请基于**当前真实内容**重新修改，"
+        "不要凭记忆覆盖。）"
+    )
 
 
 class FileReadTool(AbstractTool):
@@ -173,7 +250,13 @@ class FileReadTool(AbstractTool):
         lines = content.splitlines(keepends=True)
         total_lines = len(lines)
         out: dict[str, Any] = {"path": str(path), "size": total_size,
-                               "total_lines": total_lines}
+                               "total_lines": total_lines,
+                               # 内容指纹：可原样回传给 file_write/file_edit 的
+                               # expected_hash，声明"我只覆盖我读到的那一版"，
+                               # 从而确定性拦住并发覆盖（见 tools/write_guard.py）
+                               "content_hash": _content_hash(content)}
+        # 登记"本会话读过"，同名文件后续被别的会话改写才能被检出为冲突
+        _write_guard().note_read(str(path))
 
         offset = kwargs.get("offset")
         limit = kwargs.get("limit")
@@ -198,16 +281,38 @@ class FileReadTool(AbstractTool):
 
 
 class FileWriteTool(AbstractTool):
-    """文件写入工具。"""
+    """文件写入工具。
+
+    v1.6.4 并发写治理：
+        · 同路径写入经 :func:`automind.tools.write_guard.path_lock` 串行化，
+          避免"读 A → 被 B 覆盖 → 写回 A"的交错覆盖；
+        · 覆盖**别的会话刚改过、本会话之后没读过**的文件时，按
+          ``ExecutionConfig.write_conflict_policy`` 给出明确冲突提示（warn）
+          或直接拒绝（block），不再静默覆盖对方成果；
+        · 可选 ``expected_hash``：声明"我改的是我读到的那一版"（``file_read``
+          会返回 ``content_hash``），不匹配即失败并附当前内容指纹，
+          让模型基于真实状态重做。
+    """
 
     name = "file_write"
-    description = "Write content to a file, creating or overwriting it."
+    description = (
+        "Write content to a file, creating or overwriting it. "
+        "When overwriting a file another session may have changed, pass "
+        "expected_hash (from file_read's content_hash) to guarantee you are "
+        "not clobbering concurrent edits."
+    )
     parameters = {
         "type": "object",
         "properties": {
             "path": {"type": "string", "description": "Path to the file to write."},
             "content": {"type": "string", "description": "Content to write."},
             "encoding": {"type": "string", "description": "File encoding (default: utf-8)."},
+            "expected_hash": {
+                "type": "string",
+                "description": ("Content hash you expect the file to currently have "
+                                "(from file_read's content_hash). Mismatch aborts "
+                                "the write instead of silently overwriting."),
+            },
         },
         "required": ["path", "content"],
     }
@@ -220,36 +325,58 @@ class FileWriteTool(AbstractTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         content = kwargs["content"]
         encoding = kwargs.get("encoding", "utf-8")
+        expected = kwargs.get("expected_hash") or None
         try:
             path = self._guard.resolve(kwargs["path"])
         except PermissionError as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
 
-        try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            existed = path.exists()
-            # 撤销支持：写入前记录前像（新建文件记 None，回滚时删除）。
-            # 已存在但前像读取失败（二进制/编码问题）时不记录 —— 无法安全恢复。
-            if existed:
-                try:
-                    JOURNAL.record(str(path), path.read_text(encoding=encoding), self.name)
-                except Exception:
-                    pass
-            else:
-                JOURNAL.record(str(path), None, self.name)
-            path.write_text(content, encoding=encoding)
+        guard = _write_guard()
+        conflict = guard.check(str(path), expected_hash=expected)
+        if not conflict["ok"]:
+            # block 策略或指纹不符 —— 明确失败并给出当前真实状态
+            current = ""
+            try:
+                current = path.read_text(encoding=encoding)[:1200]
+            except Exception:
+                current = "（读取失败，文件可能不存在）"
             return ToolResult(
-                tool_name=self.name,
-                success=True,
-                output={
+                tool_name=self.name, success=False,
+                error=(f"写入被拒绝：{conflict['reason']}\n"
+                       f"文件当前内容（供修正参考）：\n{current}"),
+                output={"path": str(path), "conflict": conflict,
+                        "rejected": True},
+            )
+
+        async with path_lock(str(path)):
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                existed = path.exists()
+                # 撤销支持：写入前记录前像（新建文件记 None，回滚时删除）。
+                # 已存在但前像读取失败（二进制/编码问题）时不记录 —— 无法安全恢复。
+                if existed:
+                    try:
+                        JOURNAL.record(str(path), path.read_text(encoding=encoding),
+                                       self.name)
+                    except Exception:
+                        pass
+                else:
+                    JOURNAL.record(str(path), None, self.name)
+                path.write_text(content, encoding=encoding)
+                guard.note_write(str(path), self.name)
+                out: dict[str, Any] = {
                     "path": str(path),
                     "size": len(content),
                     "created": not existed,
                     "overwritten": existed,
-                },
-            )
-        except Exception as e:
-            return ToolResult(tool_name=self.name, success=False, error=str(e))
+                    "content_hash": _content_hash(content),
+                }
+                if conflict.get("foreign"):
+                    out["conflict"] = conflict
+                    out["warning"] = _conflict_note(conflict)
+                return ToolResult(tool_name=self.name, success=True, output=out)
+            except Exception as e:
+                return ToolResult(tool_name=self.name, success=False, error=str(e))
 
 
 class FileEditTool(AbstractTool):
@@ -273,6 +400,12 @@ class FileEditTool(AbstractTool):
             "replace_all": {
                 "type": "boolean",
                 "description": "Replace all occurrences (default: false).",
+            },
+            "expected_hash": {
+                "type": "string",
+                "description": ("Optional content hash (from file_read) that the file "
+                                "must still have; mismatch aborts the edit instead of "
+                                "overwriting concurrent changes."),
             },
         },
         "required": ["path", "old_string", "new_string"],
@@ -300,6 +433,21 @@ class FileEditTool(AbstractTool):
         except PermissionError as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
 
+        guard = _write_guard()
+        conflict = guard.check(str(path), expected_hash=kwargs.get("expected_hash") or None)
+        if not conflict["ok"]:
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=(f"编辑被拒绝：{conflict['reason']}"),
+                output={"path": str(path), "conflict": conflict, "rejected": True},
+            )
+
+        async with path_lock(str(path)):
+            return await self._execute_locked(path, old, new, replace_all, conflict)
+
+    async def _execute_locked(self, path: Path, old: str, new: str,
+                              replace_all: bool, conflict: dict[str, Any]) -> ToolResult:
+        """持锁执行实际的替换（读—改—写必须在同一把锁内才谈得上原子）。"""
         try:
             original = path.read_text(encoding="utf-8")
         except Exception as e:
@@ -331,21 +479,24 @@ class FileEditTool(AbstractTool):
         diff = self._compute_diff(original, modified, path.name)
 
         path.write_text(modified, encoding="utf-8")
+        guard = _write_guard()
+        guard.note_write(str(path), self.name)
         self._diff_history.append({
             "path": str(path),
             "diff": diff,
             "replacements": count if replace_all else 1,
         })
 
-        return ToolResult(
-            tool_name=self.name,
-            success=True,
-            output={
-                "path": str(path),
-                "diff": diff,
-                "replacements": count if replace_all else 1,
-            },
-        )
+        out: dict[str, Any] = {
+            "path": str(path),
+            "diff": diff,
+            "replacements": count if replace_all else 1,
+            "content_hash": _content_hash(modified),
+        }
+        if conflict.get("foreign"):
+            out["conflict"] = conflict
+            out["warning"] = _conflict_note(conflict)
+        return ToolResult(tool_name=self.name, success=True, output=out)
 
     def rollback(self, path: str | Path) -> bool:
         """回滚文件到最后一次编辑前的状态。"""

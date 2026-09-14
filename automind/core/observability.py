@@ -2,8 +2,9 @@
 
 职责边界（与商业版的分工）：
     - **社区版**：本模块只保留「当前任务」的实时 DAG（每个会话一张图，
-      新任务开始即替换），只读、不落盘、不聚合历史 —— 够用于「看清这次
-      任务在做什么」，且零额外存储成本；
+      新任务开始即替换），只读、不聚合历史 —— 够用于「看清这次任务在
+      做什么」，且零额外存储成本；同时把同一份事件流**逐条落盘**成
+      JSONL 执行轨迹（:mod:`automind.core.trace`），进程重启后仍可取证。
     - **专业版/企业版**：``automind_pro`` 通过 :func:`add_listener` 订阅
       已完成的图快照，自行做历史留存、实时看板聚合与导出。核心不含任何
       商业逻辑，未安装商业包时监听器列表为空，行为完全不变。
@@ -21,6 +22,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import Any
+
+from automind.core import trace as _trace
 
 #: 单张图的节点上限（超出后仅计数不再新增节点，保护内存）
 MAX_NODES = 400
@@ -101,12 +104,88 @@ def _running_step(graph: dict) -> dict | None:
     return None
 
 
+# ── 落盘轨迹（会话 → 当前 run id → 文件）────────────────────
+#: 会话 → 当前 run id（task_start 时生成，收尾事件后保留供查询）
+_trace_runs: dict[str, str] = {}
+
+
+def _trace_event(sid: str, event: dict) -> None:
+    """把事件追加进落盘轨迹；task_start 时开一次新 run。"""
+    etype = event.get("type")
+    rec = _trace.get_recorder()
+    if not rec.enabled:
+        return
+    if etype == "task_start":
+        rid = event.get("run_id") or f"run-{_now_ms()}"
+        _trace_runs[sid] = rid
+        rec.record(sid, rid, event)
+        return
+    rid = _trace_runs.get(sid)
+    if not rid:
+        # 没有 task_start 的孤立事件（历史回放 / 直接调用）：归入 misc run
+        rid = f"misc-{time.strftime('%Y%m%d')}"
+        _trace_runs[sid] = rid
+    rec.record(sid, rid, event)
+    if etype in ("task_complete", "task_error", "task_cancelled", "chat_done"):
+        summary = {k: event.get(k) for k in
+                   ("success", "steps", "backtracks", "tokens", "duration_ms",
+                    "interaction", "error", "stop_reason")
+                   if k in event}
+        rec.finish(sid, rid, summary)
+
+
+def current_run_id(session_id: str) -> str:
+    """该会话当前的 run id（未开始任何任务时为空串）。"""
+    return _trace_runs.get(session_id or "default", "")
+
+
+def trace_path(session_id: str) -> str:
+    """该会话当前轨迹文件路径（未开始任务时为空串）。"""
+    rid = current_run_id(session_id)
+    if not rid:
+        return ""
+    return str(_trace.get_recorder().path_for(session_id or "default", rid))
+
+
+def trace_stats() -> dict:
+    """轨迹占用概览。"""
+    return _trace.get_recorder().stats()
+
+
+def trace_runs(session_id: str, limit: int = 50) -> list[dict]:
+    """该会话已落盘的全部 run（新的在前）。"""
+    return _trace.get_recorder().list_runs(session_id or "default", limit=limit)
+
+
+def trace_read(session_id: str, run_id: str, limit: int = 200,
+               event_types: list[str] | None = None) -> list[dict]:
+    """读取某次运行的事件（尾部 N 条，可按类型过滤）。"""
+    return _trace.get_recorder().tail(session_id or "default", run_id, limit=limit,
+                                      event_types=event_types)
+
+
+def _trace_reset_for_tests(root: Any = None, enabled: bool = True) -> None:
+    """测试用：把轨迹重定向到临时目录并清空 run 映射。"""
+    _trace_runs.clear()
+    _trace.reset_for_tests(root=root, enabled=enabled)
+
+
 def record(session_id: str, event: dict) -> None:
-    """把一条任务事件并入该会话的当前 DAG（未知事件安全忽略）。"""
+    """把一条任务事件并入该会话的当前 DAG（未知事件安全忽略）。
+
+    同时把同一条事件追加进该会话的落盘轨迹（JSONL）。轨迹写入的任何异常
+    都被吞掉 —— 观测/取证设施故障绝不允许影响任务执行，也绝不允许
+    "因为写不进日志" 把真实任务判成失败。
+    """
     etype = event.get("type") or ""
     if not etype:
         return
     sid = session_id or "default"
+
+    try:
+        _trace_event(sid, event)
+    except Exception:            # pragma: no cover - 防御性
+        pass
 
     if etype == "task_start":
         if len(_graphs) >= MAX_SESSIONS and sid not in _graphs:
@@ -244,5 +323,7 @@ def reset(session_id: str | None = None) -> None:
     """清空某会话（或全部）的图 —— 仅测试与会话销毁时使用。"""
     if session_id is None:
         _graphs.clear()
+        _trace_runs.clear()
     else:
         _graphs.pop(session_id, None)
+        _trace_runs.pop(session_id, None)

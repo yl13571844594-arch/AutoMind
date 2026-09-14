@@ -217,6 +217,12 @@ class AutoMindAgent:
         # ── 当前会话状态 ─────────────────────────
         self._current_plan: HierarchicalPlan | None = None
         self._agent_state = AgentState()
+        #: 会话标识（Web 层注入；决定轨迹分文件与目录级隔离的工作副本）
+        self.session_id: str = ""
+        #: 最近一次工作区准备结果（isolated=False 时表示仍在共享目录）
+        self._workspace_plan: Any = None
+        #: 最近一次闭环的证据摘要（验收来源/产物断言/各环节是否真正执行）
+        self._verify_state: dict[str, Any] = {}
         self._mode: ExecutionMode = ExecutionMode(self.config.execution.mode)
         # 上层交互模式（对话/工作/编程），默认对话
         self._interaction: InteractionMode = InteractionMode.CHAT
@@ -309,6 +315,28 @@ class AutoMindAgent:
             5. 验证与反思
             6. 返回结果
         """
+        # 会话身份 + （可选的）私有工作目录 —— 两者都经 contextvar 下发到
+        # 工具边界，使并发会话的文件写入不再互相覆盖，也让轨迹能按会话切分。
+        from automind.core import session_ctx as _sctx
+
+        sid = getattr(self, "session_id", "") or "default"
+        plan = self._prepare_workspace(sid)
+        with _sctx.bind_session(sid, run_id=_sctx.new_run_id("run"),
+                                workspace=plan.path if plan.isolated else None):
+            return await self._run_impl_bound(user_input, plan)
+
+    def _prepare_workspace(self, sid: str) -> Any:
+        """按配置准备会话工作目录（未开启隔离时返回共享 project_root）。"""
+        from automind.core import workspace as _ws
+
+        plan = _ws.prepare(sid, self.config.project_root, self.config.execution)
+        self._workspace_plan = plan
+        if plan.reason and not plan.isolated:
+            logger.info("workspace_isolation_skipped", session=sid,
+                        reason=plan.reason)
+        return plan
+
+    async def _run_impl_bound(self, user_input: str, plan: Any) -> AgentResult:
         start_time = time.perf_counter()
         backtracks = 0
         errors_corrected = 0
@@ -386,15 +414,50 @@ class AutoMindAgent:
             )
             success = bool(plan_done or quality.overall_pass)
         elif self._mode == ExecutionMode.REACT:
-            # ReAct/编程模式：只要产出了实质答案（非迭代上限兜底）即视为成功
-            produced = bool(result_text and "最大迭代步数" not in result_text)
+            # ReAct/编程模式：产出了实质答案即视为成功。
+            # v1.6.4：优先用执行器给出的**结构化停止原因**，而不是靠匹配
+            # 回复文本里有没有"最大迭代步数"几个字 —— 那种判定既脆弱
+            # （模型自己复述这几个字就会被误判失败）又无法区分
+            # "到达上限"与"被取消/异常中断"。文本匹配仅作为兜底保留。
+            ex = getattr(self, "react_executor", None)
+            reason = getattr(ex, "stop_reason", "") if ex is not None else ""
+            if reason:
+                produced = reason == "no_more_tools" and bool(result_text)
+            else:
+                produced = bool(result_text and "最大迭代步数" not in result_text)
             success = bool(produced or quality.overall_pass)
         else:
             success = quality.overall_pass
 
+        # 收尾事件：把工作区、验收证据与省 token 总账推给观测与轨迹。
+        # 这三样此前都只活在各自的模块里，落盘证据里一条都看不到。
+        try:
+            ev: dict[str, Any] = {"type": "run_summary", "success": success,
+                                  "duration_ms": round(duration, 1),
+                                  "steps": len(step_results) if step_results else 0}
+            wp = getattr(self, "_workspace_plan", None)
+            if wp is not None:
+                ev["workspace"] = wp.as_dict()
+            if self._verify_state:
+                ev["verify"] = self._verify_state
+            rs = getattr(self, "react_executor", None)
+            if rs is not None:
+                ev["react"] = rs.token_report()
+            await self._emit(ev)
+        except Exception as e:                        # pragma: no cover - 纯观测
+            logger.warning("run_summary_emit_failed", error=str(e))
+
+        out_text = result_text
+        if self._workspace_plan is not None and self._workspace_plan.isolated:
+            out_text += (
+                f"\n\n---\n📁 本次任务在**会话独立工作目录**中执行："
+                f"`{self._workspace_plan.path}`\n"
+                f"（为避免并发覆盖，改动没有直接写进你的项目目录。"
+                f"需要取回产物请在该目录查看，或调用工作区导出。）")
+
         return AgentResult(
             success=success,
-            output=result_text,
+            output=out_text,
             plan=self._current_plan,
             steps_executed=len(step_results) if step_results else 0,
             errors_corrected=errors_corrected,
@@ -544,23 +607,240 @@ class AutoMindAgent:
                                 max_iterations=max_iterations)
 
     async def _loop_verify(self, task: str, output: str) -> dict:
-        """观察阶段 — 让模型判断任务是否真正完成，并给出修正方向。"""
+        """观察阶段 — 验收是否真正完成。
+
+        v1.6.3 及更早：把 ``output[:2500]`` 交给 LLM 做文本自评，``done?`` 由
+        同一个模型说了算；且**任何异常**（网络抖动、JSON 解析失败、模型返回
+        废话）都落进 ``except: pass``，然后返回
+        ``{"done": False, "reason": "无法判定，继续尝试。"}`` —— 调用方把它当成
+        「验收未通过」，于是白烧最多 ``auto_verify_max_rounds`` 轮修复 token，
+        最后还给用户报一个「验收未过 ✗」。**验收设施故障被记成了任务失败**。
+
+        现在分两段判定，并显式区分「通过 / 未通过 / 验收不可用」：
+
+          1. **确定性断言（产物级，不花 token）**：从任务与执行结果里抽出
+             被声称产生的文件路径，逐个核验是否**真的存在**、是否为**空文件**、
+             以及声明的关键词是否真的出现在内容里。任一断言失败 → 直接判未
+             完成，LLM 无权推翻（自评"自嗨通过"从此过不去）。
+          2. **语义判定**：再由 LLM 判断剩余部分是否完成；LLM 调用/解析失败
+             时返回 ``available=False``，调用方据此**不进入修复轮**、也不再
+             谎报"验收未过"，而是如实说明"验收不可用"。
+
+        Returns:
+            ``{"done": bool, "available": bool, "reason": str,
+            "artifacts": {...}, "source": str}``
+        """
         from automind.core.json_utils import extract_json
+
+        artifacts = self._verify_artifacts(task, output)
+        await self._emit({"type": "verify_evidence", "artifacts": artifacts})
+
+        if artifacts["checked"] and not artifacts["passed"]:
+            return {
+                "done": False, "available": True, "source": "artifact",
+                "artifacts": artifacts,
+                "reason": "产物断言未通过：" + "；".join(artifacts["failures"])[:800],
+            }
+
         prompt = (
             f"你是严格的验收员。判断下面的任务是否已真正完成且正确。\n\n"
             f"任务：{task}\n\n执行结果：\n{output[:2500]}\n\n"
-            f'只输出 JSON：{{"done": true 或 false, '
-            f'"reason": "若未完成，明确说明还差什么、下一步如何修正"}}'
+        )
+        if artifacts["checked"]:
+            prompt += (
+                "以下**客观事实**已由系统核验，不要推翻，也不要要求重新生成：\n"
+                + "\n".join(f"- {c}" for c in artifacts["claims"])
+                + "\n\n"
+            )
+        prompt += (
+            '只输出 JSON：{"done": true 或 false, '
+            '"reason": "若未完成，明确说明还差什么、下一步如何修正"}'
         )
         try:
             resp = await self.llm.generate([{"role": "user", "content": prompt}])
             data = extract_json(resp.text)
-            if isinstance(data, dict):
-                return {"done": bool(data.get("done")),
-                        "reason": str(data.get("reason", ""))[:600]}
+            if isinstance(data, dict) and "done" in data:
+                return {
+                    "done": bool(data.get("done")), "available": True,
+                    "source": "llm", "artifacts": artifacts,
+                    "reason": str(data.get("reason", ""))[:600],
+                }
+            detail = "模型未按 JSON 格式作答"
+        except Exception as e:
+            logger.warning("loop_verify_failed", error=f"{type(e).__name__}: {e}")
+            detail = f"验收调用异常（{type(e).__name__}）"
+
+        # 验收不可用：明确说"判不了"，而不是伪装成"没通过"。
+        # 调用方据此跳过修复轮 —— 拿不到反馈的修复轮纯属烧 token。
+        return {
+            "done": False, "available": False, "source": "unavailable",
+            "artifacts": artifacts,
+            "reason": f"{detail}，本次未做验收（不会据此判定任务失败）。",
+        }
+
+    # ── 产物级确定性验收（不花 token 的客观证据）────────────
+    #: 任务文本里出现这些词时，"文件真的存在"才成为硬性验收条件
+    _FILE_TASK_HINTS = ("文件", "脚本", "代码", "生成", "创建", "写入", "导出",
+                        "报告", "报表", "文档", "保存", "输出到", "保存到",
+                        "file", "script", "create", "write", "generate", "export")
+    #: 产物体积下限：小于此字节数视为"空壳产物"，不构成交付
+    _MIN_ARTIFACT_BYTES = 1
+    #: 单次验收最多核验的路径数（防止刷屏与长耗时）
+    _MAX_ARTIFACT_CLAIMS = 12
+
+    @classmethod
+    def _claimed_paths(cls, *texts: str) -> list[str]:
+        """从文本里抽出"被声称产生的文件路径"（去重、保序、限量）。
+
+        只认**带扩展名的相对/绝对路径**：像 ``automind/agent.py``、
+        ``report.docx``、``C:\\out\\a.csv``。没有扩展名的裸词（如 ``tests``）
+        不当作产物，避免把普通名词误判成"文件没生成"。
+        """
+        import re
+
+        seen: dict[str, None] = {}
+        # 反引号包裹、引号包裹、或裸路径
+        pattern = re.compile(
+            r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_\-./\\\u4e00-\u9fff]+"
+            r"\.(?:py|js|ts|tsx|jsx|json|ya?ml|toml|md|txt|csv|xlsx?|docx?|pptx?|"
+            r"pdf|html?|css|sql|sh|bat|ps1|ini|cfg|log|xml|zip|png|jpg|jpeg|svg)\b",
+            re.IGNORECASE,
+        )
+        for t in texts:
+            if not t:
+                continue
+            for m in pattern.findall(t or ""):
+                p = m.strip().strip("`\"'()[]{}，,。;；:：")
+                if not p or len(p) > 240:
+                    continue
+                low = p.lower()
+                if low.startswith(("http://", "https://", "data:")):
+                    continue
+                if any(x in low for x in (".pyc", "__pycache__", ".git/")):
+                    continue
+                if p not in seen:
+                    seen[p] = None
+                if len(seen) >= cls._MAX_ARTIFACT_CLAIMS:
+                    return list(seen)
+        return list(seen)
+
+    def _resolve_artifact(self, raw: str) -> Path:
+        """把声称的路径解析到真实位置（绝对路径 / 项目根 / 会话工作区）。"""
+        p = Path(raw)
+        if p.is_absolute():
+            return p
+        candidates = []
+        ws = None
+        try:
+            from automind.core.session_ctx import workspace as _ws
+
+            ws = _ws()
         except Exception:
-            pass
-        return {"done": False, "reason": "无法判定，继续尝试。"}
+            ws = None
+        if ws:
+            candidates.append(Path(ws) / raw)
+        candidates.append(Path(self.config.project_root) / raw)
+        candidates.append(Path.cwd() / raw)
+        for c in candidates:
+            if c.exists():
+                return c
+        return candidates[-1]
+
+    def _verify_artifacts(self, task: str, output: str) -> dict[str, Any]:
+        """产物级确定性断言 —— 把"模型说做了"变成"磁盘上真有"。
+
+        核验三类事实（全部不花 token）：
+          · 声称的文件是否**存在**；
+          · 是否**非空**（写了 0 字节不能算交付）；
+          · 任务里点名的关键词（``X 里要包含 Y`` 之类）是否**真的出现在内容里**。
+
+        判定口径（保守，避免误报失败）：
+          · **只有任务本身在要文件**时才把"文件不存在"当硬失败 ——
+            纯问答/分析类任务提到一个路径名不该因此判败；
+          · 任务里直接出现的具体路径（``生成 report.md``）比结果里顺带提及的
+            路径要求更严：前者必查，后者仅在任务指向文件时才算。
+        """
+        import re
+
+        task_lower = (task or "").lower()
+        task_wants_file = any(h in task_lower for h in self._FILE_TASK_HINTS)
+        # 任务里显式点名的路径：这些是"要求"，缺失即失败
+        required = self._claimed_paths(task)
+        # 结果里声称产出的路径：任务指向文件时才算数
+        claimed = self._claimed_paths(output)
+        targets: list[tuple[str, bool]] = []
+        seen: set[str] = set()
+        for p in required:
+            if p not in seen:
+                targets.append((p, True))
+                seen.add(p)
+        for p in claimed:
+            if p not in seen:
+                targets.append((p, task_wants_file))
+                seen.add(p)
+
+        # 任务中点名的、要求出现在产物里的关键词（"包含 X" / "must contain X"）
+        wanted: list[str] = []
+        for m in re.finditer(r"(?:包含|含有|带上|写明|写入|含)\s*[「\"']?([^\s，,。；;、\"'」]{2,40})",
+                             task or ""):
+            term = m.group(1).strip()
+            if term and term not in wanted:
+                wanted.append(term)
+        for m in re.finditer(r"(?:must\s+(?:contain|include))\s+[`\"']?([^\s,;\`\"']{2,40})",
+                             task or "", re.IGNORECASE):
+            term = m.group(1).strip()
+            if term and term not in wanted:
+                wanted.append(term)
+        wanted = wanted[:5]
+
+        claims: list[str] = []
+        failures: list[str] = []
+        checked = 0
+        for raw, mandatory in targets:
+            path = self._resolve_artifact(raw)
+            checked += 1
+            if not path.exists():
+                note = f"声称的文件不存在：{raw}"
+                if mandatory:
+                    failures.append(note)
+                    claims.append(f"✗ {note}")
+                else:
+                    claims.append(f"· {note}（任务未明确要求该文件，不计为失败）")
+                continue
+            try:
+                size = path.stat().st_size
+            except OSError as e:
+                claims.append(f"· 无法读取 {raw} 的大小：{e}")
+                continue
+            if size <= self._MIN_ARTIFACT_BYTES:
+                failures.append(f"文件为空（{size} 字节），不算交付：{raw}")
+                claims.append(f"✗ 文件为空：{raw}")
+                continue
+            note = f"✓ 文件存在且非空：{raw}（{size} 字节）"
+            if wanted and path.suffix.lower() in (
+                    ".md", ".txt", ".py", ".json", ".csv", ".html", ".yml", ".yaml"):
+                try:
+                    body = path.read_text(encoding="utf-8", errors="replace")
+                except Exception:
+                    body = ""
+                if body:
+                    missing = [w for w in wanted if w not in body]
+                    if missing:
+                        failures.append(
+                            f"{raw} 中未找到任务要求的内容：{'、'.join(missing)}")
+                        note += f"；✗ 缺少关键词 {'、'.join(missing)}"
+                    else:
+                        note += f"；✓ 含要求关键词 {'、'.join(wanted)}"
+            claims.append(note)
+
+        return {
+            "checked": checked,
+            "passed": not failures,
+            "failures": failures,
+            "claims": claims,
+            "required": required,
+            "task_wants_file": task_wants_file,
+        }
 
     async def _emit(self, event: dict) -> None:
         """向执行过程事件回调推送一条事件（无回调时静默）。"""
@@ -803,22 +1083,37 @@ class AutoMindAgent:
 
     async def _run_react(self, task: str, context: str) -> str:
         """ReAct 模式执行。"""
+        from automind.tools.output_budget import limits_from_config
+
+        ex = self.config.execution
         # 每次重建以注入最新的权限/审批回调
         self.react_executor = ReActExecutor(
             self.llm, self.tool_registry,
-            max_iterations=self.config.execution.max_iterations,
+            max_iterations=ex.max_iterations,
             permissions=self.permissions,
             approval_cb=self.approval_callback,
-            auto_validate=self.config.execution.auto_test,  # TDD 内环开关
+            auto_validate=ex.auto_test,  # TDD 内环开关
             # 工具 schema 每一步都要重发；只发与任务相关的那批（0 = 不限）
-            tool_budget=getattr(self.config.execution, "react_tool_budget", 14),
+            tool_budget=getattr(ex, "react_tool_budget", 14),
+            # 工具结果进上下文前的体积上限（默认 12000 字符）——
+            # 当前轮新产生的大输出必须在这里先夹住，折叠来不及救
+            output_limits=limits_from_config(ex),
+            # 历史观察折叠时每条保留的字符数（可配，便于按成本调参；0 = 类默认）
+            obs_keep_chars=(getattr(ex, "compact_keep_obs_chars", 0) or None),
         )
         # 编程模式下注入面向编程的引导
         if self._interaction == InteractionMode.CODING:
             context = f"{self.CODING_SYSTEM_PROMPT}\n\n{context}"
         on_thought, on_action = self._react_callbacks()
-        return await self.react_executor.run(
+        text = await self.react_executor.run(
             task, context, on_thought=on_thought, on_action=on_action)
+        # 省 token 总账推给观测/前端：让"长任务越跑越省"看得见、可调参
+        try:
+            rep = self.react_executor.token_report()
+            await self._emit({"type": "react_savings", **rep})
+        except Exception as e:                    # pragma: no cover - 纯观测
+            logger.warning("react_savings_emit_failed", error=str(e))
+        return text
 
     async def _run_plan_execute(self, task: str, context: str) -> tuple[HierarchicalPlan, list[Any]]:
         """Plan-and-Execute 模式执行。"""
@@ -1161,16 +1456,30 @@ class AutoMindAgent:
         clone._mode = self._mode
         clone._interaction = self._interaction
         clone._chat_history = []
+        # 会话标识与工作区结果按会话独享（共享的话并发会话会互相覆盖）
+        clone.session_id = ""
+        clone._workspace_plan = None
         return clone
 
     def _register_default_tools(self) -> None:
         """注册默认工具。"""
-        self.tool_registry.register(TerminalTool(workdir=self.config.project_root))
-        # 文件工具开启路径穿越防护：所有读写限定在 project_root 之内
+        ex = self.config.execution
+        timeout = float(getattr(ex, "tool_timeout_seconds", 300.0))
+        self.tool_registry.register(TerminalTool(
+            workdir=self.config.project_root,
+            timeout=timeout,
+            max_timeout=float(getattr(ex, "tool_timeout_max_seconds", 1800.0)),
+            background_enabled=bool(getattr(ex, "terminal_background_enabled", True)),
+        ))
+        # 后台通道的取回入口 —— 与 terminal(background=True) 成对交付
+        from automind.tools.terminal import TerminalBackgroundTool as _TBG
+        self.tool_registry.register(_TBG())
+        # 文件工具开启路径穿越防护：所有读写限定在 project_root 之内。
+        # v1.6.4：会话身份经 contextvar 传给工具（registry 在克隆间共享，
+        # 直接往工具实例上挂 session 会被并发会话互相覆盖）。
         _root = self.config.project_root
-        self.tool_registry.register(FileReadTool(project_root=_root))
-        self.tool_registry.register(FileWriteTool(project_root=_root))
-        self.tool_registry.register(FileEditTool(project_root=_root))
+        for cls in (FileReadTool, FileWriteTool, FileEditTool):
+            self.tool_registry.register(cls(project_root=_root))
         self.tool_registry.register(PythonSandboxTool())
         # 浏览器 / 网页能力
         try:
@@ -1324,41 +1633,86 @@ class AutoMindAgent:
 
         仅作用于 工作/编程 模式；各环节由 ExecutionConfig 开关控制（默认全开）。
         返回可能被补充轮更新过的最终输出（末尾附闭环摘要）。
+
+        **失败不得静默化**（v1.6.4 的核心修正）：每个环节都区分三种结局 ——
+        通过 / 未通过 / **设施不可用**。设施不可用时如实标注"未执行"，
+        既不伪装成通过（伪造结论），也不伪装成未通过（白烧修复轮 token）。
         """
         ex = self.config.execution
         summary: list[str] = []
         issues: list[str] = []
+        #: 某一环"跑都没跑成"时置位 —— 决定摘要措辞与最终的诚实度
+        degraded: list[str] = []
+        #: 留档：每一环的真实结局（落盘证据里要能看出"这环到底跑没跑"）
+        evidence: dict[str, Any] = {"review": None, "verify": None, "tdd": None}
 
         # ① TDD：编程模式跑项目级测试（若存在 tests/）
         if ex.auto_test and self._interaction == InteractionMode.CODING:
             t = await self._run_project_tests()
             if t is not None:
-                summary.append("测试" + ("通过 ✓" if t["passed"] else "未通过 ✗"))
-                if not t["passed"]:
-                    issues.append(f"项目测试未通过：{t['detail'][:600]}")
+                if t.get("unavailable"):
+                    summary.append("测试未能运行 ⚠")
+                    degraded.append("项目测试")
+                else:
+                    summary.append("测试" + ("通过 ✓" if t["passed"] else "未通过 ✗"))
+                    if not t["passed"]:
+                        issues.append(f"项目测试未通过：{t['detail'][:600]}")
+                evidence["tdd"] = {"passed": t.get("passed"),
+                                   "unavailable": bool(t.get("unavailable")),
+                                   "detail": str(t.get("detail", ""))[:400]}
                 await self._emit({"type": "autopilot", "stage": "tdd",
-                                  "passed": t["passed"], "detail": t["detail"][:300]})
+                                  "passed": t.get("passed"),
+                                  "unavailable": bool(t.get("unavailable")),
+                                  "detail": str(t.get("detail", ""))[:300]})
 
         # ② 多 Agent 审查：工作模式由审阅者角色复核（共享只读工具，含 MCP）
         if ex.auto_review and self._interaction == InteractionMode.WORK \
                 and self.llm is not None:
             rv = await self._review_result(task, output)
-            summary.append("审查" + ("通过 ✓" if rv["approved"] else "有意见 ⚠"))
-            if not rv["approved"] and rv["issues"]:
-                issues.append("审阅者意见：" + rv["issues"][:600])
+            if rv.get("available"):
+                summary.append("审查" + ("通过 ✓" if rv["approved"] else "有意见 ⚠"))
+                if not rv["approved"] and rv["issues"]:
+                    issues.append("审阅者意见：" + rv["issues"][:600])
+            else:
+                # 审查设施故障：不能记成"审查通过 ✓"（伪造），
+                # 也不能记成"审查未通过"（审查压根没发生）
+                summary.append("审查未执行（设施不可用）⚠")
+                degraded.append("多 Agent 审查")
+            evidence["review"] = {"approved": rv.get("approved"),
+                                  "available": bool(rv.get("available")),
+                                  "error": str(rv.get("error", ""))[:300],
+                                  "issues": str(rv.get("issues", ""))[:400]}
             await self._emit({"type": "autopilot", "stage": "review",
-                              "approved": rv["approved"], "issues": rv["issues"][:300]})
+                              "approved": rv.get("approved"),
+                              "available": bool(rv.get("available")),
+                              "error": str(rv.get("error", ""))[:200],
+                              "issues": str(rv.get("issues", ""))[:300]})
 
-        # ③ Loop 验收：语义判定是否真正完成；未过则带反馈补充修复轮
+        # ③ Loop 验收：产物断言 + 语义判定；未过则带反馈补充修复轮
         if ex.auto_verify and self.llm is not None:
             rounds = 0
             while True:
                 verdict = await self._loop_verify(task, output)
+                available = bool(verdict.get("available", True))
                 done = bool(verdict.get("done")) and not issues
                 await self._emit({"type": "autopilot", "stage": "verify", "done": done,
-                                  "round": rounds, "reason": str(verdict.get("reason", ""))[:300]})
+                                  "available": available, "round": rounds,
+                                  "source": str(verdict.get("source", ""))[:20],
+                                  "reason": str(verdict.get("reason", ""))[:300]})
+                evidence["verify"] = {
+                    "done": done, "available": available, "rounds": rounds,
+                    "source": verdict.get("source"),
+                    "reason": str(verdict.get("reason", ""))[:400],
+                    "artifacts": verdict.get("artifacts"),
+                }
                 if done:
                     summary.append("验收通过 ✓")
+                    break
+                if not available:
+                    # 验收设施故障：不进修复轮（拿不到反馈的修复轮纯烧 token，
+                    # 而且最后还会谎报"验收未过 ✗"）。如实说明并结束。
+                    summary.append("验收未执行（验收设施不可用）⚠")
+                    degraded.append("Loop 验收")
                     break
                 if rounds >= ex.auto_verify_max_rounds:
                     summary.append(f"验收未过（已修复 {rounds} 轮）✗")
@@ -1377,10 +1731,26 @@ class AutoMindAgent:
 
         if summary:
             output = f"{output}\n\n---\n🔄 自主闭环：{' · '.join(summary)}"
+            if degraded:
+                output += (
+                    f"\n（说明：{'、'.join(degraded)}环节因设施异常未真正执行，"
+                    f"以上结论不含该环节的判断，请勿据此认为已通过该项检查。）")
+        evidence["degraded"] = degraded
+        evidence["summary"] = summary
+        self._verify_state = evidence
         return output
 
     async def _review_result(self, task: str, output: str) -> dict:
-        """多 Agent 审查：审阅者角色复核结果，可调用只读工具核实（MCP 工具共享）。"""
+        """多 Agent 审查：审阅者角色复核结果，可调用只读工具核实（MCP 工具共享）。
+
+        返回 ``{"approved": bool, "available": bool, "issues": str, "error": str}``。
+
+        ``available=False`` 表示**审查设施本身没跑成**（模型不可用、返回不是
+        JSON、只读核实过程中异常）—— 这与"审阅者看过并认为有问题"是两回事。
+        v1.6.3 及更早把所有异常都吞成 ``{"approved": True}``，于是模型一挂、
+        网络一抖，闭环摘要是照样一句「审查通过 ✓」：**设施故障被伪装成通过**，
+        用户看到的是一个从未发生过的审查结论。
+        """
         from automind.core.json_utils import extract_json
         from automind.core.prompts import ROLE_PROMPTS
 
@@ -1416,25 +1786,39 @@ class AutoMindAgent:
                                      "content": f"[工具 {tc.name} 结果] {str(out)[:800]}"})
                 resp = await self.llm.generate(messages)
             data = extract_json(resp.text)
-            if isinstance(data, dict):
-                return {"approved": bool(data.get("approved")),
-                        "issues": str(data.get("issues", ""))[:800]}
+            if isinstance(data, dict) and "approved" in data:
+                return {"approved": bool(data.get("approved")), "available": True,
+                        "issues": str(data.get("issues", ""))[:800], "error": ""}
+            detail = "审阅者未按 JSON 格式作答"
         except Exception as e:
-            logger.warning("autopilot_review_failed", error=str(e))
-        return {"approved": True, "issues": ""}  # 审查异常不阻断主流程
+            detail = f"{type(e).__name__}: {e}"
+        logger.warning("autopilot_review_unavailable", error=detail)
+        # 不阻断主流程，但**如实标注不可用** —— 调用方据此说"未执行审查"，
+        # 而不是把它记成"审查通过"。
+        return {"approved": False, "available": False, "issues": "", "error": detail}
 
     async def _run_project_tests(self) -> dict | None:
-        """TDD 收尾：项目存在测试时运行 pytest，返回 {passed, detail}；无测试返回 None。"""
+        """TDD 收尾：项目存在测试时运行 pytest。
+
+        返回 ``{passed, detail}``；无测试返回 None；**测试设施跑不起来**
+        （终端工具缺失/超时/被拒）返回 ``{unavailable: True, detail}`` ——
+        v1.6.3 及更早这里 ``except`` 后返回 None，"测试跑不起来"与"项目里
+        没有测试"因此在摘要里长得一模一样（都不出声）。现在两者可区分。
+        """
         root = Path(self.config.project_root)
         has_tests = (root / "tests").is_dir() or bool(list(root.glob("test_*.py")))
         if not has_tests:
             return None
+        timeout = float(getattr(self.config.execution, "tool_timeout_seconds", 300.0))
         try:
             result = await self.tool_registry.dispatch(
                 "terminal",
                 command="python -m pytest -q --tb=line -x",
-                workdir=str(root), timeout=180,
+                workdir=str(root), timeout=max(180.0, timeout),
             )
+            if getattr(result, "timed_out", False):
+                return {"passed": False, "unavailable": True,
+                        "detail": f"测试超时未完成：{str(result.error)[:300]}"}
             out = ""
             if isinstance(result.output, dict):
                 out = (result.output.get("stdout") or "") + "\n" + \
@@ -1442,10 +1826,11 @@ class AutoMindAgent:
             passed = bool(result.success)
             # 提取摘要行（"N passed" / "N failed"）
             tail = "\n".join(line for line in out.strip().splitlines()[-5:] if line.strip())
-            return {"passed": passed, "detail": tail[:800]}
+            return {"passed": passed, "detail": tail[:800] or "（无输出）"}
         except Exception as e:
-            logger.warning("autopilot_test_failed", error=str(e))
-            return None
+            logger.warning("autopilot_test_unavailable", error=str(e))
+            return {"passed": False, "unavailable": True,
+                    "detail": f"无法运行项目测试：{type(e).__name__}: {e}"}
 
 
 class _CodeGenerateTool:

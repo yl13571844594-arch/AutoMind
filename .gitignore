@@ -47,6 +47,9 @@ analytics-service/
 *.rar
 *.zip
 *.7z
+# 本地回归跑出来的临时输出（只对当时那次跑有意义，入库就是别人的过期噪声）
+pytest_out.txt
+pytest_*.log
 
 # 内部操作文档（不进公开仓库）
 GITHUB.md

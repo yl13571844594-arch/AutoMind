@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.6.3</title>
+<title>AutoMind 使用手册 — v1.6.4</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.6.3</div>
+  <div class="ver">使用手册 · v1.6.4</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.6.3</b></span>
+    <span class="chip">版本 <b>v1.6.4</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -942,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.3</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.6.4</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1062,8 +1062,56 @@ automind --list-skills    automind --list-providers</code></pre>
 
   <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.6.3</span><span class="cl-date">2026-08-22</span>
+      <span class="cl-ver">v1.6.4</span><span class="cl-date">2026-09-11</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">失败不再伪装成成功；看不见的损失全部留痕</div>
+    <ul>
+      <li><b>🧐 审查系统故障不再显示「审查通过 ✓」</b>：以前模型一挂、网络一抖，闭环
+        摘要照样打印「审查通过 ✓」—— 那是一个<b>从未发生过的审查结论</b>。现在会明确
+        写「审查未执行（设施不可用）」，并提示不要据此认为已通过该项检查。</li>
+      <li><b>✅ 验收系统故障不再白烧修复轮次</b>：以前验收调不动时会连跑最多 2 轮
+        「自动修复」，最后还告诉你「验收未过 ✗」。现在如实说「本次未做验收」，
+        <b>不再空烧 token，也不再谎报不通过</b>。</li>
+      <li><b>📄 验收会真的去查文件</b>：「模型说做了」必须对上「磁盘上真有」——
+        文件是否存在、是否为空（0 字节不算交付）、你点名要求包含的内容是否真的在里面。
+        这几项由系统直接核验，<b>模型无权推翻</b>，「自评通过」糊弄不过去了。</li>
+      <li><b>🎯 失败原因不再笼统</b>：以前只说「重试 N 次仍失败」，现在是工具报的真实原因。</li>
+      <li><b>🧾 每一步都留档（执行轨迹）</b>：以前重启服务就查不到这次任务做过什么，日志里
+        只有网页访问记录。现在每次任务的每一步都会写成可下载的 JSONL 证据：调了哪些工具、
+        参数是什么、成功还是失败、耗时多少。<b>通用设置 → 观测与轨迹</b>里可以直接看占用、
+        看事件尾部、一键下载（排障时贴进工单即可）。密钥、token 等敏感字段一律脱敏；
+        轨迹写不进去也绝不会影响任务本身。</li>
+      <li><b>🗂 两个会话改同一个文件不再静默互相覆盖</b>：以前 A 的回滚会把 B 的成果一起
+        恢复掉，全程无声。现在同一文件的写入会串行化；要覆盖一个「别的会话刚改过、
+        你这边没读过」的文件时会明确提示（可选择「冲突即拒绝」）。读取文件时会返回内容
+        指纹，写入时声明「我只改我读到的那一版」，被人改过就直接失败并回显当前内容。
+        需要强隔离时还可以打开<b>会话独立工作目录</b>（默认关闭，因为它会改变产物落点）。</li>
+      <li><b>📋 跑不完也会告诉你做成了什么</b>：以前跑到迭代上限或你点了停止，只留一句
+        「已达最大迭代步数」，已完成的工作全丢。现在给出<b>部分交付清单</b>：已完成哪些
+        动作、<b>生成了哪些文件</b>、卡在哪一步、建议下一步怎么做。</li>
+      <li><b>🛡 一个步骤崩了不再连累其它步骤</b>：并行执行时某个工具偶发异常，以前会导致
+        同一批里已经跑完的成果一起丢失、整单判失败。现在异常被就地隔离，其余成果照常保留
+        并如实报告。</li>
+      <li><b>✂️ 大输出不再撑爆上下文</b>：一次大文件读取或几千行命令输出，以前会被原样塞进
+        下一轮请求并反复重发。现在会智能截断（保留开头和结尾 —— 报错和结论都在尾部），
+        并告诉模型「怎么才能拿到完整内容」，而不是原样重试。</li>
+      <li><b>🔍「越跑越省」看得见</b>：压缩节省了多少、省了多少 token，现在都有账目可查。</li>
+      <li><b>⏱ 长命令不再「超时即白跑」</b>：默认等待时间从 2 分钟提到 5 分钟且可调；超时
+        回执会明确告诉你「不要原样重跑、可以加大 timeout」；安装/编译/长测试这类命令可以
+        <b>放到后台跑</b>，期间继续做别的步骤，稍后再取结果 —— 不会再被超时杀掉。</li>
+      <li><b>🎫 等审批不再白占名额</b>：审批弹窗挂起期间会释放并发名额，不再把别的任务挡在
+        门外；超时处置（自动拒绝 / 自动批准）与等待时长都可以在设置里调。</li>
+      <li><b>顺手修掉的真实缺陷</b>：会话工作副本在某些目录配置下会「把自己拷进自己」，
+        最终因路径过长而<b>静默降级</b>为共享目录（你以为开了隔离其实没开）；后台任务一度
+        「杀不掉」（进程句柄还没建立就返回了 task_id），以及终止时可能挂住整个服务 ——
+        两处都已修。</li>
+    </ul>
+  </div>
+
+  <div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.6.3</span><span class="cl-date">2026-08-22</span>
     </div>
     <div class="cl-sum">别再为看不见的东西付钱；长会话与长任务不再卡</div>
     <ul>
@@ -1455,7 +1503,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.6.3 同步 ·
+  AutoMind 使用手册 · 与软件 v1.6.4 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

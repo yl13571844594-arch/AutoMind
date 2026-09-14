@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from automind.core.logging import get_logger
@@ -12,6 +13,7 @@ from automind.core.types import (
 )
 from automind.tools.base import ToolRegistry
 from automind.tools.function_calling import FunctionCallHandler
+from automind.tools.output_budget import limits_from_config
 
 logger = get_logger("automind.react")
 
@@ -53,10 +55,14 @@ class ReActExecutor:
         approval_cb: Any = None,
         auto_validate: bool = True,
         tool_budget: int | None = None,
+        output_limits: dict[str, int] | None = None,
+        obs_keep_chars: int | None = None,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
-        self.fn_handler = FunctionCallHandler(tool_registry)
+        #: 工具结果进上下文前的体积限额（v1.6.4：当前轮的大输出也必须夹住）
+        self.output_limits = output_limits or limits_from_config()
+        self.fn_handler = FunctionCallHandler(tool_registry, self.output_limits)
         self.max_iterations = max_iterations
         self.stop_on_no_tools = stop_on_no_tools
         self.permissions = permissions
@@ -76,11 +82,21 @@ class ReActExecutor:
         self.messages: list[dict[str, Any]] = []
         #: run() 是否正在进行中（上层据此判断"现在压缩压得到实处吗"）
         self.running = False
-        #: 供上层观测：工具下发与压缩的账
+        #: 供上层观测：工具下发 / 压缩 / 截断的账
         self.token_savings: dict[str, Any] = {
             "tools_total": 0, "tools_sent": 0, "tools_expanded": [],
             "compactions": 0, "chars_reclaimed": 0,
+            "truncated_results": 0, "chars_dropped": 0,
         }
+        #: 结束原因：no_more_tools（模型认为完成）| max_iterations | error
+        self.stop_reason = ""
+        #: 已完成的迭代数（增量进度，上限耗尽时用于交代"跑到第几步"）
+        self.iterations_used = 0
+        #: 中途异常的说明（非空表示被中断而非正常收尾）
+        self.interrupted_reason = ""
+        #: 旧观察折叠时每条保留的字符数（None = 类默认；可配）
+        self.obs_keep_chars = (self.OBS_KEEP_CHARS if obs_keep_chars is None
+                               else int(obs_keep_chars))
 
     _CODE_TOOLS = ("file_write", "file_edit", "file_multi_edit")
 
@@ -325,21 +341,28 @@ class ReActExecutor:
 
         只折叠旧观察的正文、不删消息：assistant(tool_calls) 与 tool 结果必须
         成对出现，随手删几条会让下一次请求直接被 API 判为非法。
+
+        v1.6.4：每条保留的字符数由 ``obs_keep_chars`` 配置（默认 240），并把
+        「压缩率 / 折叠字符数 / 估算 token 节省」一并算进返回账目，供观测中心
+        展示 —— 让"长任务越跑越省"这件事可以被看见、也可以被调参。
         """
         keep = self.COMPACT_KEEP_RECENT if keep_recent is None else keep_recent
+        keep_chars = max(40, int(self.obs_keep_chars))
         msgs = self.messages
         cutoff = max(0, len(msgs) - keep)
         reclaimed = 0
         folded = 0
+        before_chars = sum(len(m.get("content") or "") for m in msgs
+                           if isinstance(m.get("content"), str))
         for m in msgs[:cutoff]:
             if m.get("role") != "tool":
                 continue
             content = m.get("content")
-            if not isinstance(content, str) or len(content) <= self.OBS_KEEP_CHARS:
+            if not isinstance(content, str) or len(content) <= keep_chars:
                 continue
             if self.FOLD_MARK in content:
                 continue                       # 已经折过了，别再折一次
-            head = content[: self.OBS_KEEP_CHARS]
+            head = content[: keep_chars]
             dropped = len(content) - len(head)
             reclaimed += dropped
             folded += 1
@@ -347,13 +370,43 @@ class ReActExecutor:
                 f"{head}\n{self.FOLD_MARK}，省略 {dropped} 字符。"
                 f"如仍需要完整内容，请重新调用相应工具。]"
             )
+        after_chars = sum(len(m.get("content") or "") for m in msgs
+                          if isinstance(m.get("content"), str))
+        stat: dict[str, Any] = {
+            "folded": folded, "chars_reclaimed": reclaimed,
+            "messages": len(msgs),
+            # 可观测的压缩账：压缩率与估算 token 节省（1 token ≈ 3.5 字符）
+            "chars_before": before_chars, "chars_after": after_chars,
+            "ratio": round(reclaimed / before_chars, 4) if before_chars else 0.0,
+            "est_tokens_saved": int(reclaimed / 3.5),
+            "keep_chars": keep_chars,
+        }
         if folded:
             self.token_savings["compactions"] += 1
             self.token_savings["chars_reclaimed"] += reclaimed
             logger.info("react_context_compacted", folded=folded,
-                        chars_reclaimed=reclaimed, messages=len(msgs))
-        return {"folded": folded, "chars_reclaimed": reclaimed,
-                "messages": len(msgs)}
+                        chars_reclaimed=reclaimed, messages=len(msgs),
+                        ratio=stat["ratio"])
+        return stat
+
+    def token_report(self) -> dict[str, Any]:
+        """本轮 ReAct 的省 token 总账（下发预算 + 历史折叠 + 单条截断）。
+
+        观测中心把它作为 ``context_compacted`` / ``tool_output_truncated``
+        事件的汇总推送 —— 此前只有"预算 80% 了"这一个信号，看不到
+        "到底省下来多少、还能不能再省"。
+        """
+        fn = getattr(self, "fn_handler", None)
+        trunc = fn.savings_report() if fn is not None else {}
+        return {
+            **dict(self.token_savings),
+            "truncated_results": trunc.get("truncated_results", 0),
+            "chars_dropped": trunc.get("dropped_chars", 0),
+            "est_tokens_saved_truncation": trunc.get("est_tokens_saved", 0),
+            "iterations_used": self.iterations_used,
+            "max_iterations": self.max_iterations,
+            "stop_reason": self.stop_reason,
+        }
 
     async def run(
         self,
@@ -371,13 +424,124 @@ class ReActExecutor:
             on_action: 动作回调 (可选)。
 
         Returns:
-            最终答案文本。
+            最终答案文本。**上限耗尽 / 被中断时**返回的是"部分交付清单"
+            （已完成动作、已产出产物、卡在哪、建议下一步），而不是一句
+            "已达最大迭代步数" 就把用户手里的进度全丢掉。
         """
         self.running = True
+        self.stop_reason = ""
+        self.interrupted_reason = ""
+        self.iterations_used = 0
         try:
             return await self._run(task, context, on_thought, on_action)
+        except asyncio.CancelledError:
+            # 被取消（用户停止 / 会话关闭 / 超时）—— 同样要留下结构化进度，
+            # 否则用户只看到"任务没了"，不知道已经做成了什么。
+            self.stop_reason = "cancelled"
+            self.interrupted_reason = "任务被取消"
+            raise
+        except Exception as e:
+            self.stop_reason = "error"
+            self.interrupted_reason = f"{type(e).__name__}: {e}"
+            raise
         finally:
             self.running = False
+
+    #: 清单里最多列出的动作条数（太长没人看，也太占上下文）
+    MANIFEST_MAX_ACTIONS = 40
+
+    def _manifest_action(self, tc: ToolCall, result: ToolResult) -> dict[str, Any]:
+        """把一个动作整理成清单条目（含产物路径与失败原因）。"""
+        item: dict[str, Any] = {
+            "tool": tc.name,
+            "ok": bool(result.success),
+            "args": {k: str(v)[:120] for k, v in (tc.arguments or {}).items()},
+        }
+        out = result.output if result.success else result.error
+        if isinstance(out, dict):
+            for key in ("path", "output_file", "file", "saved_to", "url"):
+                if out.get(key):
+                    item["artifact"] = str(out[key])[:300]
+                    break
+            else:
+                item["output"] = str(out)[:160]
+        else:
+            item["output"] = str(out)[:160]
+        if not result.success:
+            item["error"] = str(result.error or "")[:200]
+        return item
+
+    def partial_report(self, task: str = "") -> dict[str, Any]:
+        """结构化「部分交付清单」—— ReAct 路径的对等 ExecutionReport。
+
+        Plan-Execute 路径失败时有 ``ExecutionReport``（每步成功/失败/重试），
+        ReAct 此前什么都没有：迭代上限耗尽时只回一段最后的思考加一句
+        "已达最大迭代步数"，中途被取消时更是什么都不留。用户既不知道
+        "做成了什么"，也不知道"卡在哪"，只能重跑一遍再烧一次 token。
+        """
+        done = [self._manifest_action(tc, r) for tc, r in self.actions]
+        ok = [a for a in done if a["ok"]]
+        failed = [a for a in done if not a["ok"]]
+        artifacts: list[str] = []
+        for a in ok:
+            p = a.get("artifact")
+            if p and p not in artifacts:
+                artifacts.append(p)
+        # 未闭合的失败：同一工具最后一次仍失败，说明这步没解决
+        open_failures: dict[str, str] = {}
+        for a in failed:
+            open_failures[a["tool"]] = a.get("error", "")
+        return {
+            "kind": "react",
+            "task": (task or "")[:300],
+            "stop_reason": self.stop_reason or "unknown",
+            "interrupted_reason": self.interrupted_reason,
+            "iterations_used": self.iterations_used,
+            "max_iterations": self.max_iterations,
+            "completed_actions": len(ok),
+            "failed_actions": len(failed),
+            "artifacts": artifacts[:50],
+            "open_failures": open_failures,
+            "actions": done[-self.MANIFEST_MAX_ACTIONS:],
+            "last_thought": (self.thoughts[-1][:800] if self.thoughts else ""),
+            "tokens": self.token_report(),
+        }
+
+    @staticmethod
+    def render_manifest(rep: dict[str, Any]) -> str:
+        """把部分交付清单渲染成给人/给模型看的中文文本。"""
+        lines = [
+            "",
+            "——— 部分交付清单（本次未跑完，以下为**已经真实发生**的动作）———",
+            f"· 停止原因：{rep.get('stop_reason', '')}"
+            + (f"（{rep['interrupted_reason']}）" if rep.get("interrupted_reason") else "")
+            + ("；即已达到最大迭代步数上限，任务可能尚未完成。"
+               if rep.get("stop_reason") == "max_iterations" else ""),
+            f"· 迭代进度：{rep.get('iterations_used', 0)}/{rep.get('max_iterations', 0)} 步",
+            f"· 成功动作：{rep.get('completed_actions', 0)} 个；"
+            f"失败动作：{rep.get('failed_actions', 0)} 个",
+        ]
+        arts = rep.get("artifacts") or []
+        if arts:
+            lines.append("· 已产出的文件/产物：")
+            lines += [f"    - {a}" for a in arts[:20]]
+        else:
+            lines.append("· 已产出的文件/产物：无（尚未落盘任何产物）")
+        openf = rep.get("open_failures") or {}
+        if openf:
+            lines.append("· 仍未解决的失败（卡在这里）：")
+            lines += [f"    - {k}: {str(v)[:160]}" for k, v in list(openf.items())[:8]]
+        acts = rep.get("actions") or []
+        if acts:
+            lines.append("· 动作明细（时间顺序，最后若干条）：")
+            for a in acts[-12:]:
+                mark = "✓" if a.get("ok") else "✗"
+                extra = a.get("artifact") or a.get("output") or a.get("error") or ""
+                lines.append(f"    {mark} {a.get('tool')}  {str(extra)[:140]}")
+        lines.append(
+            "· 下一步建议：可直接说「继续」，或指出要接着做的那一条；"
+            "若某个动作反复失败，请先修该失败的根因（见上方失败原因）再继续。")
+        return "\n".join(lines)
 
     async def _run(
         self,
@@ -404,8 +568,10 @@ class ReActExecutor:
 
         active_sig = frozenset(self._active_tools)
         tool_schemas = self._schemas()
+        trunc_before = self.fn_handler.savings_report()["truncated_results"]
 
         for iteration in range(self.max_iterations):
+            self.iterations_used = iteration + 1
             # 活跃工具集变了（模型点名要了某个休眠工具）→ 重建 schema 与目录
             if frozenset(self._active_tools) != active_sig:
                 active_sig = frozenset(self._active_tools)
@@ -426,6 +592,8 @@ class ReActExecutor:
             # 没有工具调用 → 任务完成
             if not response.tool_calls:
                 if self.stop_on_no_tools:
+                    self.stop_reason = "no_more_tools"
+                    await self._report_truncations(trunc_before)
                     return response.text
                 # 否则添加 assistant 消息并继续
                 messages.append({"role": "assistant", "content": response.text})
@@ -477,11 +645,30 @@ class ReActExecutor:
             )
             messages.extend(tool_messages)
 
-        # 达到迭代上限：返回最后一次有意义的思考，避免空泛提示
-        if self.thoughts:
-            return (self.thoughts[-1] +
-                    "\n\n（提示：已达到最大迭代步数，以上为当前进展。）")
-        return "已达到最大迭代步数，任务可能尚未完成。"
+        # 达到迭代上限：**给出部分交付清单**，而不是把已完成的工作丢掉只留一句提示
+        self.stop_reason = "max_iterations"
+        await self._report_truncations(trunc_before)
+        rep = self.partial_report(task)
+        head = rep["last_thought"] or "（本轮没有产生可用的思考内容）"
+        return head + "\n" + self.render_manifest(rep)
+
+    async def _report_truncations(self, before: int) -> None:
+        """把本轮新增的"工具输出被夹住"账目累加进 token_savings。
+
+        上层（agent）据此推 ``tool_output_truncated`` 事件 —— 让
+        "这次任务有多少上下文是被截掉的"从隐形变成可见、可调参。
+        """
+        try:
+            rep = self.fn_handler.savings_report()
+            new = rep["truncated_results"] - before
+            if new > 0:
+                self.token_savings["truncated_results"] = rep["truncated_results"]
+                self.token_savings["chars_dropped"] = rep["dropped_chars"]
+                logger.info("react_tool_output_truncated", count=new,
+                            chars_dropped=rep["dropped_chars"],
+                            est_tokens_saved=rep["est_tokens_saved"])
+        except Exception as e:            # pragma: no cover - 纯观测，失败不影响任务
+            logger.warning("truncation_report_failed", error=str(e))
 
     #: 同一工具连续失败达到此次数即熔断，本轮任务内不再调用
     FAILURE_THRESHOLD = 3

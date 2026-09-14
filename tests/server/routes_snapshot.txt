@@ -52,6 +52,9 @@ GET /api/models
 GET /api/observe/dag
 GET /api/observe/dashboard
 GET /api/observe/runs
+GET /api/observe/traces
+GET /api/observe/traces/{session_id}/{run_id}
+GET /api/observe/traces/{session_id}/{run_id}/download
 GET /api/plugins
 GET /api/preview/file
 GET /api/providers

@@ -178,10 +178,37 @@ _task_history: list[dict] = []
 _token_totals = {"prompt": 0, "completion": 0, "total": 0, "tasks": 0}
 _running_tasks = {"count": 0}  # 并发任务计数（资源保护）
 _MAX_CONCURRENT = int(os.environ.get("AUTOMIND_MAX_CONCURRENT", "8"))
-#: 「询问」模式下等待人工审批的上限（秒）。超时按拒绝处理，并**明确告知前端**。
+#: 正在等待人工审批的任务数（这些任务已把并发槽让出来，单独计数便于诊断）
+_approval_waiting = {"count": 0}
+#: 「询问」模式下等待人工审批的上限（秒）。超时按配置处置，并**明确告知前端**。
 #: 前端拿它做倒计时，用户能看见还剩多久，而不是对着一个看似能永远等的弹窗。
+#: v1.6.4 起可在 ExecutionConfig 里显式配置
+#: （``approval_timeout_seconds`` / ``approval_timeout_action``），
+#: 环境变量 ``AUTOMIND_APPROVAL_TIMEOUT`` 仍然作为兜底。
 _APPROVAL_TIMEOUT_S = int(os.environ.get("AUTOMIND_APPROVAL_TIMEOUT", "300"))
 _START_TIME = time.time()
+
+
+def _approval_timeout_seconds(agent: Any) -> float:
+    """本次任务审批等待上限：ExecutionConfig 优先，环境变量兜底。"""
+    try:
+        v = float(getattr(agent.config.execution, "approval_timeout_seconds", 0) or 0)
+        if v > 0:
+            return v
+    except Exception:
+        pass
+    return float(_APPROVAL_TIMEOUT_S)
+
+
+def _approval_timeout_action(agent: Any) -> str:
+    """超时处置：``reject``（默认，fail-closed）或 ``approve``。"""
+    try:
+        a = str(getattr(agent.config.execution, "approval_timeout_action", "") or "").lower()
+        if a in ("approve", "reject"):
+            return a
+    except Exception:
+        pass
+    return "reject"
 
 
 def _accumulate_tokens(record: dict) -> None:
@@ -482,9 +509,24 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
     # 6) 自主闭环开关（默认全开，用户可在设置中关闭）
     ap = _read_config().get("autopilot", {})
     for flag in ("auto_review", "auto_verify", "auto_test",
-                 "parallel_execution", "subtask_cache"):
+                 "parallel_execution", "subtask_cache",
+                 # v1.6.4：这些也在界面上可调，重启/重建后必须恢复，
+                 # 否则"我在设置里关了隔离/调大了超时"重启就白设了
+                 "isolate_workspace", "terminal_background_enabled",
+                 "release_slot_on_approval_wait", "trace_enabled"):
         if flag in ap:
             setattr(config.execution, flag, bool(ap[flag]))
+    for num_flag in ("tool_timeout_seconds", "tool_timeout_max_seconds",
+                     "approval_timeout_seconds", "tool_output_max_chars",
+                     "auto_verify_max_rounds", "trace_max_runs"):
+        if num_flag in ap:
+            try:
+                setattr(config.execution, num_flag, float(ap[num_flag]))
+            except (TypeError, ValueError):
+                pass
+    for str_flag in ("approval_timeout_action", "write_conflict_policy"):
+        if str_flag in ap and isinstance(ap[str_flag], str):
+            setattr(config.execution, str_flag, ap[str_flag])
 
     _agent = AutoMindAgent(config)
     _agent._mode = ExecutionMode(exec_mode)
@@ -752,15 +794,73 @@ async def api_observe_dag(session_id: str = "default"):
     }
 
 
+@app.get("/api/observe/traces")
+async def api_observe_traces(session_id: str = "default", limit: int = 50):
+    """该会话已落盘的执行轨迹清单（社区版即可用 —— 进程重启后仍可取证）。
+
+    实时 DAG 是内存视图（重启即失），轨迹是磁盘证据（JSONL，按 run 切文件）。
+    B 端排障 / SLA 举证 / 失败归因靠的是后者：能直接看出这次任务调了哪些工具、
+    哪一步开始不对、模型收到了什么。
+    """
+    limit = max(1, min(int(limit or 50), 500))
+    runs = _observability.trace_runs(session_id, limit=limit)
+    stats = _observability.trace_stats()
+    current = _observability.current_run_id(session_id)
+    return {
+        "session_id": session_id,
+        "current_run": current,
+        "current_path": _observability.trace_path(session_id),
+        "runs": runs,
+        "stats": stats,
+        # 社区版不隐藏该能力（本地落盘、零额外成本），但如实标注来源
+        "source": "session_trace",
+    }
+
+
+@app.get("/api/observe/traces/{session_id}/{run_id}")
+async def api_observe_trace_read(session_id: str, run_id: str,
+                                 limit: int = 200, types: str = ""):
+    """读取某次运行轨迹的尾部事件（``types`` 逗号分隔可过滤，如 ``step_action``）。"""
+    limit = max(1, min(int(limit or 200), 2000))
+    event_types = [t.strip() for t in (types or "").split(",") if t.strip()]
+    events = _observability.trace_read(session_id, run_id, limit=limit,
+                                       event_types=event_types)
+    path = _observability.trace_path(session_id) if run_id == _observability.current_run_id(
+        session_id) else ""
+    return {"session_id": session_id, "run_id": run_id, "count": len(events),
+            "events": events, "path": path}
+
+
+@app.get("/api/observe/traces/{session_id}/{run_id}/download")
+async def api_observe_trace_download(session_id: str, run_id: str):
+    """下载原始 JSONL 轨迹文件（排障时可直接发给同事/贴到工单里）。"""
+    from fastapi.responses import FileResponse, JSONResponse
+
+    from automind.core.trace import get_recorder
+
+    path = get_recorder().path_for(session_id, run_id)
+    if not path.is_file():
+        return JSONResponse({"error": f"轨迹不存在：{session_id}/{run_id}"},
+                            status_code=404)
+    return FileResponse(str(path), media_type="application/x-ndjson",
+                        filename=f"{session_id}-{run_id}.jsonl")
+
+
 @app.get("/api/health")
 async def api_health():
-    """健康检查（无需鉴权）— 供部署监控与负载均衡探活。"""
+    """健康检查（无需鉴权）— 供部署监控与负载均衡探活。
+
+    ``running_tasks`` 只计**正在执行**的任务数；等待人工审批的任务已按配置
+    让出并发槽，单独以 ``approval_waiting`` 暴露 —— 两者相加才是"占用中的
+    会话数"，监控据此可区分"在算"和"在等人"。
+    """
     from automind.core.paths import describe as _paths_describe
     return {
         "status": "ok", "version": app.version,
         "edition": _edition.get_edition(),
         "auth_required": bool(_auth_token()),
         "running_tasks": _running_tasks["count"],
+        "approval_waiting": _approval_waiting["count"],
         "max_concurrent": _MAX_CONCURRENT,
         "uptime_s": round(time.time() - _START_TIME, 1),
         "paths": _paths_describe(),
@@ -863,13 +963,19 @@ async def api_set_approval(data: dict):
 
 _AUTOPILOT_FLAGS = ("auto_review", "auto_verify", "auto_test",
                     "parallel_execution", "subtask_cache")
+#: 只有布尔值的执行配置（可随 autopilot 一起开关，且无需重建 Agent）
+_AUTOPILOT_BOOL_EXTRAS = ("isolate_workspace", "terminal_background_enabled",
+                          "release_slot_on_approval_wait", "trace_enabled")
 
 
 @app.get("/api/config/autopilot")
 async def api_get_autopilot():
     """自主闭环开关（多Agent审查/Loop验证/TDD测试/并行执行/子任务缓存）。"""
     agent = get_agent()
-    return {f: bool(getattr(agent.config.execution, f)) for f in _AUTOPILOT_FLAGS}
+    out = {f: bool(getattr(agent.config.execution, f)) for f in _AUTOPILOT_FLAGS}
+    out.update({f: bool(getattr(agent.config.execution, f, False))
+                for f in _AUTOPILOT_BOOL_EXTRAS})
+    return out
 
 
 @app.post("/api/config/autopilot")
@@ -878,17 +984,45 @@ async def api_set_autopilot(data: dict):
     agent = get_agent()
     cfg = _read_config()
     stored = cfg.get("autopilot", {})
-    for flag in _AUTOPILOT_FLAGS:
+    for flag in tuple(_AUTOPILOT_FLAGS) + _AUTOPILOT_BOOL_EXTRAS:
         if flag in data:
             val = bool(data[flag])
             stored[flag] = val
             setattr(agent.config.execution, flag, val)
+    # 数值型执行参数（超时/上限）也允许在此调整：长任务排障时不必重建 Agent
+    for num in ("tool_timeout_seconds", "tool_timeout_max_seconds",
+                "approval_timeout_seconds", "tool_output_max_chars",
+                "auto_verify_max_rounds", "trace_max_runs"):
+        if num in data:
+            try:
+                val = float(data[num])
+            except (TypeError, ValueError):
+                continue
+            if val < 0:
+                continue
+            setattr(agent.config.execution, num,
+                    int(val) if num in ("tool_output_max_chars", "auto_verify_max_rounds",
+                                        "trace_max_runs") else val)
+            stored[num] = getattr(agent.config.execution, num)
+    if "approval_timeout_action" in data:
+        act = str(data["approval_timeout_action"]).lower()
+        if act in ("approve", "reject"):
+            agent.config.execution.approval_timeout_action = act
+            stored["approval_timeout_action"] = act
+    if "write_conflict_policy" in data:
+        pol = str(data["write_conflict_policy"]).lower()
+        if pol in ("off", "warn", "block"):
+            agent.config.execution.write_conflict_policy = pol
+            stored["write_conflict_policy"] = pol
     cfg["autopilot"] = stored
     _write_config(cfg)
     # 即时应用到执行器（并行/缓存在 PlanExecutor 实例上）
     agent.plan_executor.parallel = agent.config.execution.parallel_execution
     agent.plan_executor.use_cache = agent.config.execution.subtask_cache
-    return {f: bool(getattr(agent.config.execution, f)) for f in _AUTOPILOT_FLAGS}
+    out = {f: bool(getattr(agent.config.execution, f)) for f in _AUTOPILOT_FLAGS}
+    out.update({f: bool(getattr(agent.config.execution, f, False))
+                for f in _AUTOPILOT_BOOL_EXTRAS})
+    return out
 
 
 @app.get("/api/tokens")
@@ -3074,6 +3208,11 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     # 取本会话独立的 Agent（WS 路径此前直接用全局实例，两个标签页同时跑
     # 会互相覆盖交互模式、串上下文、清对方的 token 计数）
     agent = _acquire_run_agent(agent, chat_sid)
+    # 会话标识交给 Agent —— 决定轨迹按会话落盘、以及目录级隔离的工作副本归属
+    try:
+        agent.session_id = chat_sid
+    except Exception as e:
+        logger.warning("session_id_assign_failed", error=str(e))
 
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
@@ -3100,12 +3239,47 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
 
     session_id = uuid.uuid4().hex[:12]
     _running_tasks["count"] += 1
+    #: 本次任务是否已把并发槽让出去（审批等待期间让槽，只让一次）
+    slot_state = {"released": False}
+
+    def _release_slot_for_approval() -> bool:
+        """审批等待期间释放并发执行槽 —— 审批不是"在执行"，不该占着名额。
+
+        v1.6.3 及更早：审批弹窗挂多久，这个任务的并发槽就占多久（5 分钟不点，
+        名额就空转 5 分钟），别的任务因此被"已达并发上限"挡在门外，而用户
+        完全看不出两者有关。这里在**开始等待**时把槽还回去，用户真的回答了
+        （或超时终结）再收回；由 ``slot_state`` 保证只让一次、且不会让成负数。
+        """
+        ex = getattr(agent.config, "execution", None)
+        if not getattr(ex, "release_slot_on_approval_wait", True):
+            return False
+        if slot_state["released"]:
+            return False
+        if _running_tasks["count"] <= 0:
+            return False
+        _running_tasks["count"] -= 1
+        slot_state["released"] = True
+        _approval_waiting["count"] += 1
+        logger.info("approval_slot_released", session=session_id,
+                    waiting=_approval_waiting["count"])
+        return True
+
+    def _reclaim_slot_after_approval() -> None:
+        if slot_state["released"]:
+            slot_state["released"] = False
+            _running_tasks["count"] += 1
+            _approval_waiting["count"] = max(0, _approval_waiting["count"] - 1)
+            logger.info("approval_slot_reclaimed", session=session_id)
 
     # 注入审批回调（ask 模式下工具调用前向前端请求批准）
+    approval_timeout = _approval_timeout_seconds(agent)
+
     async def _approval_cb(tool_name, args, tier, reason):
         approval_id = uuid.uuid4().hex[:10]
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         _ws_approvals[approval_id] = fut
+        # 等待人工回答期间不再占用执行槽（名额还给别的任务）
+        _release_slot_for_approval()
         try:
             await ws.send_json({
                 "type": "approval_request", "approval_id": approval_id,
@@ -3116,29 +3290,48 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                 "params": {k: str(v)[:200] for k, v in (args or {}).items()},
                 "editable": _jsonable(args or {}),
                 # 前端据此显示倒计时：不给期限的话，弹窗看起来可以一直等，
-                # 而实际上后端 300 秒就按拒绝处理了
-                "timeout_s": _APPROVAL_TIMEOUT_S,
+                # 而实际上后端到点就按配置处置了
+                "timeout_s": approval_timeout,
+                "on_timeout": _approval_timeout_action(agent),
             })
-            return await asyncio.wait_for(fut, timeout=_APPROVAL_TIMEOUT_S)
+            return await asyncio.wait_for(fut, timeout=approval_timeout)
         except TimeoutError:
             # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
             # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
+            action = _approval_timeout_action(agent)
+            approved = action == "approve"
+            outcome = "自动批准" if approved else "自动拒绝"
             logger.warning("approval_timeout", tool=tool_name,
-                           timeout_s=_APPROVAL_TIMEOUT_S, session=session_id)
+                           timeout_s=approval_timeout, session=session_id,
+                           action=action)
             try:
                 await ws.send_json({
                     "type": "approval_timeout", "approval_id": approval_id,
                     "session_id": session_id, "tool": tool_name,
-                    "timeout_s": _APPROVAL_TIMEOUT_S,
-                    "message": (f"审批等待超过 {_APPROVAL_TIMEOUT_S // 60} 分钟未响应，"
-                                f"已按「拒绝」处理工具 {tool_name}。"
-                                "如需无人值守运行，请把审批模式改为「自动」或「全批准」。"),
+                    "timeout_s": approval_timeout,
+                    "action": action, "approved": approved,
+                    "message": (f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
+                                f"已按「{outcome}」处理工具 {tool_name}。"
+                                if approved else
+                                f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
+                                f"已按「{outcome}」处理工具 {tool_name}（未执行）。"
+                                "如需无人值守运行，请把审批模式改为「自动」或「全批准」，"
+                                "或调大 execution.approval_timeout_seconds。"),
                 })
             except Exception:
                 pass          # 连接已断时发不出去很正常，日志已经记下了
-            return False
+            # 超时事件也并入轨迹与观测图（排障时要能看到"卡在审批上")
+            record_ev = {"type": "approval_timeout", "session_id": session_id,
+                         "tool": tool_name, "timeout_s": approval_timeout,
+                         "action": action}
+            try:
+                _observability.record(chat_sid, record_ev)
+            except Exception:
+                pass
+            return approved
         finally:
             _ws_approvals.pop(approval_id, None)
+            _reclaim_slot_after_approval()
 
     agent.approval_callback = _approval_cb
 
@@ -3311,6 +3504,12 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     finally:
         agent.approval_callback = None
         agent.event_sink = None
+        # 若仍处于"审批让槽"状态（任务在等待中被取消/异常），先把等待计数归位，
+        # 再还槽 —— 否则 _approval_waiting 会永久偏差，诊断数据从此不可信。
+        if slot_state["released"]:
+            slot_state["released"] = False
+            _approval_waiting["count"] = max(0, _approval_waiting["count"] - 1)
+            _running_tasks["count"] += 1
         _running_tasks["count"] = max(0, _running_tasks["count"] - 1)
 
 

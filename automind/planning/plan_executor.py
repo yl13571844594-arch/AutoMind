@@ -141,11 +141,18 @@ class PlanExecutor:
                     await on_step_start(g)
 
             if len(batch) > 1:
+                # §2.4 并行执行 + v1.6.4 单点异常防护：
+                # `asyncio.gather` 默认"任一任务抛异常就整体失败"——工具侧偶发异常
+                # （超时竞态、第三方库抛错、审批通道断开）会让**同一批里已经跑完
+                # 的目标一起丢失**，整单任务被判失败，用户看到的是"什么都没做"。
+                # 这里给每个目标单独包一层：异常就地转成该目标的失败结果，
+                # 其余目标的成果照常保留、照常进入报告与后续步骤。
                 step_results = await _asyncio.gather(*[
-                    self._execute_goal(g, on_approval_needed) for g in batch
+                    self._execute_goal_guarded(g, on_approval_needed) for g in batch
                 ])
             else:
-                step_results = [await self._execute_goal(batch[0], on_approval_needed)]
+                step_results = [await self._execute_goal_guarded(
+                    batch[0], on_approval_needed)]
 
             # 按序处理批内结果（状态更新与失败处理保持确定性）
             for goal, step_result in zip(batch, step_results):
@@ -178,7 +185,13 @@ class PlanExecutor:
                         plan, goal.id, GoalStatus.FAILED, step_result.error
                     )
                     aborted = True
-                    break
+                    # v1.6.4：**不要在此 break** —— 同批里已经跑完的其它目标
+                    # 必须照常入账（否则报告与界面上它们凭空消失，用户看到的
+                    # 是"整批都没做"，而实际上其中几个真的成了）。
+                    # 终止语义不变：本轮结束后 while 条件让计划停止推进。
+
+            if aborted:
+                break
 
         # 更新计划状态
         progress = self.hierarchical_planner.get_progress(plan)
@@ -191,6 +204,35 @@ class PlanExecutor:
 
         report.duration_ms = (time.perf_counter() - start_time) * 1000
         return report
+
+    async def _execute_goal_guarded(
+        self,
+        goal: Goal,
+        on_approval_needed: Any = None,
+    ) -> StepResult:
+        """``_execute_goal`` 的异常屏障 —— 一个目标炸掉不影响同批其它目标。
+
+        并行的价值建立在"单点故障不连坐"之上：没有这层屏障时，批内任一
+        ``_execute_goal`` 抛出未捕获异常（工具实现缺陷、超时竞态、审批通道
+        断开）会被 ``asyncio.gather`` 升级为整批失败，**已并行的其它目标
+        成果一起丢失**，任务直接判败。现在异常就地转成该目标的
+        ``StepResult(success=False)``，走与普通失败**完全相同**的后续流程
+        （自我纠错 → 回溯 → 报告），其余目标不受影响。
+        """
+        try:
+            return await self._execute_goal(goal, on_approval_needed)
+        except Exception as e:
+            reason = f"{type(e).__name__}: {e}"
+            logger.error("goal_execution_crashed", goal=goal.id,
+                         tool=(goal.assigned_action.tool_name
+                               if goal.assigned_action else ""),
+                         error=reason)
+            return StepResult(
+                goal_id=goal.id,
+                goal_description=goal.description,
+                success=False,
+                error=f"该步骤执行时抛出未捕获异常（同批其它步骤不受影响）：{reason}",
+            )
 
     def _ready_goals(self, plan: HierarchicalPlan) -> list[Goal]:
         """收集当前所有就绪的叶子目标（PENDING 且依赖已满足），按执行顺序返回。"""
@@ -307,6 +349,10 @@ class PlanExecutor:
             )
 
         # 执行
+        #: 最后一次的真实失败原因 —— 不要用一句笼统的
+        #: "Failed after N attempts" 把工具报的错盖掉：模型/用户拿不到原因
+        #: 就只能盲目重试，而这正是"失败被静默化"的另一种形态。
+        last_error = ""
         for attempt in range(self.max_retries):
             try:
                 result = await self.tool_registry.dispatch(
@@ -324,17 +370,20 @@ class PlanExecutor:
                         retries=attempt,
                     )
 
+                last_error = str(result.error or "").strip() or \
+                    f"工具 {action.tool_name} 返回失败（无错误信息）"
                 # 失败 → 如果 auto_retry，继续尝试
                 if not self.auto_retry:
                     break
 
             except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
                 if attempt == self.max_retries - 1:
                     return StepResult(
                         goal_id=goal.id,
                         goal_description=goal.description,
                         success=False,
-                        error=str(e),
+                        error=last_error,
                         retries=attempt + 1,
                     )
 
@@ -342,7 +391,8 @@ class PlanExecutor:
             goal_id=goal.id,
             goal_description=goal.description,
             success=False,
-            error=f"Failed after {self.max_retries} attempts",
+            error=(f"重试 {self.max_retries} 次后仍失败：{last_error}"
+                   if last_error else f"Failed after {self.max_retries} attempts"),
             retries=self.max_retries,
         )
 

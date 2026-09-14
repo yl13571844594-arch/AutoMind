@@ -347,7 +347,11 @@ class TestAutopilotApi:
         c = TestClient(srv.app)
 
         flags = c.get("/api/config/autopilot").json()
-        assert all(flags[f] is True for f in flags)
+        # v1.6.4：新增了几个开关。其中**唯一**默认关闭的是目录级隔离
+        # （它对每个会话拷一份工作副本，改变产物落点，必须是显式选择）；
+        # 其余新开关（后台命令通道 / 审批让槽 / 轨迹落盘）默认开启。
+        assert all(v is True for k, v in flags.items() if k != "isolate_workspace")
+        assert flags["isolate_workspace"] is False
 
         r = c.post("/api/config/autopilot", json={"auto_review": False}).json()
         assert r["auto_review"] is False and r["auto_verify"] is True
@@ -355,3 +359,36 @@ class TestAutopilotApi:
         assert c.get("/api/config/autopilot").json()["auto_review"] is False
         # 恢复
         c.post("/api/config/autopilot", json={"auto_review": True})
+
+    def test_numeric_and_enum_knobs_roundtrip(self, tmp_path):
+        """超时/上限/策略这些数值与枚举参数也能在界面上调，且重启后保持。"""
+        from fastapi.testclient import TestClient
+
+        import automind.server as srv
+        srv._store.config_file = tmp_path / "cfg.json"
+        srv._AUTH_TOKEN = ""
+        srv._agent = None
+        c = TestClient(srv.app)
+
+        r = c.post("/api/config/autopilot", json={
+            "tool_timeout_seconds": 900,
+            "tool_output_max_chars": 9000,
+            "approval_timeout_seconds": 60,
+            "approval_timeout_action": "approve",
+            "write_conflict_policy": "block",
+            "isolate_workspace": True,
+        }).json()
+        assert r["isolate_workspace"] is True
+        saved = (tmp_path / "cfg.json").read_text(encoding="utf-8")
+        assert '"tool_timeout_seconds": 900' in saved
+        assert '"write_conflict_policy": "block"' in saved
+        # 非法值被忽略而不是写坏配置
+        c.post("/api/config/autopilot", json={"write_conflict_policy": "nonsense",
+                                              "approval_timeout_action": "maybe"})
+        from automind.core.config import ExecutionConfig
+        assert ExecutionConfig().write_conflict_policy == "warn"
+        # 恢复默认，避免影响其它用例（_agent 是进程级单例）
+        c.post("/api/config/autopilot", json={
+            "isolate_workspace": False, "write_conflict_policy": "warn",
+            "approval_timeout_action": "reject", "tool_timeout_seconds": 300,
+            "tool_output_max_chars": 12000, "approval_timeout_seconds": 300})
