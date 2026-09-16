@@ -269,6 +269,7 @@ jobs:
 
   # ── 5. 打包产物：装完真的能用吗 ─────────────────────────
   package:
+    needs: detect
     name: 打包与安装验证
     runs-on: ubuntu-latest
     steps:
@@ -341,6 +342,10 @@ jobs:
         # 付费墙的安全性等价于"客户拿不到签发私钥"。这里把 pro 的 sdist+wheel
         # 真造出来，逐个查成员名与**内容**（私钥可能被塞进任意文本文件里，
         # 只查文件名挡不住）。任何一处命中就让 CI 红掉。
+        #
+        # pro/ 不在社区仓（见 detect 作业）：缺席时这一步跳过 —— 否则它会以
+        # "Source pro is not a directory" 让整个 package 作业固定报红。
+        if: needs.detect.outputs.pro == 'true'
         run: |
           python -m build pro --outdir dist-pro
           python - <<'EOF'
@@ -380,6 +385,8 @@ jobs:
           EOF
 
       - name: 商业包：装完必须能验签、且不能签发
+        # 同前：需要 pro/ 与上一步产出的 dist-pro/，社区仓里跳过
+        if: needs.detect.outputs.pro == 'true'
         run: |
           python -m venv /tmp/provenv
           /tmp/provenv/bin/pip install -q --upgrade pip
