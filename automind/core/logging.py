@@ -40,6 +40,18 @@ def _stream_encoding(stream: Any) -> str:
         return ""
 
 
+def _interpreter_is_utf8() -> bool:
+    """解释器是否已处于 UTF-8 模式（``-X utf8`` / ``PYTHONUTF8=1``）。
+
+    单独抽成函数有两个原因：一是"要不要动手"的判据集中在一处、好核对；
+    二是它**不可被 monkeypatch 到 sys.flags 上**（``sys.flags`` 是只读的
+    structseq），而测试必须能把环境钉死 —— 否则用例会随运行环境漂移：
+    GitHub Actions 给 runner 设了 ``PYTHONUTF8=1``，同一份测试在 CI 上
+    走进的是"跳过"分支，本地却是"修复"分支。
+    """
+    return bool(getattr(sys.flags, "utf8_mode", 0))
+
+
 def ensure_utf8_stdio(force: bool = False) -> dict[str, str]:
     """把 stdout/stderr 的编码统一成 UTF-8 —— Windows 中文日志乱码的根治。
 
@@ -75,9 +87,8 @@ def ensure_utf8_stdio(force: bool = False) -> dict[str, str]:
         return {"skipped": "已显式设置 PYTHONIOENCODING/PYTHONUTF8，尊重该设置"}
     if os.environ.get("AUTOMIND_UTF8_STDIO", "1").strip().lower() in ("0", "false", "no"):
         return {"skipped": "AUTOMIND_UTF8_STDIO=0"}
-    if getattr(sys.flags, "utf8_mode", 0):
+    if _interpreter_is_utf8():
         return {"skipped": "解释器已处于 UTF-8 模式"}
-
     for name in ("stdout", "stderr"):
         stream = getattr(sys, name, None)
         if stream is None:                                # pythonw / 冻结包无控制台

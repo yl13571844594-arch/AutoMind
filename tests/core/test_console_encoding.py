@@ -61,11 +61,19 @@ class _Stream:
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch):
-    """每个用例都从"没有任何显式设置"开始。"""
+    """每个用例都从"没有任何显式设置、解释器也不在 UTF-8 模式"开始。
+
+    最后一行的钉死是必须的：GitHub Actions 给 runner 设了 ``PYTHONUTF8=1``
+    （见 desktop-build.yml 里那句注释），于是同一份测试在 CI 上走进的是
+    「跳过」分支、在本地走进的是「修复」分支 —— 这种随环境漂移的用例比没有
+    还糟（本地绿 CI 红，或反过来）。``sys.flags`` 是只读的，所以把判据抽成
+    ``_interpreter_is_utf8()`` 再替换它。
+    """
     monkeypatch.delenv("PYTHONIOENCODING", raising=False)
     monkeypatch.delenv("PYTHONUTF8", raising=False)
     monkeypatch.delenv("AUTOMIND_UTF8_STDIO", raising=False)
     monkeypatch.setattr(alog, "_STDIO_CHECKED", False, raising=False)
+    monkeypatch.setattr(alog, "_interpreter_is_utf8", lambda: False)
 
 
 @pytest.fixture
@@ -167,6 +175,17 @@ def test_non_windows_is_skipped(monkeypatch, fake_stdio, bind_stdio):
     monkeypatch.setattr(alog.os, "name", "posix")
 
     assert "skipped" in alog.ensure_utf8_stdio(force=True)
+    assert out.calls == []
+
+
+def test_utf8_mode_interpreter_is_left_alone(monkeypatch, fake_stdio, bind_stdio):
+    """``-X utf8`` / ``PYTHONUTF8=1`` 下无事可做 —— 这条正是 CI 上走的分支。"""
+    out, _ = bind_stdio(*fake_stdio)
+    monkeypatch.setattr(alog, "_interpreter_is_utf8", lambda: True)
+
+    result = alog.ensure_utf8_stdio(force=True)
+
+    assert "skipped" in result
     assert out.calls == []
 
 

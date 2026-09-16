@@ -108,6 +108,18 @@ python pro/tools/issue_license.py verify AMP2-xxxx-...      # 签完自己验一
 3. GitHub 仓库 Settings → Environments 新建名为 `pypi` 的 environment
    （可加保护规则，仅允许 tag 触发）。
 
+> **v1.7.2 现状（2026-09-16）**：tag 已推、工作流已触发，但发布这一步报
+> `invalid-publisher`（PyPI 侧还没有对应的 Trusted Publisher）—— **只差上面
+> 第 1-2 步**。配置好后不必重新打 tag，直接对已有 tag 补发即可：
+>
+> ```bash
+> gh workflow run publish.yml --ref v1.7.2
+> gh run watch                 # 跟一下这次运行，确认 publish 步骤变绿
+> ```
+>
+> 也可以本机先用方式 B 上传 `dist/automind_agent-1.7.2-*`（已在本地构建并通过
+> `twine check`）。注意 PyPI 上一版是 1.6.3，本次会直接跳到 1.7.2。
+
 **方式 B · 本机 twine（需 API Token）**
 
 PyPI 需 API Token（https://pypi.org/manage/account/ → API tokens；
