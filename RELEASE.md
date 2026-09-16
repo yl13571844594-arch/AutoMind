@@ -108,17 +108,26 @@ python pro/tools/issue_license.py verify AMP2-xxxx-...      # 签完自己验一
 3. GitHub 仓库 Settings → Environments 新建名为 `pypi` 的 environment
    （可加保护规则，仅允许 tag 触发）。
 
-> **v1.7.2 现状（2026-09-16）**：tag 已推、工作流已触发，但发布这一步报
-> `invalid-publisher`（PyPI 侧还没有对应的 Trusted Publisher）—— **只差上面
-> 第 1-2 步**。配置好后不必重新打 tag，直接对已有 tag 补发即可：
+> **v1.7.2 已发布（2026-09-16）**：tag 推送触发的工作流在 publish 这一步报
+> `invalid-publisher`（PyPI 侧当时还没配置 Trusted Publisher），随后**由发行方
+> 在本机用方式 B 上传成功**。PyPI 上 `automind-agent 1.7.2` 的 sha256 与本地
+> 构建产物逐字节一致：
+>
+> | 产物 | sha256 |
+> |---|---|
+> | `automind_agent-1.7.2-py3-none-any.whl` | `265aa21972735eaaa7c66533693cef7be14e867686ceaf8b1eb7580be788dde3` |
+> | `automind_agent-1.7.2.tar.gz` | `329d1a6b940bd667406ace71774ecf8d71c91a901abc3cac1d6402fc33940fa6` |
+>
+> **下次发版前建议把那一次性的第 1-2 步配好**（配完就不必再手工 twine 上传，
+> 且没有任何令牌可泄露）：配置好之后对已有 tag 也可以补发，命令是
 >
 > ```bash
 > gh workflow run publish.yml --ref v1.7.2
 > gh run watch                 # 跟一下这次运行，确认 publish 步骤变绿
 > ```
 >
-> 也可以本机先用方式 B 上传 `dist/automind_agent-1.7.2-*`（已在本地构建并通过
-> `twine check`）。注意 PyPI 上一版是 1.6.3，本次会直接跳到 1.7.2。
+> 注意：PyPI 上一版是 1.6.3，1.7.2 是从 1.6.3 直接跳上来的（1.6.4/1.7.0/1.7.1
+> 未单独发布，变更合并记录在 [CHANGELOG.md](CHANGELOG.md)）。
 
 **方式 B · 本机 twine（需 API Token）**
 
