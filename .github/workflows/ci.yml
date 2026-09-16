@@ -31,6 +31,33 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── 0. 商业包 / 分析服务的源码在不在本次检出里？──────────
+  #
+  # 这两块源码**不在社区仓**（`.gitignore` 排除了 pro/ 与 analytics-service/），
+  # 而同一个 ci.yml 也要能被商业仓复用。此前两个作业是无条件跑的：在公开仓上
+  # 必然失败 —— `pip install -e "./pro[test]"` 直接报 "not a valid editable
+  # requirement"，analytics 作业连工作目录都不存在。一道**永远红的门等于没有门**：
+  # 真正该拦的回归会被这堆固定失败淹没。
+  #
+  # 所以先探测、再决定跑不跑：社区仓里这两个作业**显式 skipped**（在 Actions
+  # 页面上看得见"跳过"，而不是"跑了个寂寞然后假绿"），商业仓里照常真跑。
+  detect:
+    name: 探测商业包 / 分析服务源码
+    runs-on: ubuntu-latest
+    outputs:
+      pro: ${{ steps.check.outputs.pro }}
+      analytics: ${{ steps.check.outputs.analytics }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f pro/pyproject.toml ]; then echo "pro=true" >> "$GITHUB_OUTPUT"
+          else echo "pro=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -d analytics-service ]; then echo "analytics=true" >> "$GITHUB_OUTPUT"
+          else echo "analytics=false" >> "$GITHUB_OUTPUT"; fi
+          echo "pro=$( [ -f pro/pyproject.toml ] && echo yes || echo no )" \
+               "analytics=$( [ -d analytics-service ] && echo yes || echo no )"
+
   # ── 1. Python 测试：跨平台矩阵 ──────────────────────────
   test:
     name: 测试 (${{ matrix.os }} · py${{ matrix.python-version }})
@@ -76,7 +103,12 @@ jobs:
   #
   # 企业版三千多行代码此前**完全没有 CI 覆盖**。付费墙、会话池、SSO、RBAC
   # 全在无测试状态下发布 —— 这个作业就是来堵它的。
+  #
+  # 源码不在社区仓（见 detect 作业）：缺席时整个作业跳过，而不是在这里固定
+  # 报一个"目录不存在"的假失败。
   pro:
+    needs: detect
+    if: needs.detect.outputs.pro == 'true'
     name: 商业扩展包测试 (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -160,7 +192,11 @@ jobs:
           EOF
 
   # ── 3. 分析服务（analytics-service）─────────────────────
+  #
+  # 同样不在社区仓（见 detect 作业）：缺席时跳过，别让它变成一个永远红的门。
   analytics:
+    needs: detect
+    if: needs.detect.outputs.analytics == 'true'
     name: 分析服务测试
     runs-on: ubuntu-latest
     steps:
