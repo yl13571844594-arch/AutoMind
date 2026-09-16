@@ -145,6 +145,14 @@ html.light body .msg-acts , body.light .msg-acts { box-shadow: 0 4px 14px rgba(3
 .msg-acts button:hover { background: var(--bg3); color: var(--text); }
 .msg-acts button.danger:hover { background: var(--red-bg); color: var(--red); }
 
+/* ── 中途插入的补充问题：气泡上的状态徽标 ──
+   它和自己的普通提问长得一模一样，事后翻记录就分不清哪句是执行途中后补的、
+   哪句是本轮原本的要求 —— 而这决定了这轮回答该不该包含它。故摆在正文上方，
+   配色沿用 .badge 那一套（已纳入=绿 / 未纳入=黄 / 被拒=红 / 待读取=蓝）。 */
+.inj-flag { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 7px; }
+.inj-flag .badge { height: 18px; }
+.inj-flag .hint-text { font-size: .72em; }
+
 /* ── 消息内联编辑 ── */
 .msg-edit textarea {
   width: 100%; resize: vertical; min-height: 62px;
@@ -409,6 +417,19 @@ html.light body .input-bar , body.light .input-bar { background: rgba(255, 255, 
 }
 .send-btn:hover { box-shadow: 0 6px 22px var(--accent-glow); transform: translateY(-1px); }
 .send-btn.stop { background: var(--red); box-shadow: 0 4px 16px rgba(255, 107, 107, .3); }
+/* 「插入补充」：执行中与「停止」并排的第二个按钮。
+   刻意不做成同一个渐变实心块 —— 停止会丢掉这一轮的中间结果，插入什么都不会取消，
+   两者外观一样迟早点错。做成描边胶囊，宽度随文字自适应。 */
+.send-btn.inject {
+  width: auto; padding: 0 13px; display: inline-flex; align-items: center; gap: 4px;
+  font-size: .82em; font-weight: 600; white-space: nowrap;
+  background: var(--bg3); color: var(--accent);
+  border: 1px solid var(--border-focus); box-shadow: none;
+}
+.send-btn.inject:hover {
+  background: var(--bg2); color: var(--text);
+  border-color: var(--accent); box-shadow: 0 4px 14px var(--accent-glow);
+}
 
 /* 预览遮罩 iframe */
 .preview-frame { width: 100%; height: 100%; border: none; background: #fff; border-radius: 8px; }

@@ -2,7 +2,8 @@
 
 统一遵循可选依赖懒加载：这些库不进核心依赖，工具照常注册，真正调用时缺库
 返回可照抄的安装命令（见 ``automind.tools._toolkit``）。视频能力依赖外部
-``ffmpeg``/``ffprobe`` 命令（``shutil.which`` 探测），无需 Python 包。
+``ffmpeg``/``ffprobe`` 程序 —— 那是 pip 装不到的系统程序，缺了要给"怎么装"，
+所以走 ``need_binary``（含按平台的安装命令）而不是一句"请加入 PATH"。
 """
 
 from __future__ import annotations
@@ -10,13 +11,20 @@ from __future__ import annotations
 import base64
 import io
 import json
-import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
 
 from automind.core.types import PermissionTier, ToolResult
-from automind.tools._toolkit import bad, err, need, ok
+from automind.tools._toolkit import (
+    bad,
+    err,
+    find_binary,
+    need,
+    need_binary,
+    ok,
+    run_blocking,
+)
 from automind.tools.base import AbstractTool
 
 
@@ -106,9 +114,18 @@ class OcrTool(AbstractTool):
         action = str(kwargs.get("action", "")).lower()
         lang = str(kwargs.get("lang", "chi_sim+eng"))
         try:
+            # v1.7.2：need() 现在会连带检查 tesseract **引擎**在不在。
+            # 此前装了 pytesseract 这个壳就直接往下走，用户在 image_to_string
+            # 里撞上 TesseractNotFoundError，而错误里给的还是那句 pip 命令。
             need("pytesseract")
             import pytesseract
             from PIL import Image, ImageGrab
+
+            # 引擎装在非标准目录时（Windows 安装器默认不进 PATH），
+            # 允许用 AUTOMIND_TESSERACT_CMD 指路，而不是逼用户改系统 PATH。
+            engine = find_binary("tesseract")
+            if engine:
+                pytesseract.pytesseract.tesseract_cmd = engine
 
             if action == "image":
                 path = Path(str(kwargs.get("path", ""))).expanduser()
@@ -421,7 +438,7 @@ class VideoTool(AbstractTool):
     description = (
         "Inspect video files and extract frames. Actions: info (duration, resolution, "
         "codec via ffprobe), frame (save a frame at a given second as JPEG via ffmpeg). "
-        "Requires ffmpeg/ffprobe on PATH."
+        "Requires the ffmpeg/ffprobe program installed on the system (not a pip package)."
     )
     parameters = {
         "type": "object",
@@ -442,12 +459,17 @@ class VideoTool(AbstractTool):
         try:
             if not path.exists():
                 return bad(self.name, f"文件不存在：{path}")
-            if not shutil.which("ffprobe"):
-                return bad(self.name, "未检测到 ffmpeg/ffprobe —— 请先安装 ffmpeg 并加入 PATH")
+            # v1.7.2：ffmpeg/ffprobe 是**外部程序**，pip 装不到。此前这里只说
+            # "请先安装 ffmpeg 并加入 PATH"，用户不知道该怎么装、装到哪；
+            # 现在由 need_binary 给出当前平台可直接照抄的安装命令。
+            if action == "info":
+                ffprobe = need_binary("ffprobe")
 
             if action == "info":
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "quiet", "-print_format", "json",
+                # ffprobe 最坏要等 60 秒；同步调用会把事件循环一起占住
+                probe = await run_blocking(
+                    subprocess.run,
+                    [ffprobe, "-v", "quiet", "-print_format", "json",
                      "-show_format", "-show_streams", str(path)],
                     capture_output=True, text=True, timeout=60, check=False,
                     encoding="utf-8", errors="replace")
@@ -464,13 +486,16 @@ class VideoTool(AbstractTool):
                           codec=video.get("codec_name"), fps=_fps(video.get("avg_frame_rate")))
 
             if action == "frame":
+                ffmpeg = need_binary("ffmpeg")
                 output = Path(str(kwargs.get("output") or "")).expanduser()
                 if not output:
                     return bad(self.name, "frame 需要 output 路径")
                 t = float(kwargs.get("time", 0) or 0)
                 output.parent.mkdir(parents=True, exist_ok=True)
-                subprocess.run(
-                    ["ffmpeg", "-y", "-ss", str(t), "-i", str(path),
+                # ffmpeg 抽帧最坏 120 秒 —— 同样必须挪出事件循环
+                await run_blocking(
+                    subprocess.run,
+                    [ffmpeg, "-y", "-ss", str(t), "-i", str(path),
                      "-frames:v", "1", "-q:v", "2", str(output)],
                     capture_output=True, text=True, timeout=120, check=False,
                     encoding="utf-8", errors="replace")

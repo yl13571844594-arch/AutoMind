@@ -15,8 +15,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import os
+import shutil
 import socket
+import sys
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -44,7 +50,7 @@ OPTIONAL_DEPS: dict[str, tuple[str, str]] = {
     "matplotlib": ("matplotlib>=3.7", "数据图表绘制"),
     "psutil": ("psutil>=5.9", "进程与端口管理"),
     "pyperclip": ("pyperclip>=1.8", "剪贴板读写"),
-    "pytesseract": ("pytesseract>=0.3.10", "OCR 文字识别"),
+    "pytesseract": ("pytesseract>=0.3.10", "OCR 文字识别（还需系统里的 tesseract 引擎）"),
     "mutagen": ("mutagen>=1.47", "音频元信息解析"),
 }
 
@@ -60,12 +66,148 @@ class MissingDependency(RuntimeError):
             f"（或一次装齐办公套件：pip install 'automind-agent[office]'）")
 
 
+# ── 外部可执行文件（pip 装不到的那一半）──────────────────────
+
+#: pip 模块 -> 该模块**运行时还需要**的外部命令。
+#: pytesseract 是最典型的坑：它是 tesseract 引擎的**壳**，`pip install` 只装壳，
+#: 引擎本身要单独装。旧提示让人去 `pip install pytesseract`，照做之后调用
+#: 依然失败（TesseractNotFoundError），而且失败原因看起来和"没装"一模一样。
+MODULE_BINARIES: dict[str, tuple[str, ...]] = {
+    "pytesseract": ("tesseract",),
+}
+
+#: 外部命令 -> (用途, {平台: 安装命令})
+_EXTERNAL: dict[str, tuple[str, dict[str, str]]] = {
+    "ffmpeg": ("音视频转码 / 抽帧 / 合流", {
+        "win32": "winget install --id Gyan.FFmpeg -e"
+                 "（或 choco install ffmpeg / scoop install ffmpeg）",
+        "darwin": "brew install ffmpeg",
+        "linux": "sudo apt install ffmpeg（Debian/Ubuntu），或 sudo dnf install ffmpeg",
+    }),
+    "ffprobe": ("读取音视频元信息（随 ffmpeg 一起发布）", {
+        "win32": "winget install --id Gyan.FFmpeg -e（ffprobe 与 ffmpeg 同一个包）",
+        "darwin": "brew install ffmpeg",
+        "linux": "sudo apt install ffmpeg",
+    }),
+    "tesseract": ("OCR 文字识别引擎", {
+        "win32": "winget install --id UB-Mannheim.TesseractOCR -e"
+                 "（或从 https://github.com/UB-Mannheim/tesseract/wiki 下载安装包）",
+        "darwin": "brew install tesseract tesseract-lang",
+        "linux": "sudo apt install tesseract-ocr tesseract-ocr-chi-sim",
+    }),
+    "git": ("版本控制（git 工具）", {
+        "win32": "winget install --id Git.Git -e",
+        "darwin": "brew install git",
+        "linux": "sudo apt install git",
+    }),
+    "notify-send": ("Linux 桌面通知（libnotify）", {
+        "win32": "Windows 走 PowerShell toast，不需要该命令",
+        "darwin": "macOS 走 osascript，不需要该命令",
+        "linux": "sudo apt install libnotify-bin",
+    }),
+}
+
+#: Windows 上"装了但没进 PATH"的高频位置 —— 安装器默认目录，兜底找一遍。
+_WINDOWS_FALLBACK: dict[str, tuple[str, ...]] = {
+    "tesseract": (
+        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        r"%LOCALAPPDATA%\Programs\Tesseract-OCR\tesseract.exe",
+        r"%LOCALAPPDATA%\Tesseract-OCR\tesseract.exe",
+    ),
+    "ffmpeg": (
+        r"C:\ffmpeg\bin\ffmpeg.exe",
+        r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffmpeg.exe",
+    ),
+    "ffprobe": (
+        r"C:\ffmpeg\bin\ffprobe.exe",
+        r"%LOCALAPPDATA%\Microsoft\WinGet\Links\ffprobe.exe",
+    ),
+    "git": (
+        r"C:\Program Files\Git\cmd\git.exe",
+        r"C:\Program Files (x86)\Git\cmd\git.exe",
+    ),
+}
+
+
+def _env_override(binary: str) -> str:
+    """该命令的"手动指定路径"环境变量名（如 AUTOMIND_TESSERACT_CMD）。"""
+    return "AUTOMIND_" + binary.upper().replace("-", "_") + "_CMD"
+
+
+def find_binary(binary: str) -> str | None:
+    """在 PATH（及 Windows 常见安装目录）里找这个外部命令，返回其路径。
+
+    找不到返回 None。**不抛异常** —— "有没有"和"没有怎么办"是两件事：
+    前者界面自检也要用（``/api/browser/status`` 那类），不该被迫 try/except。
+    """
+    override = os.environ.get(_env_override(binary), "").strip()
+    if override:
+        p = Path(override).expanduser()
+        if p.is_file():
+            return str(p)
+        found = shutil.which(override)
+        if found:
+            return found
+    found = shutil.which(binary)
+    if found:
+        return found
+    if os.name == "nt":
+        for raw in _WINDOWS_FALLBACK.get(binary, ()):
+            cand = Path(os.path.expandvars(raw))
+            if cand.is_file():
+                return str(cand)
+    return None
+
+
+def binary_install_hint(binary: str) -> str:
+    """该命令在当前平台上的安装办法（一行，可直接照抄）。"""
+    purpose, per_os = _EXTERNAL.get(binary, (binary, {}))
+    key = "win32" if os.name == "nt" else ("darwin" if sys.platform == "darwin" else "linux")
+    how = per_os.get(key) or per_os.get("linux") or "请查阅其官方文档安装后加入 PATH"
+    return f"{binary}（{purpose}）：{how}"
+
+
+class MissingBinary(RuntimeError):
+    """外部可执行文件缺失 —— 消息里给的是**该平台的安装办法**，不是 pip 命令。"""
+
+    def __init__(self, binary: str, *, module: str = "") -> None:
+        self.binary, self.module = binary, module
+        prefix = (f"pip 里的 {module} 已经装上，但它只是个壳，"
+                  f"真正干活的外部程序 {binary} 不在系统里。"
+                  if module else f"缺少外部程序 {binary}。")
+        super().__init__(
+            f"{prefix}\n"
+            f"  这不是 Python 包，pip install 装不了它。安装办法：\n"
+            f"    · {binary_install_hint(binary)}\n"
+            f"  装完请**重开终端/重启本程序**让 PATH 生效；"
+            f"若已装在非标准目录，可用环境变量 {_env_override(binary)} "
+            f"直接指定完整路径（例如 {_env_override(binary)}=C:\\path\\to\\{binary}.exe）。")
+
+
+def need_binary(binary: str) -> str:
+    """按需取一个外部命令的路径；缺失时抛 MissingBinary（含该平台安装办法）。"""
+    found = find_binary(binary)
+    if not found:
+        raise MissingBinary(binary)
+    return found
+
+
 def need(module: str) -> Any:
-    """按需导入可选依赖；缺失时抛 MissingDependency。"""
+    """按需导入可选依赖；缺失时抛 MissingDependency。
+
+    v1.7.2：导入成功**之后**还要检查它依赖的外部命令（见 ``MODULE_BINARIES``）。
+    否则 ``pip install pytesseract`` 会得到一个"装好了却依然报缺依赖"的错觉 ——
+    用户按提示装完，OCR 仍然失败，而失败信息还是那句 pip 命令，形成死循环。
+    """
     try:
-        return __import__(module)
+        mod = __import__(module)
     except ImportError as e:
         raise MissingDependency(module) from e
+    for binary in MODULE_BINARIES.get(module, ()):
+        if find_binary(binary) is None:
+            raise MissingBinary(binary, module=module)
+    return mod
 
 
 # ── 能力分级 ────────────────────────────────────────────────
@@ -103,6 +245,12 @@ def err(tool: str, exc: Exception) -> ToolResult:
     if isinstance(exc, MissingDependency):
         return ToolResult(tool_name=tool, success=False, error=str(exc),
                           output={"missing_dependency": exc.package})
+    if isinstance(exc, MissingBinary):
+        # 与缺 Python 包分开报：这两者的修复动作完全不同（一个 pip，一个装系统程序），
+        # 混成一个 "missing_dependency" 会让人照着 pip 命令白跑一趟。
+        return ToolResult(tool_name=tool, success=False, error=str(exc),
+                          output={"missing_binary": exc.binary,
+                                  "install_hint": binary_install_hint(exc.binary)})
     if isinstance(exc, FeatureNotAvailable):
         return ToolResult(tool_name=tool, success=False, error=str(exc),
                           output={"upgrade_required": exc.feature,
@@ -183,3 +331,31 @@ def safe_extract_path(root: Any, member: str) -> Any:
     if target != root and root not in target.parents:
         raise BlockedTarget(f"归档成员路径越界，已拒绝解压：{member}")
     return target
+
+
+# ── 阻塞调用挪出事件循环 ─────────────────────────────────────
+
+async def run_blocking(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+    """在线程池里执行一个**会阻塞**的同步调用，返回其结果。
+
+    工具都是 ``async def execute``，但函数体里往往藏着同步调用：``pyperclip``
+    读写剪贴板、``subprocess.run`` 起 PowerShell/osascript/ffmpeg。它们的共同
+    特点是**等待期间不释放事件循环**，后果不只是"这个工具慢"：
+
+      · 整个进程的 asyncio 循环被占死 —— 其它会话的任务、审批弹窗推送、
+        心跳与进度条、``/api/health`` 全部一起冻住；
+      · 任何 ``asyncio.wait_for`` 超时都**不会触发**（定时器压根轮不到执行），
+        也就是"给这一步设了上限"其实形同虚设。
+
+    实测（v1.7.0 之前）：一个 ``time.sleep(20)`` 的同步工具配 ``goal_timeout=2``，
+    实际耗时 20.0 秒、超时未生效。
+
+    用法::
+
+        r = await run_blocking(subprocess.run, cmd, capture_output=True,
+                              text=True, timeout=20)
+
+    注意：``timeout`` 参数仍然要给（子进程要真的被杀掉），``run_blocking``
+    解决的是"不要把事件循环一起等死"，不是"不用设超时"。
+    """
+    return await asyncio.to_thread(fn, *args, **kwargs)

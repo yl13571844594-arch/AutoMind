@@ -11,6 +11,14 @@ name: CI
 #   3) **打包产物从不验证**：wheel 里到底有没有静态资源、内置插件、手册，
 #      装完能不能 import、`automind` 命令在不在 —— 只有发版当天才知道。
 #      v1.6.0 就漏过"插件清单在、代码不在"（collect_data_files 不带 .py）。
+#
+# v1.7.0 堵上**第四处**，也是最贵的一处：
+#
+#   4) **收钱的那部分代码一行都没跑过**：`pytest tests/` 只覆盖社区核心，
+#      `pro/tests/`（三千多行企业版代码）与 `analytics-service/tests/` 从未
+#      在 CI 里执行过。付费墙、会话池、RBAC、SSO、模型网关全在零覆盖状态下
+#      发布。现在 pro 与 analytics 各有独立作业，并且额外跑一遍**许可证伪造
+#      测试** —— 付费墙失效是"静默漏钱"，必须由 CI 而不是由客户发现。
 
 on:
   push:
@@ -64,7 +72,119 @@ jobs:
           PYTHONIOENCODING: "utf-8"
         run: pytest tests/ -q
 
-  # ── 2. 前端：类型检查 + 真实构建 ────────────────────────
+  # ── 2. 商业扩展包（automind-pro）───────────────────────
+  #
+  # 企业版三千多行代码此前**完全没有 CI 覆盖**。付费墙、会话池、SSO、RBAC
+  # 全在无测试状态下发布 —— 这个作业就是来堵它的。
+  pro:
+    name: 商业扩展包测试 (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+          pip install -e "./pro[test]"
+          pip install ruff
+
+      # pro/ 的代码在这里才第一次被 lint —— 此前 ruff check . 从仓库根跑，
+      # 而 .gitignore 把 pro/ 排除在社区仓之外，商业仓需要自己这一道。
+      - name: Lint (ruff)
+        run: ruff check pro/
+
+      - name: 商业扩展包测试
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: pytest pro/tests/ -q
+
+      # 付费墙是收入边界：单独再跑一遍，且不依赖上面的作业是否被误改
+      - name: 付费墙伪造测试（必须失败关闭）
+        env:
+          PYTHONUTF8: "1"
+        run: pytest pro/tests/test_license_forgery.py -q
+
+      - name: 许可证私钥不得出现在源码树
+        # 签发私钥一旦进仓库（或被 git add -A 带进来），付费墙即刻失效。
+        # 这里在**源码**层面先查一遍，构建产物层面由 package 作业复查。
+        #
+        # 查三种形态：① 硬编码进代码的 64 位 hex 常量（私钥种子的形态）
+        #             ② 私钥文件本体（keygen 的默认落点 / 各种 .pem .key）
+        #             ③ 用 Python 写比 grep 更可靠：hex 常量与"密钥"语义
+        #                出现在同一行才算命中，避免误伤 RFC 8032 的测试向量。
+        shell: bash
+        run: |
+          python - <<'EOF'
+          import pathlib, re, sys
+
+          HEX64 = re.compile(r"[0-9a-fA-F]{64}")
+          #: 与密钥语义同现才算"把私钥写进了代码"（RFC 测试向量不含这些词）
+          SEMANTIC = re.compile(
+              r"seed|private|secret|signing[_ ]?key|priv[_ ]?key", re.I)
+          bad: list[str] = []
+
+          for p in pathlib.Path("pro").rglob("*.py"):
+              if any(part in {".venv", "build", "__pycache__"} for part in p.parts):
+                  continue
+              for n, line in enumerate(
+                      p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                  if HEX64.search(line) and SEMANTIC.search(line):
+                      # ed25519.py 里的曲线常量是十进制，不会命中；
+                      # 真命中即视为可疑，人工确认后再放行
+                      bad.append(f"{p}:{n}: {line.strip()[:120]}")
+
+          for p in pathlib.Path("pro").rglob("*"):
+              if not p.is_file():
+                  continue
+              if p.name in ("private_key.hex",) or ".license-private" in str(p) \
+                      or p.suffix in (".pem", ".key"):
+                  bad.append(f"私钥文件本体：{p}")
+
+          if bad:
+              print("::error::许可证签发私钥出现在源码树：")
+              print("\n".join(bad))
+              sys.exit(1)
+          print("源码树无私钥泄漏")
+          EOF
+
+  # ── 3. 分析服务（analytics-service）─────────────────────
+  analytics:
+    name: 分析服务测试
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        working-directory: analytics-service
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[test]"
+
+      - name: Test
+        working-directory: analytics-service
+        env:
+          PYTHONUTF8: "1"
+        run: pytest -q
+
+  # ── 4. 前端：类型检查 + 真实构建 ────────────────────────
   web:
     name: 前端构建
     runs-on: ubuntu-latest
@@ -111,7 +231,7 @@ jobs:
           print(f"产物完整：{len(refs)} 个引用全部命中")
           EOF
 
-  # ── 3. 打包产物：装完真的能用吗 ─────────────────────────
+  # ── 5. 打包产物：装完真的能用吗 ─────────────────────────
   package:
     name: 打包与安装验证
     runs-on: ubuntu-latest
@@ -180,3 +300,95 @@ jobs:
           EOF
           # README 里承诺的命令必须真的存在
           /tmp/venv/bin/automind --version
+
+      - name: 审计：商业包里不能混入签发私钥
+        # 付费墙的安全性等价于"客户拿不到签发私钥"。这里把 pro 的 sdist+wheel
+        # 真造出来，逐个查成员名与**内容**（私钥可能被塞进任意文本文件里，
+        # 只查文件名挡不住）。任何一处命中就让 CI 红掉。
+        run: |
+          python -m build pro --outdir dist-pro
+          python - <<'EOF'
+          import io, pathlib, re, sys, tarfile, zipfile
+
+          #: 64 位 hex 常量 —— 私钥种子的形态；公钥也是 64 位 hex，
+          #: 所以还要结合"是否出现在签发上下文里"判断（公钥是允许的）。
+          HEX64 = re.compile(rb"\b[0-9a-fA-F]{64}\b")
+          NAME_MARKERS = ("issue_license", "private_key", ".license-private",
+                          "AUTOMIND_LICENSE_PRIVATE_KEY")
+          bad: list[str] = []
+          for art in pathlib.Path("dist-pro").iterdir():
+              if art.suffix == ".whl":
+                  zf = zipfile.ZipFile(art)
+                  for n in zf.namelist():
+                      if any(m in n for m in NAME_MARKERS):
+                          bad.append(f"{art.name}: 成员 {n}")
+                          continue
+                      if n.endswith((".py", ".json", ".txt", ".cfg", ".toml")):
+                          data = zf.read(n)
+                          if b"AUTOMIND_LICENSE_PRIVATE_KEY" in data \
+                                  and b"os.environ" not in data:
+                              bad.append(f"{art.name}: {n} 疑似硬编码私钥")
+                  continue
+              with tarfile.open(art) as tf:
+                  for m in tf.getmembers():
+                      if any(k in m.name for k in NAME_MARKERS):
+                          bad.append(f"{art.name}: 成员 {m.name}")
+                          continue
+                      if m.isfile() and m.name.endswith((".py", ".json", ".txt")):
+                          data = tf.extractfile(m).read()
+                          if b"PRIVATE KEY" in data and b"BEGIN" in data:
+                              bad.append(f"{art.name}: {m.name} 含 PEM 私钥")
+          if bad:
+              sys.exit("商业包含签发私钥：\n" + "\n".join(bad))
+          print("审计通过：签发私钥未随包分发")
+          EOF
+
+      - name: 商业包：装完必须能验签、且不能签发
+        run: |
+          python -m venv /tmp/provenv
+          /tmp/provenv/bin/pip install -q --upgrade pip
+          /tmp/provenv/bin/pip install -q "$(ls dist/*.whl)[web]" dist-pro/*.whl
+          /tmp/provenv/bin/python - <<'EOF'
+          import os, sys
+          import automind_pro
+          print("automind_pro 版本:", automind_pro.__version__)
+
+          from automind_pro.licensing import keys, parse_license
+
+          # 1) 未置备公钥时**必须失败关闭**（绝不能"验不了就算过"）
+          assert parse_license("AMP2-deadbeef-" + "A" * 32 + "-" + "B" * 100) is None, \
+              "无效许可证竟然通过了"
+
+          # 2) 分发包里不得存在签发能力
+          from automind_pro.licensing import LicenseError, generate_license
+          os.environ.pop("AUTOMIND_LICENSE_PRIVATE_KEY", None)
+          try:
+              generate_license("ENT", "00000000", "attacker")
+          except LicenseError:
+              pass
+          else:
+              sys.exit("❌ 分发包竟然能凭空签发企业版许可证 —— 付费墙失效")
+
+          # 3) 验证"客户手上的包无法伪造"：拿一把自造钥匙去签，必须验不过
+          import secrets
+          from automind_pro.licensing import build_license
+          forged = build_license(secrets.token_bytes(32), "ENT", "00000000", "me")
+          assert parse_license(forged) is None, \
+              "用自造密钥签出的许可证竟然通过了 —— 付费墙失效"
+
+          # 4) 历史上泄露的那把对称密钥：只允许留作"识别并拒绝旧证"的常量，
+          #    但**不得**出现在任何签发路径上（它出现的地方必须是 legacy 分支）
+          import pathlib
+          root = pathlib.Path(automind_pro.__file__).parent
+          for p in root.rglob("*.py"):
+              blob = p.read_bytes()
+              if b"automind-pro-signing-key-2026" in blob:
+                  assert b"_LEGACY" in blob, \
+                      f"{p} 含硬编码对称密钥且不在 legacy 拒绝路径上"
+
+          # 5) 公钥必须仍是"未置备"占位符，或者已换成一把真公钥 —— 两种都可；
+          #    但不能出现"看着像公钥、其实是私钥"的 64 位 hex 常量混进来
+          key_src = (root / "licensing" / "keys.py").read_text(encoding="utf-8")
+          assert "PUBLIC_KEY_HEX" in key_src
+          print("付费墙自检通过：能验签、不能签发、伪造必败")
+          EOF

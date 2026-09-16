@@ -1,4 +1,4 @@
-# 发布流程（当前版本 v1.6.4）
+# 发布流程（当前版本 v1.7.2）
 
 > 各版本变更明细见 [CHANGELOG.md](CHANGELOG.md)。本文档为**发布操作手册**，
 > 与具体版本号解耦 —— 下文 `<ver>` 以 `automind/__init__.py` 的
@@ -19,7 +19,15 @@
 3. 商业包同步 `pro/automind_pro/__init__.py` 与 `pro/pyproject.toml`；
 4. 更新 `CHANGELOG.md`、`使用手册.md` 头部适用版本与
    `automind/static/manual.html`（并同步副本 `使用手册.html`）；
-5. 全量回归：`pytest -q && ruff check . pro && pytest pro/tests -q`。
+5. 前端重新构建（改过 `web/src/**` 时必须）：
+   `cd web && pnpm exec tsc --noEmit && pnpm build` —— 构建产物落在
+   `automind/static/dist/`，它**是随包分发的**，不重建等于界面还是旧版；
+6. 全量回归：`pytest -q && ruff check . && pytest pro/tests -q`，
+   另跑 `analytics-service`：`cd analytics-service && pip install -e ".[test]" && pytest -q`
+   （v1.7.0 起 CI 已覆盖这两处 —— 本地也照同样口径跑一遍，别让 CI 当第一道）。
+   两处需要外网/浏览器，离线环境会红，与本版代码无关，判读时注意：
+   `tests/tools/test_browser_fallback.py::TestFallbackBehaviour::test_falls_back_to_system_browser`。
+   `tests/test_version_consistency.py` 会自动校验上面五处版本号一致。
 
 ## 构建社区版发布物
 
@@ -42,8 +50,47 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 
 ```bash
 cd pro && python -m build          # automind_pro-<ver> wheel（商业渠道分发）
-python -m automind_pro.license PRO 20271231 acme   # 生成客户许可证
 ```
+
+### 许可证签发（v1.7.0 起：非对称签名）
+
+付费墙的安全性等价于**"客户拿不到签发私钥"**。签发私钥不进仓库、不进 wheel、
+不进 sdist（`.gitignore` + `pro/pyproject.toml` 的 `exclude` + `pro/MANIFEST.in`
+三处共同保证，CI 另有两道审计）。
+
+**一次性置备（发行方）**
+
+```bash
+# 1) 生成签名密钥对；私钥默认写到 pro/.license-private/（已 gitignore）
+python pro/tools/issue_license.py keygen
+
+# 2) 把打印出来的 public_key_hex 粘进
+#    pro/automind_pro/licensing/keys.py 的 PUBLIC_KEY_HEX
+#    （不置备 = 商业版一律激活不了，这是刻意的 fail-closed）
+
+# 3) 确认
+python pro/tools/issue_license.py pubkey
+```
+
+> ⚠️ 私钥丢失 = 已发出的许可证无法再签新的（存量许可证仍然有效）；
+> 私钥泄露 = 换 `keygen` 重新置备公钥，**旧公钥签发的许可证全部作废**。
+
+**给客户签发**
+
+```bash
+python pro/tools/issue_license.py issue PRO 20271231 acme
+python pro/tools/issue_license.py issue ENT 00000000 bigcorp --seats 50
+python pro/tools/issue_license.py verify AMP2-xxxx-...      # 签完自己验一遍
+```
+
+客户侧配置方式不变（环境变量 `AUTOMIND_LICENSE` 或
+`.automind_license` / `~/.automind/license` 文件）。
+排障用 `python -m automind_pro.license status` 查看"为什么没激活"。
+
+> 📌 旧格式（`AMP-<TIER>-...`，对称 HMAC 签名）**默认拒绝** ——
+> 那套密钥历史上随包分发过，已等同于公开。存量客户请在换证窗口期内换发新证；
+> 万不得已的临时过渡可用 `AUTOMIND_LICENSE_ALLOW_LEGACY_HMAC=1`，
+> **正式发布不要设置它**。
 
 ## 上传 PyPI（社区版）
 

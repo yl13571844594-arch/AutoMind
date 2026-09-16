@@ -7,6 +7,7 @@ from automind.core.config import AgentConfig, ExecutionConfig
 from automind.core.types import (
     Action,
     Goal,
+    GoalStatus,
     HierarchicalPlan,
     PermissionTier,
     ToolResult,
@@ -129,20 +130,60 @@ class TestParallelExecution:
 # ── 子任务缓存 ──────────────────────────────────────────
 
 class TestSubtaskCache:
-    def test_safe_tool_same_params_cached(self):
+    def test_safe_tool_same_params_cached_within_a_goal(self):
+        """缓存的本意是"同一个步骤别重复读"，**不是**"不同步骤同参就算做完"。
+
+        v1.7.0 起缓存键里带目标身份：此前键只有"工具名 + 参数"，于是两个语义
+        不同的步骤只要调了同一个工具、同一组参数，第二个就会被直接判成功 ——
+        它一步都没执行，报告里却记成"已完成"。下面用**同一目标重跑**来表达
+        缓存该起作用的场景（重试 / 纠错后重执行），跨目标那一条另有用例覆盖。
+        """
+        tool = _SlowTool(delay=0.01)
+        reg = ToolRegistry()
+        reg.register(tool)
+        ex = PlanExecutor(llm=None, tool_registry=reg, parallel=False, use_cache=True)
+        plan = _make_plan([_goal("g1", "slow_probe", {"key": "same"})])
+        goal = plan.root_goal.children[0]
+
+        async def _twice():
+            first = await ex._execute_goal(goal)
+            goal.status = GoalStatus.PENDING        # 模拟纠错后重跑同一目标
+            second = await ex._execute_goal(goal)
+            return first, second
+
+        first, second = asyncio.run(_twice())
+        assert first.success and second.success
+        assert tool.exec_count == 1, "同一目标内的重复只读调用没有复用"
+        assert ex.cache_hits == 1
+
+    def test_safe_tool_different_params_not_cached(self):
         tool = _SlowTool(delay=0.01)
         reg = ToolRegistry()
         reg.register(tool)
         ex = PlanExecutor(llm=None, tool_registry=reg, parallel=False, use_cache=True)
         plan = _make_plan([
             _goal("g1", "slow_probe", {"key": "same"}),
-            _goal("g2", "slow_probe", {"key": "same"}),   # 同参 → 命中缓存
-            _goal("g3", "slow_probe", {"key": "other"}),  # 异参 → 真实执行
+            _goal("g2", "slow_probe", {"key": "other"}),  # 异参 → 真实执行
         ])
         report = asyncio.run(ex.execute(plan))
-        assert report.completed_steps == 3
+        assert report.completed_steps == 2
         assert tool.exec_count == 2
-        assert ex.cache_hits == 1
+        assert ex.cache_hits == 0
+
+    def test_cache_does_not_dedupe_across_different_goals(self):
+        """跨目标的同参只读调用必须**各自执行** —— 否则等于悄悄跳过了步骤。"""
+        tool = _SlowTool(delay=0.01)
+        reg = ToolRegistry()
+        reg.register(tool)
+        ex = PlanExecutor(llm=None, tool_registry=reg, parallel=False, use_cache=True)
+        plan = _make_plan([
+            _goal("g1", "slow_probe", {"key": "same"}),
+            _goal("g2", "slow_probe", {"key": "same"}),
+        ])
+        report = asyncio.run(ex.execute(plan))
+        assert report.completed_steps == 2
+        assert tool.exec_count == 2, "第二个目标被缓存顶掉了（它其实没执行）"
+        assert ex.cache_hits == 0
 
     def test_sensitive_tool_never_cached(self):
         tool = _WriteTool()

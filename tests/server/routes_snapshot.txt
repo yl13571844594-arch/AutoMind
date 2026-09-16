@@ -74,6 +74,7 @@ GET /api/team/tasks
 GET /api/templates/custom
 GET /api/tokens
 GET /api/tools
+GET /api/tools/registration
 GET /api/update/check
 GET /api/update/state
 GET /api/workspaces

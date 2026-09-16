@@ -52,6 +52,23 @@
 #input-area button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px var(--accent-glow); }
 #input-area button:disabled { opacity: .4; cursor: not-allowed; transform: none; box-shadow: none; }
 #input-area #stop-btn { display:none; background: var(--red) !important; }
+/* 「⤴ 插入补充」：执行期间才出现，宽度随文字走（基类写死 48px 会截断中文） */
+#input-area #interject-btn {
+  display: none; width: auto; padding: 0 14px; font-size: .85em; white-space: nowrap;
+  min-height: 48px; flex-shrink: 0;
+}
+
+/* 插入气泡的状态小标记：补充（待纳入） → 已纳入本轮 / 未纳入。
+   气泡底色是渐变高亮，用白字 + 半透明白底才能保证可读而不依赖主题变量 */
+.interject-tag {
+  display:inline-block; font-size:.72em; padding:2px 8px; border-radius:10px;
+  margin-right:6px; vertical-align:middle; font-weight:500;
+  background: rgba(255,255,255,.22); color:#fff;
+}
+.interject-tag.it-pending { animation: pulse 1.6s infinite; }
+.interject-tag.it-applied::before { content: '✓ '; }
+.interject-tag.it-dropped { background: var(--red); color:#fff; }
+.interject-tag.it-dropped::before { content: '✕ '; }
 
 /* ── Modal ────────────────────────────── */
 .modal-overlay {

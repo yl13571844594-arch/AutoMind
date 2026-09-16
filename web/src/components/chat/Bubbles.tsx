@@ -12,6 +12,24 @@ function Avatar({ role, icon }: { role: 'user' | 'agent'; icon?: string }) {
   return <div className="avatar">{icon || (role === 'user' ? '我' : 'AM')}</div>;
 }
 
+/**
+ * 插入补充的状态徽标。
+ *
+ * 前提是"它和自己的普通提问长得一样"：都是用户气泡，事后翻记录时分不清哪句是
+ * 执行中途后补的、哪句是本轮原本的要求，而这恰恰决定了这轮回答该不该包含它。
+ * 三种定论态各有颜色，未定论态写清楚"还在等模型读"，不含糊成一句"补充"。
+ */
+function injectFlag(item: Extract<ChatItem, { kind: 'msg' }>): { cls: string; text: string } | null {
+  if (!item.injected) return null;
+  if (item.applied) return { cls: 'badge-builtin', text: '✓ 已纳入本轮' };
+  // 被提升成新任务：它不是"没纳入本轮"，也不该顶着"已纳入本轮" —— 这两句话
+  // 都不对，用户需要知道的是"你那句话变成了一次新任务"。
+  if (item.promoted) return { cls: 'badge-plugin', text: '↗ 已作为新任务开始' };
+  if (item.rejected) return { cls: 'badge-dangerous', text: '✕ 未被接受' };
+  if (item.dropped) return { cls: 'badge-custom', text: '⚠ 未纳入本轮' };
+  return { cls: 'badge-mcp', text: '⤴ 补充 · 待本轮读取' };
+}
+
 export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
   item: Extract<ChatItem, { kind: 'msg' }>;
   onDelete?: (id: string) => void;
@@ -61,6 +79,8 @@ export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
     onResend?.(item.id, t);
   };
 
+  const flag = injectFlag(item);
+
   return (
     <div className={`msg ${item.role === 'user' ? 'user' : 'agent'}`}>
       <Avatar role={item.role} />
@@ -85,6 +105,13 @@ export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
           {item.images && item.images.length > 0 && (
             <div className="mm-thumbs">
               {item.images.filter(isSafeUrl).map((u, i) => <img key={i} src={u} alt="img" />)}
+            </div>
+          )}
+          {/* 徽标放在正文上方：它是这条消息的"结论"，读到正文之前就该看见 */}
+          {flag && (
+            <div className="inj-flag" title={item.injectNote || ''}>
+              <span className={`badge ${flag.cls}`}>{flag.text}</span>
+              {item.injectNote && <span className="hint-text">{item.injectNote}</span>}
             </div>
           )}
           {editing ? (

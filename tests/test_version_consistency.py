@@ -69,3 +69,45 @@ def test_manual_changelog_shows_this_version():
         pytest.skip("未构建手册")
     text = _read(manual)
     assert f"v{__version__}" in text, f"手册里没有 v{__version__} 的更新日志条目"
+
+
+def test_commercial_package_version_matches():
+    """商业包（automind-pro）与社区核心同版本发布。
+
+    此前两者各自演进（核心 1.6.4 / 商业包 1.5.1）：用户看不出
+    "我装的 automind-pro 该配哪个核心"，pip 也不会提示不匹配。
+    真正的兼容边界是 ``EXTENSION_API_VERSION``，版本号没有必要各说各话。
+    """
+    pro = _ROOT / "pro" / "automind_pro" / "__init__.py"
+    if not pro.exists():
+        pytest.skip("社区版源码包不含 pro/")
+    m = re.search(r'__version__\s*=\s*"([\d.]+)"', _read(pro))
+    assert m, "pro/automind_pro/__init__.py 里找不到 __version__"
+    assert m.group(1) == __version__, (
+        f"automind_pro={m.group(1)} 与核心={__version__} 不一致 —— "
+        "商业包与社区核心必须同版本发布")
+
+
+def test_pro_pyproject_matches_its_package():
+    pro_py = _ROOT / "pro" / "pyproject.toml"
+    if not pro_py.exists():
+        pytest.skip("社区版源码包不含 pro/")
+    data = tomllib.loads(_read(pro_py))
+    assert data["project"]["version"] == __version__, \
+        "pro/pyproject.toml 版本未与社区核心对齐"
+
+
+def test_license_private_key_is_gitignored():
+    """签发私钥一旦进版本库，付费墙即刻失效 —— 忽略规则必须挡住它。"""
+    ignore = _read(_ROOT / ".gitignore")
+    for pat in (".license-private", "private_key.hex"):
+        assert pat in ignore, f".gitignore 没有忽略 {pat}"
+
+
+def test_community_package_must_not_ship_the_license_private_key():
+    """社区包的打包配置里不得包含任何私钥/签发工具的路径。"""
+    py = tomllib.loads(_read(_ROOT / "pyproject.toml"))
+    find_cfg = py.get("tool", {}).get("setuptools", {}).get("packages", {}).get("find", {})
+    include = find_cfg.get("include", [])
+    assert all("pro" not in pat for pat in include), \
+        f"社区包竟然包含商业代码路径：{include}"

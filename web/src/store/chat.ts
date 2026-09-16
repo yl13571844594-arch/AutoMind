@@ -12,8 +12,21 @@ export interface PlanRow { text: string; goalId?: string; state: 'pending' | 'ru
 export interface MaStep { role: string; subtask: string; state: 'pending' | 'run' | 'ok'; output?: string }
 export interface LoopIter { iter: number; max: number; action?: string; obs?: string; done?: boolean }
 
+// 中途插入的补充在各阶段的状态。injected 只是"这是一条补充"，与是否生效无关。
+// promoted：当时没有任务在跑，它被服务端提升成了一次新任务 —— 也算有了定论，
+// 否则任务结束时会被"未确认兜底"误判成"没纳入"，那是对用户撒谎。
+export type InjectState = 'received' | 'applied' | 'promoted' | 'dropped' | 'rejected';
+
 export type ChatItem =
-  | { kind: 'msg'; id: string; role: 'user' | 'agent'; md: string; images?: string[]; meta?: string }
+  // 插入补充（injected）另带一组状态位：已纳入本轮的 / 确认没纳入的 / 被拒的。
+  // 拆成独立字段而不是一个枚举，是为了让"有没有效"也能跟着消息一起落盘 ——
+  // 刷新后徽标仍停在当时的状态，而不是退回"待读取"让人以为还没生效。
+  // injectNote 存服务端给的原因/位置（哪一步读到的、为什么没纳入），挂在徽标上。
+  | {
+      kind: 'msg'; id: string; role: 'user' | 'agent'; md: string; images?: string[]; meta?: string;
+      injected?: boolean; applied?: boolean; promoted?: boolean; dropped?: boolean; rejected?: boolean;
+      injectNote?: string;
+    }
   | { kind: 'welcome'; id: string }
   | { kind: 'stream'; id: string; buf: string }
   | { kind: 'typing'; id: string }
@@ -91,6 +104,7 @@ interface ChatState {
   clearMode: (mode: Mode) => void;
   setMessages: (mode: Mode, items: ChatItem[]) => void;
   reload: () => void;
+  markInjected: (id: string, state: InjectState, note?: string) => void;
   setTaskMode: (m: Mode | null) => void;
   setLastTask: (t: { text: string; mode: Mode } | null) => void;
   setPendingImages: (imgs: string[]) => void;
@@ -163,6 +177,40 @@ export const useChat = create<ChatState>((set, get) => ({
   reload: () => {
     const side = loadSide();
     set({ messages: loadPersisted(), inputDraft: side.draft, lastTask: side.lastTask });
+  },
+
+  /**
+   * 给一条插入补充落定状态（由服务端事件驱动，见 ws.ts 的 interjection_* 分支）。
+   *
+   * 按 id 在**所有模式**里找，而不是只查当前模式：补充是发在当时那个模式列表
+   * 里的，事件回来时用户可能已经切走（切模式不阻塞执行），只查当前模式会漏标，
+   * 气泡就永远停在"待读取"。id 由发送方生成、全局唯一，跨模式扫描不会误伤。
+   */
+  markInjected: (id, state, note) => {
+    const hit = (i: ChatItem): ChatItem => (i.kind !== 'msg' ? i : {
+      ...i,
+      injected: true,
+      applied: state === 'applied',
+      // 被提升成新任务的既不是"没纳入"也不是"纳入本轮"，它有自己的一档
+      promoted: state === 'promoted',
+      // 被拒的也归到"未纳入"这一侧：对用户而言两者一样 —— 这句话没进本轮回答
+      dropped: state === 'dropped' || state === 'rejected',
+      rejected: state === 'rejected',
+      injectNote: note || i.injectNote,
+    });
+    set((s) => {
+      let changed = false;
+      const messages: Partial<Record<Mode, ChatItem[]>> = { ...s.messages };
+      for (const k of Object.keys(messages) as Mode[]) {
+        const list = messages[k];
+        if (!list || !list.some((i) => i.id === id)) continue;
+        messages[k] = list.map((i) => (i.id === id ? hit(i) : i));
+        changed = true;
+      }
+      return changed ? { messages } : s;
+    });
+    // 落盘：状态是用户事后回看时的依据，丢了刷新一下就像从没生效过
+    get().persist();
   },
 
   setTaskMode: (m) => set({ taskMode: m }),

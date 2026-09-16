@@ -7,7 +7,7 @@ import { chatSid, MODE_LABELS, useApp, type Mode } from '../../store/app';
 import { uid, useChat, type ChatItem } from '../../store/chat';
 import { usePanel } from '../../store/panel';
 import { useUi } from '../../store/ui';
-import { sendRun, sendStop, wsReady } from '../../ws';
+import { sendInterject, sendRun, sendStop, wsReady } from '../../ws';
 import {
   ErrorBubble, ExecBubble, LoopBubble, MsgBubble, MultiBubble, ResumeBubble,
   StreamBubble, TypingBubble, WelcomeBubble,
@@ -135,6 +135,41 @@ export default function ChatPanel() {
     useApp.getState().setRunning(true);
     st.append(cur, { kind: 'typing', id: uid() });
     sendRun(text, images);
+  };
+
+  /**
+   * 执行中把这句话"插"进正在跑的那一轮（服务端 interject）。
+   *
+   * 与 send() 的三点关键差别：不清 pendingImages、不动 lastTask、不置 running ——
+   * 这一轮的执行状态是既有的，插一句话不该把它当成新一轮从头开始。极端情况下
+   * 服务端发现当时并没有任务在跑，会把它提升成一次新任务（interjection_promoted
+   * → task_start），届时由 task_start 自己把 running 置上，这里不用预判。
+   */
+  const interject = (fromButton = false) => {
+    const text = (taRef.current?.value ?? '').trim();
+    if (!text) {
+      // 点按钮却什么都没发生最让人困惑；键盘回车敲在空框里则不必每次都弹提示
+      if (fromButton) message.info('先输入要补充的内容');
+      return;
+    }
+    if (!wsReady()) { message.error('未连接到服务器，请稍候重试'); return; }
+    const st = useChat.getState();
+    const cur = useApp.getState().mode;
+    const id = uid();
+    // 先把气泡落下来：用户按下这一下之后必须马上看得见自己说了什么；同时这个 id
+    // 就是后续 interjection_applied/dropped 认领气泡的凭据（见 ws.ts 的登记表）。
+    st.append(cur, { kind: 'msg', id, role: 'user', md: text, injected: true });
+    if (taRef.current) {
+      taRef.current.value = '';
+      taRef.current.style.height = 'auto';
+    }
+    window.clearTimeout(saveTimer.current);   // 别让待触发的保存把草稿又写回来
+    st.setInputDraft('');
+    if (st.pendingImages.length) {
+      // 补充只发文字。悄悄把图一起发出去，用户会以为图片还留在待发区。
+      message.info('补充只发送文字，已附加的图片会留给下一条正式消息');
+    }
+    sendInterject(text, id);
   };
 
   // 从失败卡片重跑/续跑：任务原文取自卡片自身，重启应用后依然有效。
@@ -312,20 +347,29 @@ export default function ChatPanel() {
           onClick={toggleVoice}
         >🎤</button>
         <input ref={fileRef} type="file" accept="image/*" multiple style={{ display: 'none' }} onChange={pickImages} />
+        {/* 执行中不再锁死输入框：此前是 disabled={running}，用户看到 AI 跑偏了只能
+            先停止再重发，还会丢掉已经跑出来的中间结果。现在随时能补一句话。 */}
         <textarea
           ref={taRef}
           defaultValue={draft0}
-          disabled={running}
           rows={1}
-          placeholder={({
-            chat: '输入消息，Enter 发送，Shift+Enter 换行...',
-            work: '描述你想完成的任务，AutoMind 会自主规划并执行...',
-            coding: '描述编程需求（创建/修复/重构/测试），AutoMind 会读写代码并运行...',
-            multi: '描述一个较复杂的任务，多个智能体将分工协作完成...',
-            loop: '描述一个需要反复迭代直到达标的目标，系统将自主循环修正...',
-          } as Record<Mode, string>)[mode]}
+          placeholder={running
+            ? '任务执行中 —— 把补充要求写在这里，Enter 或点 ⤴ 插入本轮（Shift+Enter 换行）'
+            : ({
+              chat: '输入消息，Enter 发送，Shift+Enter 换行...',
+              work: '描述你想完成的任务，AutoMind 会自主规划并执行...',
+              coding: '描述编程需求（创建/修复/重构/测试），AutoMind 会读写代码并运行...',
+              multi: '描述一个较复杂的任务，多个智能体将分工协作完成...',
+              loop: '描述一个需要反复迭代直到达标的目标，系统将自主循环修正...',
+            } as Record<Mode, string>)[mode]}
           onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+            if (e.key !== 'Enter' || e.shiftKey) return;
+            e.preventDefault();
+            // 执行中回车一律当"插入"：用户按回车就是想现在把这句话送出去。
+            // 此前这里被 send() 开头的 running 检查静默吞掉，敲了回车像没反应。
+            // Ctrl/Cmd+Enter 不分状态都走插入，交给服务端判断该排队还是开新任务。
+            if (e.ctrlKey || e.metaKey || useApp.getState().running) interject();
+            else send();
           }}
           onInput={(e) => {
             const el = e.currentTarget;
@@ -342,6 +386,15 @@ export default function ChatPanel() {
           }}
         />
         {/* 不能直接 onClick={send}：React 会把 MouseEvent 当成 override 参数传进去 */}
+        {/* 插入与停止并排且长得不一样：两者后果天差地别，样式相同会点错 ——
+            停止会丢掉这一轮的中间结果，插入不会取消任何东西。 */}
+        {running && (
+          <button
+            onClick={() => interject(true)}
+            title="插入补充：把这句话并进正在执行的任务，不会中断它（Enter 或 Ctrl+Enter；Shift+Enter 换行）"
+            className="send-btn inject"
+          >⤴ 插入</button>
+        )}
         {!running ? (
           <button onClick={() => send()} title="发送 (Enter)" className="send-btn">▶</button>
         ) : (

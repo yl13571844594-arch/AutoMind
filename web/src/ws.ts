@@ -69,6 +69,10 @@ function scheduleReconnect() {
   const base = Math.min(30000, 1000 * 2 ** retry++);
   const delay = base * (0.5 + Math.random() * 0.5);
 
+  // 在途的补充一并收尾（详见该函数注释）。它只改气泡状态，不参与 running 的
+  // 判定 —— 绝不能因为"还有补充没等到回音"就拖着界面不解锁。
+  settleInterjectsOnDisconnect();
+
   // 任务跑到一半断线：后端把这次执行绑在这条 socket 上，事件再也送不回来了。
   // 若不复位 running，输入框会一直是 disabled，用户既看不到结果也没法重发 ——
   // 表现为"卡在执行中不动"。故落一张失败卡片（带重跑入口）并解锁界面。
@@ -122,6 +126,145 @@ export function sendApproval(
     action: 'approval_response', approval_id: approvalId, approved,
     ...(args ? { arguments: args, comment: '用户修改参数后批准' } : {}),
   }));
+}
+
+/**
+ * 中途插入的补充问题 —— 客户端侧的"事件 → 气泡"对应表。
+ *
+ * 主路径是 ref（请求里带上、服务端原样回显，见 sendInterject），这张表是**回落**：
+ * 老式回执不带 ref 时按 seq/文本找，另外还记着这条补充是发在哪个模式的（promoted
+ * 之后要把"上次任务"归到那个模式下）。表放在 ws.ts 而不是 store，是因为它纯粹是
+ * 传输层的易失状态 —— 写进 localStorage 只会在重启后留下一堆对不上号的 seq。
+ */
+interface SentInterject { id: string; text: string; mode: Mode; seq?: number }
+const sentInterjects: SentInterject[] = [];
+
+// 一次执行里同时在途的补充不会有几条，留点余量即可；服务端一直不回（比如它在
+// 回事件之前就崩了）时，靠这个上限避免登记项无限堆积。
+const MAX_SENT_INTERJECTS = 20;
+
+/**
+ * 发送一条中途补充。
+ *
+ * `itemId` 由调用方（ChatPanel）先生成：气泡是"发出去就立刻显示"的乐观渲染，
+ * 而服务端事件只带 seq/text。把 id 在发送时就交进来，收到确认后才找得回那个
+ * 已经画在屏幕上的气泡。（也可以让服务端回 itemId，但协议已冻结，只能在本地记账。）
+ *
+ * `ref` 直接复用这个气泡 id：协议要求客户端给一个"稳定唯一串"并原样回显，而
+ * 气泡 id 本来就满足（发送时生成、跨会话唯一、随消息一起落盘）。这样回执一到
+ * 就能一步定位 —— 连发两条一模一样的补充也各归各的，不必靠"最新一条未确认"
+ * 这种猜测。
+ *
+ * 刻意不带图片：interject 的语义是"补一句话"。协议虽留了 images 字段，这里仍传
+ * 空数组 —— 待发区的图片是用户为下一条正式消息准备的，悄悄一起发出去会让他以为
+ * 图片还留着（ChatPanel 里会把这件事告诉用户）。
+ */
+export function sendInterject(text: string, itemId: string): void {
+  if (!wsReady()) return;
+  sentInterjects.push({ id: itemId, text, mode: app().mode });
+  if (sentInterjects.length > MAX_SENT_INTERJECTS) sentInterjects.shift();
+  ws!.send(JSON.stringify({
+    action: 'interject', text, session_id: chatSid(), interaction: app().mode, images: [],
+    ref: itemId,
+  }));
+}
+
+/** 回执里的 ref（服务端原样回显；也接受 client_ref 这种写法）。ref 就是气泡 id。 */
+function refOf(data: any): string {
+  const r = data?.ref ?? data?.client_ref;
+  return typeof r === 'string' ? r : '';
+}
+
+/** 首先按 ref、其次按 seq、最后按文本找回登记项。seq 要等服务端确认时才知道。 */
+function findSentInterject(data: any): SentInterject | null {
+  const ref = refOf(data);
+  if (ref) {
+    const byRef = sentInterjects.find((e) => e.id === ref);
+    if (byRef) return byRef;
+  }
+  const seq = Number(data?.seq);
+  if (Number.isFinite(seq)) {
+    const bySeq = sentInterjects.find((e) => e.seq === seq);
+    if (bySeq) return bySeq;
+  }
+  const text = String(data?.text ?? '');
+  return sentInterjects.find((e) => e.text === text) || null;
+}
+
+/**
+ * 还没定论的插入补充（既没确认纳入、也没说没纳入、也没被提升成新任务）——
+ * 三处判定共用，避免以后加了一档状态却漏掉某一处。写成类型谓词是为了让调用处
+ * 直接拿到 msg 变体（要读 id/md），不必再到处断言。
+ */
+function isUnsettledInjection(
+  it: ChatItem,
+): it is Extract<ChatItem, { kind: 'msg' }> {
+  return it.kind === 'msg' && !!it.injected
+    && !it.applied && !it.promoted && !it.dropped && !it.rejected;
+}
+
+/**
+ * 定位这条插入事件对应的气泡 id。
+ *
+ * ref 优先（见 sendInterject：它就是气泡 id，唯一且不含歧义）；没有 ref 的旧式
+ * 回执才退回登记表，再不行就回到消息列表里按文本找"还没定论"的插入气泡 —— 只认
+ * 未定论的，否则上一轮一条同名的补充会被这次事件改成错的状态。刷新页面后登记表
+ * 是空的，靠的正是这最后一层。
+ */
+function interjectBubbleId(data: any): string | null {
+  const ref = refOf(data);
+  if (ref) return ref;
+  const entry = findSentInterject(data);
+  if (entry) return entry.id;
+  const text = String(data?.text ?? '');
+  for (const m of Object.keys(MODE_LABELS) as Mode[]) {
+    const items = chat().items(m);
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (!isUnsettledInjection(it)) continue;
+      if (text && it.md !== text) continue;
+      return it.id;
+    }
+  }
+  return null;
+}
+
+/** 事件已定论，把登记项撤掉：seq 很可能按轮次从 1 重新计数，留着会串到下一轮。 */
+function forgetSentInterject(data: any): void {
+  const entry = findSentInterject(data);
+  const at = entry ? sentInterjects.indexOf(entry) : -1;
+  if (at >= 0) sentInterjects.splice(at, 1);
+}
+
+// 模型是在哪一步读到这条补充的。只报位置、不替服务端断言"是否改变了答案" ——
+// turn_end 读到意味着这轮回答可能没受影响，说成"已生效"就是过度承诺。
+const INJECT_AT_CN: Record<string, string> = {
+  chat_round: '本轮回答', react_step: '执行步骤', plan_step: '计划步骤', turn_end: '本轮收尾',
+};
+
+/** 提示语里引用插入原文：太长的截断，免得一条提示占掉半个屏幕。 */
+function brief(text: unknown, n = 40): string {
+  const s = String(text ?? '');
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/**
+ * 断线时给还没定论的插入收个尾。
+ *
+ * 后端把这次执行绑在这条 socket 上，事件再也送不回来了 —— 那些停在"已收下，
+ * 排入本轮"的气泡永远不会变成已纳入/未纳入，一直挂着等于骗用户"还在排队"。
+ * 这里统一标成未纳入（提示语写明是断线导致无法确认），并清空登记表：seq 可能
+ * 按轮次从 1 重数，留着会串到重连之后的新任务上。注意它只动气泡，不碰 running。
+ */
+function settleInterjectsOnDisconnect(): void {
+  if (!sentInterjects.length) return;
+  sentInterjects.length = 0;
+  for (const m of Object.keys(MODE_LABELS) as Mode[]) {
+    for (const it of chat().items(m)) {
+      if (!isUnsettledInjection(it)) continue;
+      chat().markInjected(it.id, 'dropped', '与服务器的连接已断开，这条补充是否被读到无法确认');
+    }
+  }
 }
 
 // ── 面板/气泡工具 ──────────────────────────────────────
@@ -268,11 +411,44 @@ function appendFailure(mode: Mode, why: '出错' | '中断', error: string) {
   }
 }
 
+/**
+ * 任务终态兜底：把还停在"已收下、未确认"的插入补充统一标成未纳入并提示一次。
+ *
+ * 为什么必须有这一层：用户点「停止」时任务是被取消的，服务端很可能来不及发
+ * interjection_dropped。不兜底的话气泡会永远停在"待本轮读取"，用户一直以为自己
+ * 那句话生效了 —— 这比明确报错更糟。已 applied/dropped/rejected 的一律不动。
+ *
+ * 放在 setRunning(false) 里，是因为 chat_done / task_complete / task_cancelled /
+ * task_error 四条终态路径都必经此处（断线那条更早就由
+ * settleInterjectsOnDisconnect 收尾了，到这里已无可扫之物，不会重复提示）。
+ */
+function settleInterjectsOnRunEnd(): void {
+  let n = 0;
+  for (const m of Object.keys(MODE_LABELS) as Mode[]) {
+    for (const it of chat().items(m)) {
+      if (!isUnsettledInjection(it)) continue;
+      chat().markInjected(it.id, 'dropped', '本轮任务已结束，未收到服务端确认，这条补充没能纳入');
+      n++;
+    }
+  }
+  if (!n) return;
+  // 本轮已结束，登记项一并清掉：seq 可能按轮次从 1 重数，留着会串到下一轮
+  sentInterjects.length = 0;
+  // 气泡上的徽标用户未必正看着，补一条提示把话说明白
+  message.warning(
+    `本轮任务已结束，你插入的 ${n} 条补充没能纳入（未收到服务端确认），需要的话请重新发送`, 6);
+}
+
 function setRunning(on: boolean) {
   app().setRunning(on);
   // 完成/失败/中断/断线都会走到这里，进度条统一在此收掉，
   // 免得漏了某条终态路径，进度指示永远停在"第 3/7 步"不动。
-  if (!on) { chat().setTaskMode(null); chat().persist(); panel().clearProgress(); }
+  if (!on) {
+    chat().setTaskMode(null);
+    settleInterjectsOnRunEnd();
+    chat().persist();
+    panel().clearProgress();
+  }
 }
 
 // ── 事件分发 ───────────────────────────────────────────
@@ -283,6 +459,10 @@ function handle(data: any) {
   switch (data.type) {
     case 'task_start':
       removeTyping(mode);
+      // running 在这里置位，而不是只靠 ChatPanel 的 send()。补充被服务端"提升"
+      // 成新任务时（interjection_promoted）界面上没有任何人替它置位，漏了这一步
+      // 就会出现"任务在跑、输入框还是发送态、进度条不显示"的错乱渲染。
+      setRunning(true);
       chat().setTaskMode(mode);
       panel().startProgress(
         data.interaction === 'multi' ? '协同中'
@@ -353,6 +533,15 @@ function handle(data: any) {
         timeoutS: data.timeout_s || 0,
         askedAt: Date.now(),
       });
+      // 进度条同步切成"等你批准"：弹窗万一被别的窗口/弹层挡住，
+      // 输入框旁边这一行仍然是可见的
+      panel().patchProgress({ label: `⏳ 等待你批准：${data.tool || ''}` });
+      break;
+
+    case 'approval_stale':
+      // 迟到的回答（审批已超时/任务已中断）—— 明说，别让用户以为点空了
+      message.info(data.message || '这次审批已经结束，本次点击不再生效。', 5);
+      panel().setApproval(null);
       break;
 
     case 'approval_timeout':
@@ -363,6 +552,36 @@ function handle(data: any) {
       message.warning(
         data.message || `工具 ${data.tool} 的审批等待超时，已按「拒绝」处理。`, 0);
       break;
+
+    case 'approval_failed': {
+      // 审批通道本身出错（回调抛异常）——这一步已被按拒绝处理，必须让用户知道
+      panel().setApproval(null);
+      execTrace(taskMode(), `🙋 审批通道异常：${data.tool || ''}`,
+        esc(String(data.reason || '')), 'error');
+      message.error(
+        `${data.tool || '该操作'} 的审批未能完成（${data.reason || '通道异常'}），已按拒绝处理。`,
+        6);
+      break;
+    }
+
+    case 'tool_timeout': {
+      // 单步工具超时：这一步被中止了，但任务还在继续（模型会换做法）
+      const n = Number(data.timeouts_total || 1);
+      execTrace(taskMode(), `⏱ 单步超时：${data.tool || ''}`,
+        `${esc(String(data.reason || ''))}<br>超时上限 ${data.timeout_s || 0}s`
+        + (n > 1 ? `（本次任务第 ${n} 次）` : ''), 'error');
+      break;
+    }
+
+    case 'react_no_progress': {
+      // ReAct 原地打转：同一个动作被反复执行到被拦截
+      const blocked = Number(data.blocked || 0);
+      panel().patchProgress({ label: `🔁 无进展：${data.tool || '重复动作'}` });
+      execTrace(taskMode(), `🔁 无进展（第 ${blocked} 次拦截）`,
+        `${esc(String(data.tool || ''))}<br>${esc(String(data.reason || ''))}`,
+        'error');
+      break;
+    }
 
     case 'team_activity': {
       panel().pushTeam(data);
@@ -519,5 +738,89 @@ function handle(data: any) {
       setRunning(false);
       notifyDone('stop', mode, data);
       break;
+
+    // ── 中途插入的补充问题 ───────────────────────────────
+    // 这五条构成一条完整的生命周期：received → applied / dropped；没任务在跑时
+    // 走 promoted，参数不合法走 rejected。只有 received 是"收下了"，其余四条都
+    // 必须让用户看见 —— 沉默的失败会让他以为那句话已经算进本轮回答里了。
+    case 'interjection_received': {
+      // 到这里才知道 seq，补进登记表（seq 只用于展示"前面还有几条"，定位一律靠 ref）
+      const text = String(data.text ?? '');
+      const ref = refOf(data);
+      const entry = sentInterjects.find((e) => e.id === ref && e.seq === undefined)
+        || sentInterjects.find((e) => e.seq === undefined && e.text === text)
+        || sentInterjects.find((e) => e.seq === undefined);
+      if (entry) entry.seq = Number(data.seq);
+      const id = interjectBubbleId(data);
+      const pending = Number(data.pending || 0);
+      if (id) {
+        chat().markInjected(id, 'received', pending > 1
+          ? `已收下，前面还有 ${pending - 1} 条补充在排队`
+          : '已收下，排入本轮等待模型读取');
+      }
+      break;
+    }
+
+    case 'interjection_applied': {
+      // 模型**真的读到了**：徽标从"待读取"转成"已纳入本轮"。
+      // 服务端一次可能下发多条（items，每条各带自己的 ref），也可能只给顶层一条。
+      const items: any[] = Array.isArray(data.items) && data.items.length ? data.items : [data];
+      const labels = new Set<string>();
+      for (const it of items) {
+        const label = INJECT_AT_CN[String(it?.applied_at ?? it?.at ?? '')]
+          || String(it?.applied_at ?? it?.at ?? '本轮');
+        labels.add(label);
+        const id = interjectBubbleId(it);
+        if (id) chat().markInjected(id, 'applied', `模型已在${label}读到这条补充`);
+        forgetSentInterject(it);
+      }
+      // 再补一条短提示是必要的 —— 此刻用户往往正盯着流式回答，未必看得到列表里
+      // 那个徽标的变化，而"我那句话到底有没有进去"正是这个功能最要紧的反馈。
+      const where = labels.size === 1 ? [...labels][0] : '本轮';
+      if (items.length === 1) {
+        message.success(`✓ 已纳入本轮（${where}）：${brief(items[0]?.text)}`, 3);
+      } else {
+        message.success(`✓ ${items.length} 条补充已纳入本轮（${where}）`, 3);
+      }
+      break;
+    }
+
+    case 'interjection_dropped': {
+      // 没能纳入本轮（任务先结束了）。这条最不能沉默：用户以为补上了，其实没有，
+      // 而本轮回答会按原来的要求在跑。气泡同样要标成未纳入，别只靠一闪而过的提示。
+      const reason = String(data.reason || '本轮任务在你补充之前就结束了');
+      const id = interjectBubbleId(data);
+      if (id) chat().markInjected(id, 'dropped', reason);
+      forgetSentInterject(data);
+      message.warning(
+        `你插入的补充没能纳入本轮（${reason}）：${brief(data.text)}，需要的话请重新发送`, 6);
+      break;
+    }
+
+    case 'interjection_promoted': {
+      // 当时没有任务在跑，服务端已把它当成一次新任务直接开跑（task_start 随之而来）。
+      // 顺手把"上次任务"改成这句补充：这一轮若失败/中断，失败卡片上的"原任务"
+      // 必须是真正在跑的东西，否则"检查现状后接着做"会去续一个早已完成的旧任务。
+      const entry = findSentInterject(data);
+      chat().setLastTask({ text: String(data.text ?? entry?.text ?? ''), mode: entry?.mode ?? taskMode() });
+      const id = interjectBubbleId(data);
+      // 必须落一个"有定论"的状态：它已经是这次任务的正文，若还挂着"待读取"，
+      // 任务结束时会被下面的兜底误标成"没纳入"，等于告诉用户那句补充没生效。
+      if (id) chat().markInjected(id, 'promoted', '当时没有正在执行的任务，已作为新任务直接开始');
+      forgetSentInterject(data);
+      message.info('当时没有正在执行的任务，已把它作为新任务直接开始');
+      break;
+    }
+
+    case 'interjection_rejected': {
+      // 被拒（空内容/太长/配额/并发上限）。气泡留着并标成未生效，而不是删掉：
+      // 直接扔掉的话，用户刚敲的那段字就再也找不回来了。
+      const reason = String(data.reason || '这条补充未被接受');
+      const id = interjectBubbleId(data);
+      if (id) chat().markInjected(id, 'rejected', reason);
+      forgetSentInterject(data);
+      message.error(data.text ? `${reason}：${brief(data.text)}` : reason, 6);
+      break;
+    }
   }
 }

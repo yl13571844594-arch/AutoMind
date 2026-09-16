@@ -76,6 +76,7 @@ class PlanExecutor:
         auto_retry: bool = True,
         parallel: bool = True,
         use_cache: bool = True,
+        goal_timeout: float = 900.0,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
@@ -90,6 +91,15 @@ class PlanExecutor:
         self.use_cache = use_cache
         self._subtask_cache: dict[str, ToolResult] = {}
         self.cache_hits = 0
+        # v1.7.0：单目标执行上限（秒）。0/负数 = 不限（恢复旧行为）。
+        # 异常屏障只兜得住"抛出来"，兜不住"挂住不回"—— 这是并行批次
+        # 停滞的主因（网络读、子进程、审批等待都可能无限期挂起）。
+        try:
+            self.goal_timeout = max(0.0, float(goal_timeout or 0))
+        except (TypeError, ValueError):
+            self.goal_timeout = 900.0
+        #: 超时熔断计数（供报告说明"有几个步骤是被超时掐掉的"）
+        self.timed_out = 0
 
     async def execute(
         self,
@@ -98,6 +108,7 @@ class PlanExecutor:
         on_step_end: Any = None,
         on_backtrack: Any = None,
         on_approval_needed: Any = None,
+        deadline: float | None = None,
     ) -> ExecutionReport:
         """执行分层计划。
 
@@ -107,14 +118,15 @@ class PlanExecutor:
             on_step_end: 步骤结束回调 (StepResult) → None。
             on_backtrack: 回溯回调 (goal_id, reason) → None。
             on_approval_needed: 审批回调 (goal, action) → bool (允许/拒绝)。
+            deadline: 整轮任务的绝对截止时刻（``time.monotonic()`` 基准）。
+                None = 不限。到点不再开启新批次，剩余目标标为超时，
+                已完成的步骤全部保留在报告里。
 
         Returns:
             执行报告。
         """
         import time
         start_time = time.perf_counter()
-
-        import asyncio as _asyncio
 
         plan.status = PlanStatus.EXECUTING
         report = ExecutionReport(plan=plan)
@@ -132,6 +144,26 @@ class PlanExecutor:
             if not ready:
                 break
 
+            # v1.7.0 整轮任务预算：到点**不再开启新批次**。
+            # 判据放在批次之间而不是"硬掐断"：掐断会丢掉已做完的工作，
+            # 而这里能把成果完整地交出去（已完成步骤照常入账）。
+            if deadline is not None and time.monotonic() >= deadline:
+                for g in ready:
+                    self.hierarchical_planner.update_goal_status(
+                        plan, g.id, GoalStatus.FAILED,
+                        "整轮任务总时长预算已到点，该步骤未开始")
+                    report.steps.append(StepResult(
+                        goal_id=g.id, goal_description=g.description,
+                        success=False,
+                        error=("整轮任务的总时长预算已到点，本步骤未开始执行"
+                               "（已完成的步骤成果全部保留）。"
+                               "如确需跑完整个计划，请调大 "
+                               "execution.max_task_seconds 或拆小任务。")))
+                logger.warning("plan_task_budget_exhausted",
+                               remaining=len(ready),
+                               completed=report.completed_steps)
+                break
+
             # §2.4 并行执行：多个互不依赖的就绪目标并发跑；否则退化为串行单个
             batch = ready if (self.parallel and len(ready) > 1) else ready[:1]
 
@@ -141,17 +173,23 @@ class PlanExecutor:
                     await on_step_start(g)
 
             if len(batch) > 1:
-                # §2.4 并行执行 + v1.6.4 单点异常防护：
+                # §2.4 并行执行 + v1.6.4 单点异常防护 + v1.7.0 挂起防护：
                 # `asyncio.gather` 默认"任一任务抛异常就整体失败"——工具侧偶发异常
                 # （超时竞态、第三方库抛错、审批通道断开）会让**同一批里已经跑完
                 # 的目标一起丢失**，整单任务被判失败，用户看到的是"什么都没做"。
                 # 这里给每个目标单独包一层：异常就地转成该目标的失败结果，
                 # 其余目标的成果照常保留、照常进入报告与后续步骤。
-                step_results = await _asyncio.gather(*[
-                    self._execute_goal_guarded(g, on_approval_needed) for g in batch
-                ])
+                #
+                # v1.7.0 补的另一半：**hang 不是异常**。一个目标卡在网络读 /
+                # 子进程 / 审批上时既不返回也不抛错，gather 会一直等下去，
+                # 整批（连同整个计划）就此停滞，而用户看到的只是"界面没反应"。
+                # 因此每个目标再带一个执行上限（goal_timeout），超时就地转成
+                # 该目标的失败结果；批级再加一道外层兜底，确保 gather 一定返回。
+                step_results = await self._gather_batch(batch, on_approval_needed)
             else:
-                step_results = [await self._execute_goal_guarded(
+                # 单目标路径同样要带上限 —— "批里只有一个目标"并不意味着它不会挂，
+                # 而挂住的单目标会让整个计划停在这一步（v1.7.0 之前没有任何兜底）。
+                step_results = [await self._run_goal_with_timeout(
                     batch[0], on_approval_needed)]
 
             # 按序处理批内结果（状态更新与失败处理保持确定性）
@@ -205,6 +243,86 @@ class PlanExecutor:
         report.duration_ms = (time.perf_counter() - start_time) * 1000
         return report
 
+    async def _gather_batch(
+        self,
+        batch: list[Goal],
+        on_approval_needed: Any = None,
+    ) -> list[StepResult]:
+        """并发跑一批目标，**保证一定返回**。
+
+        三层保护，缺一层就还有"整批不回"的路径：
+
+        1. 异常屏障（``_execute_goal_guarded``）：抛出来的错就地转成该目标的失败。
+        2. 单目标超时（``goal_timeout``）：挂住的（不抛错也不返回的）目标被掐掉，
+           转成明确的失败结果并说明"是超时，不是没做"。
+        3. 批级兜底超时：单目标超时理论上够用，但若某个工具屏蔽了取消
+           （``asyncio.shield`` / 同步阻塞调用跑在事件循环里），
+           ``wait_for`` 自己也会被卡住。批级用 ``asyncio.wait`` 到点就走，
+           把还没完成的目标标为超时 —— **永远不让计划执行停滞**。
+        """
+        import asyncio as _asyncio
+
+        tasks = [_asyncio.ensure_future(self._run_goal_with_timeout(g, on_approval_needed))
+                 for g in batch]
+        if self.goal_timeout <= 0:
+            return list(await _asyncio.gather(*tasks))
+
+        # 批级上限 = 单目标上限 + 一点余量（单目标内部已经各留了自己的预算）
+        budget = self.goal_timeout + 5.0
+        done, pending = await _asyncio.wait(tasks, timeout=budget)
+        for t in pending:
+            t.cancel()
+        results: list[StepResult] = []
+        for goal, task in zip(batch, tasks):
+            if task in done:
+                try:
+                    results.append(task.result())
+                except Exception as e:      # pragma: no cover - 屏障已有兜底
+                    results.append(self._timeout_result(
+                        goal, f"{type(e).__name__}: {e}"))
+            else:
+                results.append(self._timeout_result(
+                    goal, f"整批并行执行超过 {budget:.0f} 秒仍未返回"))
+        if pending:
+            # 让被取消的任务有机会真正结束，避免 "Task was destroyed but it is
+            # pending" 噪声盖住真正的问题
+            await _asyncio.gather(*pending, return_exceptions=True)
+        return results
+
+    async def _run_goal_with_timeout(
+        self,
+        goal: Goal,
+        on_approval_needed: Any = None,
+    ) -> StepResult:
+        """单目标执行 + 超时熔断（超时转成该目标的失败结果，不拖累同批）。"""
+        import asyncio as _asyncio
+
+        if self.goal_timeout <= 0:
+            return await self._execute_goal_guarded(goal, on_approval_needed)
+        try:
+            return await _asyncio.wait_for(
+                self._execute_goal_guarded(goal, on_approval_needed),
+                timeout=self.goal_timeout)
+        except TimeoutError:
+            self.timed_out += 1
+            logger.error("goal_execution_timeout", goal=goal.id,
+                         timeout_s=self.goal_timeout,
+                         tool=(goal.assigned_action.tool_name
+                               if goal.assigned_action else ""))
+            return self._timeout_result(
+                goal, f"该步骤执行超过 {self.goal_timeout:.0f} 秒仍未返回，已中止")
+
+    def _timeout_result(self, goal: Goal, detail: str) -> StepResult:
+        """超时统一出口 —— 措辞必须让人分清"超时中止"与"做了但失败"。"""
+        return StepResult(
+            goal_id=goal.id,
+            goal_description=goal.description,
+            success=False,
+            error=(f"{detail}（同批其它步骤不受影响）。"
+                   "超时说明这一步卡住了：请检查该步骤的工具/命令是否在等外部响应"
+                   "（网络、子进程、审批），必要时改用更小的参数范围重试。"),
+        )
+
     async def _execute_goal_guarded(
         self,
         goal: Goal,
@@ -244,13 +362,27 @@ class PlanExecutor:
                 ready.append(goal)
         return ready
 
-    @staticmethod
-    def _cache_key(tool_name: str, params: dict[str, Any]) -> str:
+    #: 缓存键里用于"只看参数、不看目标"的哨兵（仅供跨目标复用测试使用）
+    CACHE_ANY_GOAL = "*"
+
+    @classmethod
+    def _cache_key(cls, tool_name: str, params: dict[str, Any],
+                   goal_id: str = "") -> str:
+        """子任务缓存键 = 目标身份 + 工具名 + 参数。
+
+        **目标身份必须进键**：缓存的本意是"同一个步骤的重试/重复调用别重复读"，
+        而不是"不同步骤只要调了同一个工具就算做完"。此前键里只有工具名与参数，
+        于是计划里两个语义完全不同的步骤 —— 例如"读配置 A"与"基于配置 A 生成
+        报告"，模型恰好都规划成 ``file_read(同一路径)`` —— 第二个会被**直接
+        判成功**：它一步都没执行，报告里却记成"已完成"。
+        （这个 bug 是在给"总时长预算"写测试时撞出来的：6 个步骤只真跑了 1 次。）
+        """
         import json as _json
         try:
-            return tool_name + "::" + _json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
+            blob = _json.dumps(params, sort_keys=True, ensure_ascii=False, default=str)
         except Exception:
-            return tool_name + "::" + repr(sorted(params.items()))
+            blob = repr(sorted(params.items()))
+        return f"{goal_id}::{tool_name}::{blob}"
 
     async def _execute_goal(
         self,
@@ -280,64 +412,94 @@ class PlanExecutor:
             )
 
         # 权限检查
+        #
+        # v1.7.0：这道门**必须对所有动作生效**。此前整段包在 `if tool is not None:`
+        # 里 —— 工具名写错 / 未注册（`_get_tool` 返回 None）时权限检查连同审批
+        # 一起被跳过，动作直接进 dispatch。虽然 dispatch 随后会因找不到工具而失败
+        # （不构成执行逃逸），但"没找到工具"恰恰是最需要人工确认的形态之一
+        # （可能是模型臆造了一个不存在的高危动作），而且它让审批模式在这条路径上
+        # 表现为"配了 ask 也不弹窗"。未注册的工统一按最高风险等级送审。
+        from automind.core.types import PermissionTier as _PTier
         tool = self._get_tool(action.tool_name)
-        if tool is not None:
-            decision, reason = self.permissions.check(
-                action.tool_name, tool.permission_tier, action.parameters
+        if tool is None:
+            logger.warning("unknown_tool_requires_approval", tool=action.tool_name,
+                           goal=goal.id)
+        check_tier = (tool.permission_tier if tool is not None
+                      else _PTier.DANGEROUS)
+        decision, reason = self.permissions.check(
+            action.tool_name, check_tier, action.parameters
+        )
+        if decision.value == "deny":
+            return StepResult(
+                goal_id=goal.id,
+                goal_description=goal.description,
+                success=False,
+                error=f"Permission denied: {reason}",
             )
-            if decision.value == "deny":
+        if decision.value == "allow" and tool is None:
+            # 「全批准」模式下不会走审批，但"批准一个不存在的工具"毫无意义 ——
+            # 直接如实失败，别让一个幻影动作被计成"已完成步骤"。
+            return StepResult(
+                goal_id=goal.id,
+                goal_description=goal.description,
+                success=False,
+                error=(f"工具「{action.tool_name}」不存在或未注册，无法执行该步骤。"),
+            )
+        if decision.value == "ask_user":
+            # 安全修复（v1.4.5）：原条件是 `ask_user and on_approval_needed` ——
+            # 没接审批回调时整个判断被**整体跳过**，需要人工确认的操作直接执行了。
+            # 现在没有回调就等于问不到人，按拒绝处理。
+            # （要无人值守跑，应把审批模式设为「自动」/「全批准」——那样
+            #   permissions.check() 不会返回 ask_user，根本走不到这里。）
+            if on_approval_needed is None:
                 return StepResult(
                     goal_id=goal.id,
                     goal_description=goal.description,
                     success=False,
-                    error=f"Permission denied: {reason}",
+                    error=(f"{reason}；当前没有可用的审批通道，已按拒绝处理"
+                           "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）"),
                 )
-            if decision.value == "ask_user":
-                # 安全修复（v1.4.5）：原条件是 `ask_user and on_approval_needed` ——
-                # 没接审批回调时整个判断被**整体跳过**，需要人工确认的操作直接执行了。
-                # 现在没有回调就等于问不到人，按拒绝处理。
-                # （要无人值守跑，应把审批模式设为「自动」/「全批准」——那样
-                #   permissions.check() 不会返回 ask_user，根本走不到这里。）
-                if on_approval_needed is None:
-                    return StepResult(
-                        goal_id=goal.id,
-                        goal_description=goal.description,
-                        success=False,
-                        error=(f"{reason}；当前没有可用的审批通道，已按拒绝处理"
-                               "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）"),
-                    )
-                try:
-                    from automind.state.human_loop import ApprovalOutcome
-                    outcome = ApprovalOutcome.normalize(
-                        await on_approval_needed(goal, action))
-                    approved = outcome.approved
-                    if approved and outcome.modified:
-                        # 「修改后批准」：用用户改过的参数覆盖本步骤的动作参数
-                        action.parameters = dict(outcome.arguments or {})
-                        logger.info("approval_modified", goal=goal.id,
-                                    tool=action.tool_name,
-                                    keys=sorted(action.parameters))
-                    elif not approved and outcome.comment:
-                        reason = outcome.comment
-                except Exception as e:
-                    approved = False   # 审批通道异常一律视为未批准
-                    reason = f"审批通道异常（{type(e).__name__}）"
-                if not approved:
-                    return StepResult(
-                        goal_id=goal.id,
-                        goal_description=goal.description,
-                        success=False,
-                        error=f"User denied the action: {reason}",
-                    )
+            try:
+                from automind.state.human_loop import ApprovalOutcome
+                outcome = ApprovalOutcome.normalize(
+                    await on_approval_needed(goal, action))
+                approved = outcome.approved
+                if approved and outcome.modified:
+                    # 「修改后批准」：用用户改过的参数覆盖本步骤的动作参数
+                    action.parameters = dict(outcome.arguments or {})
+                    logger.info("approval_modified", goal=goal.id,
+                                tool=action.tool_name,
+                                keys=sorted(action.parameters))
+                elif not approved and outcome.comment:
+                    reason = outcome.comment
+            except Exception as e:
+                approved = False   # 审批通道异常一律视为未批准
+                reason = f"审批通道异常（{type(e).__name__}）"
+            if not approved:
+                return StepResult(
+                    goal_id=goal.id,
+                    goal_description=goal.description,
+                    success=False,
+                    error=f"User denied the action: {reason}",
+                )
+
+        if tool is None:
+            # 走到这里说明审批通过了（否则上面已经返回）—— 但工具**没有实现**，
+            # 无法执行。如实失败，别把它计成"已完成步骤"。
+            return StepResult(
+                goal_id=goal.id,
+                goal_description=goal.description,
+                success=False,
+                error=(f"工具「{action.tool_name}」不存在或未注册，无法执行该步骤"
+                       "（该动作已按最高风险等级送审，但工具本身不可用）。"),
+            )
 
         # 子任务缓存：SAFE 级只读工具（file_read/web_fetch 等）同参调用直接复用结果，
-        # 避免并行/重试场景下的重复 IO；写类工具绝不缓存。
-        from automind.core.types import PermissionTier as _PT
-        cacheable = (
-            self.use_cache and tool is not None
-            and tool.permission_tier == _PT.SAFE
-        )
-        cache_key = self._cache_key(action.tool_name, action.parameters) if cacheable else ""
+        # 避免**同一个目标**在重试/纠错重跑时的重复 IO；写类工具绝不缓存。
+        # 键里带目标身份，跨目标不复用（见 _cache_key 的说明）。
+        cacheable = self.use_cache and tool.permission_tier == _PTier.SAFE
+        cache_key = (self._cache_key(action.tool_name, action.parameters, goal.id)
+                     if cacheable else "")
         if cacheable and cache_key in self._subtask_cache:
             self.cache_hits += 1
             return StepResult(

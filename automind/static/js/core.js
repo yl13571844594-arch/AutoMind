@@ -205,7 +205,9 @@ function appendResultToDOM(container, data) {
 
 // 统一的消息元素构造器 — appendMessage / appendMessageTo 共用，消除 90% 重复。
 // （formatContent/esc/isSafeUrl 定义于 chat.js，运行期调用，加载顺序无碍）
-function buildMessageEl(role, content, images) {
+// tag：补充插入的状态小标记（HTML 片段），由 chat.js 生成并**已转义**；
+// 内容用 esc() 包住，标记再小也不成为注入入口。
+function buildMessageEl(role, content, images, tag) {
   const cls = role === 'user' ? 'user' : 'agent';
   const avatar = role === 'user' ? '我' : 'AM';
   const thumbs = (images && images.length)
@@ -214,7 +216,7 @@ function buildMessageEl(role, content, images) {
   const div = document.createElement('div');
   div.className = `msg ${cls}`;
   div.innerHTML = `<div class="avatar">${avatar}</div><div class="col">`
-    + `<div class="bubble">${copyBtn}${thumbs}${content ? formatContent(content) : ''}</div>`
+    + `<div class="bubble">${copyBtn}${thumbs}${tag || ''}<span class="msg-text">${content ? formatContent(content) : ''}</span></div>`
     + `<div class="time">${new Date().toLocaleTimeString()}</div></div>`;
   return div;
 }
@@ -369,7 +371,9 @@ function applyModeUI(mode) {
   document.querySelectorAll('#mode-switch button').forEach(b =>
     b.classList.toggle('active', b.dataset.mode === mode));
   document.getElementById('mode-hint').innerHTML = MODE_HINTS[mode] || '';
-  document.getElementById('user-input').placeholder = MODE_PLACEHOLDER[mode] || '';
+  // 交回输入区统一刷新（定义于 chat.js）：它会按执行态决定是普通提示
+  // 还是「可插入补充」提示，并同步「⤴ 插入补充」按钮的显隐
+  syncInputAffordance();
   // 高级模式（协同/循环）激活时自动展开高级组，避免"选中却被折叠"
   if (mode === 'multi' || mode === 'loop') toggleAdvancedModes(true);
 }

@@ -42,6 +42,12 @@ Thumbs.db
 pro/
 analytics-service/
 
+# 许可证签发私钥 —— 付费墙的全部安全性都在这份文件上。
+# 它**只应存在于发行方本机**，一旦进仓库/镜像/wheel，付费墙即刻失效。
+pro/.license-private/
+**/.license-private/
+*private_key.hex
+
 # 项目杂项
 *.log
 *.rar

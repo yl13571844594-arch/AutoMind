@@ -1,6 +1,8 @@
 // ── Send ──
 async function sendMessage() {
-  if (running) return;
+  // 有任务在跑 → 这句话是「补充要求」，插进正在跑的那一轮；
+  // 没有 → 正常新任务。用户不必先按停止再重发。
+  if (running) return interjectMessage();
   const input = document.getElementById('user-input');
   const text = input.value.trim();
   const images = _pendingImages.slice();
@@ -49,16 +51,234 @@ async function sendViaRest(text, images) {
     routeResultToMode(taskMode, 'message', { role: 'agent', text: `❌ 请求失败: ${e.message}` });
   }
 }
+
+// ═══════ 中途插入补充要求（interject）═══════
+// 语义：任务执行期间用户补一句话，服务端把它排进**当前这一轮**，绝不取消任务。
+// 因此这里只负责「把话送出去 + 如实标记这句话的命运」，不碰任何取消逻辑。
+// 插入气泡走的是独立路径（不走 sendMessage），所以每个请求登记一条 pending 记录，
+// 用 ref 回填状态：靠文本匹配会在用户连发两条相同内容时改错气泡。
+// 请求带 ref，服务端在每条回执里原样回显（interjection_applied 是逐 item 带 ref），
+// 于是定位是**确定查表**；只有回执没带 ref（老服务端/降级）才退回文本 FIFO 匹配。
+const _interjectPending = new Map();   // ref → { el, mode, sid, text, seq, timer }
+const _interjectTimers = new Set();
+const _INTERJECT_ACK_MS = 15000;       // 静默兜底：超时未回执就不再假装「处理中」
+let _interjectSeq = 0;                 // 同毫秒插入的排序依据（见 _takeInterject）
+// 生成请求对账标识。mode/session/文本 前缀纯为排障时好认（拼完不回解析），
+// 真正保证唯一的是时间戳 + 单调序号 —— 同一毫秒连发两条也各有各的 ref。
+function _newInterjectKey(mode, sid, text) {
+  return mode + '::' + sid + '::' + Date.now() + '::' + (_interjectSeq++) + '::' + text;
+}
+// 让气泡上那个小标记显示当前真实状态。
+// text 是显式文案（各状态固定一句，直接写死比再套一层映射表清楚）；
+// title 是鼠标悬停说明，可能来自服务端 reason，只走 textContent/属性赋值，不进 innerHTML。
+function _markInterject(el, cls, text, title) {
+  const tag = el && el.querySelector('.interject-tag');
+  if (!tag) return;
+  tag.className = 'interject-tag ' + cls;
+  tag.textContent = text;
+  if (title) tag.title = title;
+}
+async function interjectMessage() {
+  if (!running) return sendMessage();   // 任务刚好结束 → 退回普通发送
+  const input = document.getElementById('user-input');
+  const text = input.value.trim();
+  if (!text) return;
+  // 会话与模式在**发送这一刻**定死：回执回来时用户可能已经切了会话，
+  // 那时再读 chatSid()/currentMode 就会去改另一个会话里的气泡
+  const sid = chatSid(), mode = currentMode;
+  const ref = _newInterjectKey(mode, sid, text);   // 兼作 pending 表的键与请求里的对账标识
+  const el = appendMessage('user', text, [], `<span class="interject-tag it-pending">补充 · 待纳入</span>`);
+  const rec = { el, mode, sid, text, seq: _interjectSeq, timer: null };
+  _interjectPending.set(ref, rec);
+  input.value = ''; input.style.height = 'auto';
+  // 清空后顺手把「继续补充」的提示写回去（模式可能刚切过，这里以当前态为准）
+  input.placeholder = syncInputAffordance();
+
+  // 任务进行中插入的是「补充要求」，不是新对话记录 → 不更新 _lastTask
+  //（否则「任务中断继续」会去续跑这句半截话）
+  const send = () => ws.send(JSON.stringify({
+    action: 'interject', text, session_id: sid, interaction: mode, ref,
+  }));
+  if (ws && ws.readyState === WebSocket.OPEN) send();
+  else {  // 无 WS 时服务端收不到这条 —— 如实说，别让用户以为插进去了
+    _dropInterjectLocal(ref, '连接已断开，这次补充没有送出去（任务未受影响）');
+    return;
+  }
+  // 兜底：回执可能一直不来（后端版本不支持 interject、连接中途断掉）。
+  // 那就把标记留在「待纳入」会一直骗人，所以超时后改成明确的未确认态。
+  rec.timer = setTimeout(() => {
+    _interjectTimers.delete(rec.timer);
+    if (!_interjectPending.has(ref)) return;
+    _interjectPending.delete(ref);
+    _markInterject(rec.el, 'it-dropped', '补充 · 未确认', '长时间未收到服务端回执，无法确认这条补充是否被纳入本轮');
+    toast('这条补充长时间没有收到服务端回执，无法确认是否已纳入本轮', 'error');
+  }, _INTERJECT_ACK_MS);
+  _interjectTimers.add(rec.timer);
+}
+// 本地判定失败：清记录、改标记、给出可见反馈（调用方决定文案与 toast）
+function _dropInterjectLocal(key, reason) {
+  const rec = _interjectPending.get(key);
+  if (!rec) return null;
+  _interjectPending.delete(key);
+  if (rec.timer) { clearTimeout(rec.timer); _interjectTimers.delete(rec.timer); }
+  _markInterject(rec.el, 'it-dropped', '补充 · 未纳入', reason || '');
+  return rec;
+}
+// 回执定位。两条分支：
+//   ① ref 命中 → 直接查表定位（唯一且确定，同文连发也不串位）；
+//   ② 回执没带 ref（老服务端/降级）→ 退回按「发出时记下的 mode/session + 文本」
+//      找**最早**的那条，同毫秒的先后由键里的单调序号兜住。
+// 服务端对拿不到的 ref 会填空串，所以 "" 一律当作"没带"。
+function _takeInterject(mode, sid, text, ref) {
+  // 带了 ref 就只认 ref：查不到（重复回执 / 已被终态兜底清掉）直接返回 null，
+  // 不再退化成文本匹配 —— 那会把回执安到另一条无辜的气泡上
+  const key = ref ? (_interjectPending.has(ref) ? ref : null)
+                  : _takeInterjectKey(mode, sid, text);
+  if (!key) return null;
+  const rec = _interjectPending.get(key);
+  _interjectPending.delete(key);
+  if (rec && rec.timer) { clearTimeout(rec.timer); _interjectTimers.delete(rec.timer); }
+  return rec || null;
+}
+// 降级路径：按 mode+session+文本 找最早的一条，返回其键
+function _takeInterjectKey(mode, sid, text) {
+  const suffix = '::' + text;
+  const keys = [];
+  _interjectPending.forEach((_, k) => {
+    if (k.startsWith(mode + '::' + sid + '::') && k.endsWith(suffix)) keys.push(k);
+  });
+  if (!keys.length) return null;
+  // 先比时间戳，同毫秒再比递增序号 —— 否则同一毫秒发出的两条谁先谁后不确定，
+  // 回执就可能落到后一条气泡上
+  const rank = k => { const p = k.split('::'); return [parseInt(p[2], 10) || 0, parseInt(p[3], 10) || 0]; };
+  keys.sort((a, b) => { const ra = rank(a), rb = rank(b); return ra[0] - rb[0] || ra[1] - rb[1]; });
+  return keys[0];
+}
+// 终态兜底：task_cancelled / task_error / task_complete / chat_done 到达时，
+// 把本会话本模式里**仍未确认**的插入气泡显式降级为「未纳入本轮」。
+// 为什么必须有：用户点「停止」时服务端的 interjection_dropped 可能来不及发出
+//（发送通道先被取消，server.py 里那条回执是 best-effort，它自己也注明要靠前端兜底），
+// 少了这一步气泡会永远停在「补充 · 待纳入」—— 用户一直以为自己那句话在生效，
+// 正是本功能最坏的失败形态。
+// sid 用终态事件自带的 session_id（而不是 chatSid()）：用户中途切了会话时，
+// 后者已经变了，拿它过滤会把这些气泡漏下来。
+function settleInterjections(reason, sid) {
+  const target = sid || chatSid();
+  const stale = [];
+  _interjectPending.forEach((rec, ref) => {
+    // 只收本会话的；模式上只在能确定任务模式时才收窄（多模式并行跑时不误伤）
+    if (rec.sid !== target) return;
+    if (_taskMode && rec.mode !== _taskMode) return;
+    stale.push([ref, rec]);
+  });
+  stale.forEach(([ref, rec]) => {
+    _interjectPending.delete(ref);
+    if (rec.timer) { clearTimeout(rec.timer); _interjectTimers.delete(rec.timer); }
+    _markInterject(rec.el, 'it-dropped', '补充 · 未纳入', reason);
+    // 每条各给一次 toast：要求「含前 40 字」，多条合并成一句就说不清是哪条没进去
+    const short = rec.text.slice(0, 40) + (rec.text.length > 40 ? '…' : '');
+    toast(`补充未纳入本轮：${reason}${short ? ' ｜ ' + short : ''}`, 'error');
+  });
+  return stale.length;
+}
+// 服务端 5 种下行回执的统一入口。事件里带 session_id/mode 就用它（支持多标签页，
+// 另一个窗口插入的话不会改错本窗口的气泡），缺省退回当前会话与模式。
+// 定位优先用 ref（服务端原样回显），没有 ref 才退回文本 FIFO。
+function interjectionRef(data) {
+  // 服务端对拿不到的 ref 填空串，等同于"没带"
+  return String((data && (data.ref || data.client_ref)) || '');
+}
+function echoInterjection(kind, data) {
+  const text = data.text == null ? '' : String(data.text);
+  const sid = data.session_id || chatSid();
+  const mode = data.mode || _taskMode || currentMode;
+  const ref = interjectionRef(data);
+  const short = text.slice(0, 40) + (text.length > 40 ? '…' : '');
+
+  // applied 是"一批"：每条 item 各带自己的 seq/text/applied_at/ref，
+  // 必须逐条回填，否则同一次合并里的两条会只有一条被标记
+  if (kind === 'applied' && Array.isArray(data.items) && data.items.length) {
+    let hit = 0;
+    data.items.forEach(it => {
+      const rec = _takeInterject(mode, sid, it && it.text != null ? String(it.text) : '',
+                                 interjectionRef(it));
+      if (!rec) return;
+      hit++;
+      _markInterject(rec.el, 'it-applied', '补充 · 已纳入本轮',
+        '模型已读到这条补充' + (it.applied_at || data.at ? '（' + (it.applied_at || data.at) + '）' : ''));
+    });
+    toast(hit > 1 ? `已纳入本轮的补充：${hit} 条（模型已经读到）` : '补充已纳入本轮，模型已经读到', 'success');
+    return;
+  }
+
+  const rec = _takeInterject(mode, sid, text, ref);
+  switch (kind) {
+    case 'received':
+      if (rec) _markInterject(rec.el, 'it-pending', '补充 · 待纳入',
+        '已收下，正在排入本轮（还没交给模型）');
+      toast('已收下补充，将纳入本轮（正在执行的那一步不会被打断）', 'info');
+      break;
+    case 'applied':
+      // 理论上都被上面的 items 分支接走了；这里是老服务端只回顶层 text 的降级
+      if (rec) _markInterject(rec.el, 'it-applied', '补充 · 已纳入本轮',
+        '模型已读到这条补充' + (data.at ? '（' + data.at + '）' : ''));
+      toast('补充已纳入本轮，模型已经读到', 'success');
+      break;
+    case 'dropped': {
+      // 这句没进本轮 —— 必须显式说清，用户才不会误以为它生效了
+      const reason = data.reason || '任务在这条补充被处理前就结束了';
+      if (rec) _markInterject(rec.el, 'it-dropped', '补充 · 未纳入', reason);
+      toast(`补充未纳入本轮：${reason}${short ? ' ｜ ' + short : ''}`, 'error');
+      break;
+    }
+    case 'promoted':
+      // 服务端态度：当时没有任务在跑，已直接当新任务开跑（随后会有 task_start）。
+      // 这里必须同步进执行态：否则「插入/停止」按钮还是普通发送态，
+      // 之后 task_start～task_complete 的渲染会对不上。
+      _taskMode = mode;
+      window._lastTask = { text, mode };
+      setRunning(true);
+      if (rec) _markInterject(rec.el, 'it-applied', '补充 · 已作为新任务',
+        '当时没有正在执行的任务，已直接开始');
+      toast('当时没有正在执行的任务，已把这条补充作为新任务直接开始', 'info');
+      break;
+    case 'rejected':
+      if (rec) _markInterject(rec.el, 'it-dropped', '补充 · 已被拒绝', data.reason || '');
+      toast('插入补充被拒：' + (data.reason || '服务端未接受') + (short ? ' ｜ ' + short : ''), 'error');
+      break;
+  }
+}
 function handleKeyDown(e) {
+  // 执行中 Ctrl+Enter 走「插入补充」：键盘上也能一边等回答一边补要求，
+  // 不必先去够鼠标点按钮
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && running) {
+    e.preventDefault(); interjectMessage(); return;
+  }
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 }
 function setRunning(on) {
   running = on;
   document.getElementById('send-btn').style.display = on ? 'none' : 'flex';
   document.getElementById('stop-btn').style.display = on ? 'flex' : 'none';
-  document.getElementById('user-input').disabled = on;
+  // 执行期间不再禁用输入框（此前 disabled 把录入整段锁死）：
+  // 用户要能边看回答边把补充要求打进插入队列，也要能继续用 Enter 正常发送
+  syncInputAffordance();
   updateStatus(on ? 'running' : 'connected');
   if (!on) { captureTranscript(); _taskMode = null; }
+}
+// 按执行态切换输入区的外观：送出「插入补充」按钮 + 改提示文案。
+// 单独成函数，是为了让「模式切换」和「刚插入一条」也能刷新提示 ——
+// 否则切换模式后输入框里还挂着上一个模式的提示。
+// 返回执行态的提示文案（调用方用完还能回填）。
+function syncInputAffordance() {
+  const btn = document.getElementById('interject-btn');
+  if (btn) btn.style.display = running ? 'flex' : 'none';
+  const input = document.getElementById('user-input');
+  const hint = running
+    ? 'AI 正在回答 — 输入补充要求，Enter 或点「⤴ 插入补充」加入本轮（Shift+Enter 换行）'
+    : (MODE_PLACEHOLDER[currentMode || 'chat'] || '输入消息，Enter 发送，Shift+Enter 换行...');
+  if (input) input.placeholder = hint;
+  return hint;
 }
 function stopTask() {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -188,11 +408,14 @@ async function refreshHtmlFiles() {
 }
 
 // ── Messages ──
-function appendMessage(role, content, images) {
+function appendMessage(role, content, images, tag) {
   // 委托统一构造器（buildMessageEl 定义于 core.js），仅负责挂载与滚动
+  // 返回元素：插入气泡要留句柄改状态，靠文本反查会在连发相同内容时错位
   const msgs = document.getElementById('messages');
-  msgs.appendChild(buildMessageEl(role, content, images));
+  const el = buildMessageEl(role, content, images, tag);
+  msgs.appendChild(el);
   msgs.scrollTop = msgs.scrollHeight;
+  return el;
 }
 function appendResult(data) {
   const msgs = document.getElementById('messages');

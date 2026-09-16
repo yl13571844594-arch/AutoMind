@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from automind.core.types import PermissionTier, ToolResult
-from automind.tools._toolkit import bad, err, need, ok
+from automind.tools._toolkit import bad, err, need, ok, run_blocking
 from automind.tools.base import AbstractTool
 
 
@@ -92,8 +92,12 @@ class GitTool(AbstractTool):
             # （中文项目的提交信息几乎必然如此），读取线程就会以
             # UnicodeDecodeError 悄悄死掉，最终 output 变成空串而
             # exit_code 仍是 0：调用方看到的是"命令成功但什么也没输出"。
-            proc = subprocess.run(cmd, capture_output=True, timeout=180, check=False,
-                                  encoding="utf-8", errors="replace")
+            #
+            # 走 run_blocking：subprocess.run 是同步的，180 秒的等待期间
+            # 会把整个事件循环一起占住（其它会话、审批弹窗、心跳全部冻住）。
+            proc = await run_blocking(subprocess.run, cmd, capture_output=True,
+                                      timeout=180, check=False,
+                                      encoding="utf-8", errors="replace")
             output = (proc.stdout or "") + (proc.stderr or "")
             return ok(self.name, action=action, exit_code=proc.returncode,
                       output=output.strip()[:8000],
@@ -207,12 +211,16 @@ class ClipboardTool(AbstractTool):
             need("pyperclip")
             import pyperclip
 
+            # 剪贴板 API 是**同步且会阻塞**的：Windows 上只要有别的进程
+            # （输入法、剪贴板管理器、远程桌面）占着剪贴板，pyperclip 就会一直等，
+            # 而且它不会返回、不会抛错 —— 直接放在协程里等于把整个事件循环
+            # 一起挂住：其它会话的任务、审批弹窗、心跳全部冻住。
             if action == "read":
-                text = pyperclip.paste()
+                text = await run_blocking(pyperclip.paste)
                 return ok(self.name, action=action, text=text, length=len(text))
             if action == "write":
                 text = str(kwargs.get("text") or "")
-                pyperclip.copy(text)
+                await run_blocking(pyperclip.copy, text)
                 return ok(self.name, action=action, length=len(text),
                           message="已写入剪贴板")
             return bad(self.name, f"未知 action：{action}")

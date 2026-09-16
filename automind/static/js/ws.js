@@ -24,6 +24,17 @@ function updateStatus(s) {
   else { b.textContent = '○ 未连接'; b.className = 'badge'; }
 }
 let _streamEl = null, _streamBuf = '';
+// 终态兜底的安全调用：settleInterjections 定义于 chat.js，而两者是各自独立的
+// 静态资源，浏览器可能只刷新到其中一个（旧 chat.js + 新 ws.js）。那种情况下直接
+// 调用会抛错，把整个终态处理（渲染结果、复位按钮）一并带走 —— 代价远大于少标记
+// 一个气泡，所以这里降级为跳过。
+function settleInterjectionsSafe(reason, sid) {
+  try {
+    if (typeof settleInterjections === 'function') settleInterjections(reason, sid);
+  } catch (err) {
+    try { toast('有插入补充未能确认是否纳入本轮：' + (err && err.message ? err.message : err), 'error'); } catch (_) {}
+  }
+}
 function handleWS(data) {
   const taskMode = _taskMode || data.interaction || currentMode;
   switch (data.type) {
@@ -45,6 +56,22 @@ function handleWS(data) {
     case 'loop_done': break;
     case 'approval_request': showApprovalDialog(data); break;
     case 'team_activity': onTeamActivity(data); break;
+    // ── 中途插入补充要求的回执 ──
+    // 五种回执都必须落到界面上：用户最怕的是"我那句到底算不算数"没有答案，
+    // 所以「已纳入/未纳入/被拒」全部显式回填气泡标记 + toast（见 chat.js）。
+    // 外面再包一层 try：handleWS 的兜底 catch 会静默吞掉异常，
+    // 若回执处理中途出错（晚到的 DOM 已被清掉等），用户就会既看不到标记更新
+    // 也看不到 toast，正是本功能最不能接受的"没有反馈"。
+    case 'interjection_received':
+    case 'interjection_applied':
+    case 'interjection_dropped':
+    case 'interjection_promoted':
+    case 'interjection_rejected':
+      try { echoInterjection(data.type.replace('interjection_', ''), data); }
+      catch (err) {
+        toast('这条插入补充的回执处理失败，请核对它是否真的纳入了本轮：' + (err && err.message ? err.message : err), 'error');
+      }
+      break;
     // ── 执行过程实时展示 ──
     case 'plan_created': execPlanCreated(data); break;
     case 'plan_step_start': execPlanStepStart(data); break;
@@ -60,6 +87,8 @@ function handleWS(data) {
     case 'chat_done':
       finalizeStream(data);
       updateStats(data);
+      // 终态兜底：必须排在 setRunning 之前 —— 它还要靠 _taskMode 收窄范围
+      settleInterjectionsSafe('本轮任务在你补充之前就结束了', data.session_id);
       setRunning(false);
       refreshTokens();
       break;
@@ -70,6 +99,7 @@ function handleWS(data) {
       if (data.plan) updatePlanView(data.plan);
       refreshAuditMini(); refreshHtmlFiles(); refreshChanges();
       window._lastTask = null;   // 任务正常完成，清除续跑候选
+      settleInterjectionsSafe('本轮任务在你补充之前就结束了', data.session_id);
       setRunning(false);
       break;
     case 'task_error':
@@ -77,6 +107,7 @@ function handleWS(data) {
       routeResultToMode(taskMode, 'message', { role: 'agent', text: '❌ **错误**: ' + data.error });
       offerResume(taskMode, '出错');
       refreshChanges();
+      settleInterjectionsSafe('本轮任务出错结束，这条没有交给模型', data.session_id);
       setRunning(false);
       break;
     case 'task_cancelled':
@@ -84,6 +115,9 @@ function handleWS(data) {
       routeResultToMode(taskMode, 'message', { role: 'agent', text: '⏹ 任务已中断' });
       offerResume(taskMode, '中断');
       refreshChanges();
+      // 用户点「停止」时服务端的 interjection_dropped 可能来不及发出，
+      // 这条兜底就是把那批气泡如实降级为"未纳入本轮"
+      settleInterjectionsSafe('任务已中断，这条没有交给模型', data.session_id);
       setRunning(false);
       break;
   }
@@ -430,4 +464,3 @@ function respondApproval(id, approved, withEdits) {
   toast(approved ? (withEdits ? '已按修改后的参数批准' : '已批准') : '已拒绝',
         approved ? 'success' : 'info');
 }
-

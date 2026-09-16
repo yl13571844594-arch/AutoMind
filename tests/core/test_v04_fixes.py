@@ -129,8 +129,13 @@ class TestFrontendRobustness:
         core = self._js("core.js")
         chat = self._js("chat.js")
         assert "function buildMessageEl(" in core, "缺少统一消息构造器"
+        # 这里刻意只钉"构造器签名以这几个参数开头"，不钉参数个数：
+        # v1.7.2 给消息加了可选的「补充标记」参数（buildMessageEl(role, content,
+        # images, tag)），旧的等值断言会因此变红 —— 而它本意是"appendMessage 要
+        # 复用统一构造器、不许自己拼 HTML"，与参数几个无关。钉实现细节的断言
+        # 会在每次合理扩展时误报，最后被人删掉，反而失去保护作用。
         assert "buildMessageEl(role, text, images)" in core
-        assert "buildMessageEl(role, content, images)" in chat, "appendMessage 未复用构造器"
+        assert "buildMessageEl(role, content, images" in chat, "appendMessage 未复用构造器"
 
     def test_no_hardcoded_admin_path(self):
         panels = self._js("panels.js")

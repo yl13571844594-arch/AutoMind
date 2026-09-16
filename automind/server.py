@@ -180,6 +180,10 @@ _running_tasks = {"count": 0}  # 并发任务计数（资源保护）
 _MAX_CONCURRENT = int(os.environ.get("AUTOMIND_MAX_CONCURRENT", "8"))
 #: 正在等待人工审批的任务数（这些任务已把并发槽让出来，单独计数便于诊断）
 _approval_waiting = {"count": 0}
+#: 待决审批：approval_id → (Future, client_id, session_id, tool)。
+#: 记 client_id 是为了在**连接断开时立刻终结**该连接上的审批等待 ——
+#: 否则回调要一直挂到超时才返回，用户在别的标签页里看着任务"没反应"。
+_pending_approvals: dict[str, dict] = {}
 #: 「询问」模式下等待人工审批的上限（秒）。超时按配置处置，并**明确告知前端**。
 #: 前端拿它做倒计时，用户能看见还剩多久，而不是对着一个看似能永远等的弹窗。
 #: v1.6.4 起可在 ExecutionConfig 里显式配置
@@ -518,7 +522,11 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
             setattr(config.execution, flag, bool(ap[flag]))
     for num_flag in ("tool_timeout_seconds", "tool_timeout_max_seconds",
                      "approval_timeout_seconds", "tool_output_max_chars",
-                     "auto_verify_max_rounds", "trace_max_runs"):
+                     "auto_verify_max_rounds", "trace_max_runs",
+                     # v1.7.0：单步/整轮时长治理 + ReAct 无进展治理
+                     "goal_timeout_seconds", "react_tool_timeout_seconds",
+                     "max_task_seconds", "react_tool_budget",
+                     "react_repeat_action_threshold", "react_no_progress_limit"):
         if num_flag in ap:
             try:
                 setattr(config.execution, num_flag, float(ap[num_flag]))
@@ -763,12 +771,32 @@ def _acquire_run_agent(base_agent, sid: str):
             while len(_session_clones) > _SESSION_CLONE_MAX:
                 _, evicted = _session_clones.popitem(last=False)
                 _close_clone_later(evicted)
-        _session_clones.move_to_end(sid)
+        # 最近使用的会话排到最后（LRU 淘汰时先丢最旧的）。dict 子类可能没有
+        # move_to_end，缺了也不影响正确性 —— 不能因为"排序失败"把任务搞挂。
+        try:
+            _session_clones.move_to_end(sid)
+        except AttributeError:
+            pass
     a._interaction = base_agent._interaction
     a._mode = base_agent._mode
     a.approval_callback = getattr(base_agent, "approval_callback", None)
     a.event_sink = getattr(base_agent, "event_sink", None)
+    # 审批模式是**用户随时会改**的设置（顶栏下拉、REST），而会话克隆在创建时
+    # 就固化了当时的模式。不同步的话会出现"界面上写着「询问」，实际那个会话
+    # 一直在自动放行/一直不弹窗" —— 安全设置与真实行为不一致，且毫无提示。
+    _sync_approval_mode(a, base_agent)
     return a
+
+
+def _sync_approval_mode(agent: Any, base_agent: Any) -> None:
+    """把 base agent 的审批模式同步到会话实例（幂等，便宜的属性比较）。"""
+    try:
+        mode = getattr(base_agent.permissions, "approval_mode", "auto")
+        if getattr(agent.permissions, "approval_mode", None) != mode:
+            agent.permissions.approval_mode = mode
+        agent.config.execution.approval_mode = mode
+    except Exception as e:            # pragma: no cover - 配置不可读不该拖垮任务
+        logger.warning("approval_mode_sync_failed", error=str(e))
 
 
 # ═══════════════════════════════════════════════════════════
@@ -861,6 +889,7 @@ async def api_health():
         "auth_required": bool(_auth_token()),
         "running_tasks": _running_tasks["count"],
         "approval_waiting": _approval_waiting["count"],
+        "approval_pending": len(_pending_approvals),
         "max_concurrent": _MAX_CONCURRENT,
         "uptime_s": round(time.time() - _START_TIME, 1),
         "paths": _paths_describe(),
@@ -950,7 +979,12 @@ async def api_set_mode_models(data: dict):
 
 @app.post("/api/config/approval")
 async def api_set_approval(data: dict):
-    """设置审批模式：ask（询问）| auto（自动）| approve_all（全批准）。"""
+    """设置审批模式：ask（询问）| auto（自动）| approve_all（全批准）。
+
+    持久化到 active 配置 + 即时应用到**全局与已存在的会话实例** ——
+    只改全局时，正在用的那个标签页（会话克隆）仍旧按老模式跑，
+    用户则会以为"我明明设成询问了，它怎么没问我"。
+    """
     mode = (data.get("approval_mode") or "").strip()
     if mode not in ("ask", "auto", "approve_all"):
         return JSONResponse({"error": "无效的审批模式"}, status_code=400)
@@ -958,7 +992,15 @@ async def api_set_approval(data: dict):
     agent = get_agent()
     agent.permissions.approval_mode = mode
     agent.config.execution.approval_mode = mode
-    return {"status": "ok", "approval_mode": mode}
+    synced = 0
+    for clone in list(_session_clones.values()):
+        try:
+            _sync_approval_mode(clone, agent)
+            synced += 1
+        except Exception as e:        # pragma: no cover
+            logger.warning("approval_mode_apply_failed", error=str(e))
+    logger.info("approval_mode_changed", mode=mode, sessions_synced=synced)
+    return {"status": "ok", "approval_mode": mode, "sessions_synced": synced}
 
 
 _AUTOPILOT_FLAGS = ("auto_review", "auto_verify", "auto_test",
@@ -992,7 +1034,10 @@ async def api_set_autopilot(data: dict):
     # 数值型执行参数（超时/上限）也允许在此调整：长任务排障时不必重建 Agent
     for num in ("tool_timeout_seconds", "tool_timeout_max_seconds",
                 "approval_timeout_seconds", "tool_output_max_chars",
-                "auto_verify_max_rounds", "trace_max_runs"):
+                "auto_verify_max_rounds", "trace_max_runs",
+                "goal_timeout_seconds", "react_tool_timeout_seconds",
+                "max_task_seconds", "react_tool_budget",
+                "react_repeat_action_threshold", "react_no_progress_limit"):
         if num in data:
             try:
                 val = float(data[num])
@@ -1002,8 +1047,20 @@ async def api_set_autopilot(data: dict):
                 continue
             setattr(agent.config.execution, num,
                     int(val) if num in ("tool_output_max_chars", "auto_verify_max_rounds",
-                                        "trace_max_runs") else val)
+                                        "trace_max_runs", "tool_timeout_seconds",
+                                        "goal_timeout_seconds", "react_tool_budget",
+                                        "react_tool_timeout_seconds",
+                                        "max_task_seconds",
+                                        "react_repeat_action_threshold",
+                                        "react_no_progress_limit") else val)
             stored[num] = getattr(agent.config.execution, num)
+            # v1.7.0：单步执行上限即时生效（改完就管住正在跑的计划，
+            # 不必等重建 Agent —— 排障时正是"它现在卡住了"才要调这个值）
+            if num == "goal_timeout_seconds":
+                try:
+                    agent.plan_executor.goal_timeout = float(val)
+                except Exception as e:      # pragma: no cover
+                    logger.warning("goal_timeout_apply_failed", error=str(e))
     if "approval_timeout_action" in data:
         act = str(data["approval_timeout_action"]).lower()
         if act in ("approve", "reject"):
@@ -2670,6 +2727,30 @@ async def api_tools():
     return result
 
 
+@app.get("/api/tools/registration")
+async def api_tools_registration():
+    """工具分组的注册失败账目（v1.7.2）。
+
+    为什么单独开一个端点而不是塞进 ``/api/tools`` 的返回值：那个端点的返回值
+    是一个数组，界面直接当列表渲染，改成对象会把所有调用方一起弄坏。
+
+    为什么必须暴露出来：注册失败以前只写一行 ``logger.warning``（浏览器组
+    甚至是裸的 ``except: pass``），而日志默认只进 stderr —— 桌面版/Web 版
+    用户根本看不到，"少了六个工具"这件事在用户视角里从未发生过。这里让
+    界面能问出"你到底少了哪些能力、怎么补回来"。
+    """
+    agent = get_agent()
+    failures = agent.tool_group_failures() if hasattr(agent, "tool_group_failures") else []
+    return {
+        "ok": not failures,
+        "failures": failures,
+        # 让界面不用自己拼中文：措辞与任务前自检保持一致
+        "message": ("；".join(f"工具组「{f['group']}」未注册成功（{f['error']}）"
+                              + (f"，修复：{f['hint']}" if f.get("hint") else "")
+                              for f in failures) or "全部工具组注册正常"),
+    }
+
+
 @app.post("/api/tools/toggle")
 async def api_tools_toggle(data: dict):
     """启用/禁用某个工具（禁用后 Agent 执行时不可调用）。"""
@@ -3092,6 +3173,77 @@ async def api_clear_history():
 
 _ws_tasks: dict[str, asyncio.Task] = {}
 _ws_approvals: dict[str, asyncio.Future] = {}
+#: 会话标识 → 归属该会话的连接（同一用户的多个标签页）；审批弹窗据此补发
+_ws_sessions: dict[str, list[WebSocket]] = {}
+#: 会话标识 → 该会话**正在跑**的 Agent 实例（v1.7.2 中途插话）。
+#: 插话要找的正是"正在生成的那个 Agent"：队列挂在它身上，执行循环从它取值。
+#: 只增删于 _ws_run 的进出，键是会话而非连接 —— 同一会话的另一个标签页
+#: 也能给自己正在跑的任务补话。
+_live_runs: dict[str, Any] = {}
+#: (会话, seq) → 前端自己给的回执标识（v1.7.2）。
+#: seq 是**服务端**发号的，前端拿到它时已经需要先猜"这条回执对应我哪一次插入"
+#: （连发两句相同内容就分不清）。让前端在请求里带一个 ref，服务端原样回显，
+#: 定位就从"猜"变成"查表"。只在有任务在跑时使用，随运行结束一并清理。
+_interject_refs: dict[tuple[str, int], str] = {}
+
+
+async def _handle_interject(ws: WebSocket, client_id: str, data: dict) -> None:
+    """WS action=interject：把用户中途补的一句话交给正在跑的任务。
+
+    关键语义：**不取消正在跑的任务**。此前界面上唯一的"说话"方式是
+    ``action=run``，而它的处理逻辑是"有旧任务就先 cancel" —— 于是用户在
+    AI 写到一半时补一句，得到的实际效果是"把刚才那半截回答掐了重来"。
+
+    三种去向，都要给回执：
+      · 有任务在跑 → 入队，回 ``interjection_received``（随后执行循环
+        在步骤边界取走，回 ``interjection_applied``）；
+      · 没有任务在跑 → 当成一次新任务直接开跑，回 ``interjection_promoted``
+        （用户的话不能掉在地上 —— 他觉得"我在补充"，系统看到的是"新的输入"，
+        两边认知不一致时应当以"把它办掉"为准）；
+      · 收不下（空/超长/超量）→ 回 ``interjection_rejected`` + 原因。
+    """
+    sid = data.get("session_id") or "default"
+    text = str(data.get("text") or "").strip()
+    # 前端自带的对账标识（可选）：原样回显在每一条回执里，让"哪条回执对应
+    # 我哪一次插入"变成确定的查表，而不是靠文本匹配去猜
+    ref = str(data.get("ref") or data.get("client_ref") or "")[:64]
+    agent = _live_runs.get(sid)
+    if agent is not None:
+        try:
+            item = agent.interject(text)
+        except Exception as e:
+            await ws.send_json({"type": "interjection_rejected", "text": text[:200],
+                                "reason": str(e), "ref": ref})
+            return
+        if ref:
+            _interject_refs[(sid, item.seq)] = ref
+        await ws.send_json({
+            "type": "interjection_received", "text": item.text, "seq": item.seq,
+            "ref": ref,
+            "pending": agent.pending_interjections(), "session_id": sid,
+            "run_session_id": getattr(agent, "_run_session_id", ""),
+            "mode": getattr(getattr(agent, "_interaction", None), "value", ""),
+        })
+        logger.info("interjection_received", session=sid, seq=item.seq,
+                    chars=len(item.text))
+        return
+
+    if not text:
+        await ws.send_json({"type": "interjection_rejected", "text": "",
+                            "reason": "补充内容为空", "ref": ref})
+        return
+    # 没有正在跑的任务 → 直接把它当作一次新任务开跑
+    await ws.send_json({"type": "interjection_promoted", "text": text, "ref": ref,
+                        "reason": "当时没有正在执行的任务"})
+    old = _ws_tasks.get(client_id)
+    if old and not old.done():
+        old.cancel()
+    _ws_tasks[client_id] = asyncio.create_task(_ws_run(ws, client_id, {
+        "task": text,
+        "interaction": data.get("interaction", ""),
+        "images": data.get("images") or [],
+        "session_id": sid,
+    }))
 
 
 def _jsonable(obj: Any, _depth: int = 0) -> Any:
@@ -3143,6 +3295,8 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     client_id = uuid.uuid4().hex[:8]
     _ws_clients.setdefault("all", []).append(ws)
+    # 先按默认会话登记：这样"连接刚建立、任务还没发"时也能收到本会话的审批弹窗
+    _ws_bind_session(ws, "default")
     try:
         await ws.send_json({"type": "connected", "client_id": client_id})
         while True:
@@ -3159,8 +3313,16 @@ async def ws_endpoint(ws: WebSocket):
                 t = _ws_tasks.get(client_id)
                 if t and not t.done():
                     t.cancel()
+            elif action in ("interject", "inject", "supplement"):
+                # 中途插话（v1.7.2）：三个名字都收，前端怎么写都不至于失效。
+                # 它**不碰** _ws_tasks —— 插话不打断、不重启正在跑的任务。
+                await _handle_interject(ws, client_id, data)
             elif action == "approval_response":
-                fut = _ws_approvals.get(data.get("approval_id", ""))
+                # 审批结果可能来自**另一个标签页**（`_ws_approvals` 是进程级、
+                # 按 approval_id 索引），所以这里不校验 client_id —— 用户开了两个
+                # 窗口时，在哪个窗口点「批准」都应当生效。
+                aid = str(data.get("approval_id") or "")
+                fut = _ws_approvals.get(aid)
                 if fut and not fut.done():
                     # 除批准/拒绝外还可携带 arguments（「修改后批准」）；
                     # 结构化结果由 ApprovalOutcome.normalize 统一解析
@@ -3170,16 +3332,173 @@ async def ws_endpoint(ws: WebSocket):
                         "arguments": args if isinstance(args, dict) else None,
                         "comment": str(data.get("comment") or ""),
                     })
+                else:
+                    # 迟到的回答（超时/取消后弹窗还开着）—— 如实回执，
+                    # 免得用户以为自己那一票没生效却毫无反馈
+                    try:
+                        await ws.send_json({
+                            "type": "approval_stale", "approval_id": aid,
+                            "message": ("这次审批已经结束（超时或任务已中断），"
+                                        "本次点击不再生效。"),
+                        })
+                    except Exception:
+                        pass
     except WebSocketDisconnect:
         pass
     except Exception:
         pass
     finally:
+        _fail_pending_approvals(client_id,
+                                "发起审批的页面已关闭或连接中断，按拒绝处理")
+        _ws_unbind(ws)
         t = _ws_tasks.pop(client_id, None)
         if t and not t.done():
             t.cancel()
         if ws in _ws_clients.get("all", []):
             _ws_clients["all"].remove(ws)
+
+
+def _fail_pending_approvals(client_id: str, reason: str) -> int:
+    """连接断开时立刻终结该连接上的待决审批，返回终结条数。
+
+    此前断开只是"发不出去了"：回调要一直挂到 300 秒超时，任务在这段时间里
+    既不前进也不结束，用户在别的窗口看到的就是"它卡住了"。
+    现在就地按拒绝收尾（fail-closed），等待方**马上**拿到结果继续跑。
+    """
+    killed = 0
+    for aid, rec in list(_pending_approvals.items()):
+        if rec.get("client_id") != client_id:
+            continue
+        fut = rec.get("future")
+        if fut is not None and not fut.done():
+            try:
+                fut.set_result({"approved": False, "arguments": None,
+                                "comment": reason})
+            except Exception:
+                pass
+        _pending_approvals.pop(aid, None)
+        _ws_approvals.pop(aid, None)
+        killed += 1
+    if killed:
+        logger.warning("approval_channel_closed", client=client_id,
+                       pending=killed, reason=reason)
+    return killed
+
+
+def make_approval_callback(
+    ws: Any,
+    client_id: str,
+    session_id: str,
+    chat_sid: str,
+    agent: Any,
+    *,
+    release_slot: Any = None,
+    reclaim_slot: Any = None,
+):
+    """构造"向前端要一次人工批准"的回调（``approval_cb``）。
+
+    独立成模块级函数而不埋在 ``_ws_run`` 的闭包里，是因为这段逻辑是
+    **整条审批链路唯一的阻塞点**：它既要发弹窗、又要等回答、还要处理
+    超时/断连/送不到三种异常收尾。埋在闭包里就只能靠端到端跑整个任务
+    才测得到，于是它长期处于"没人测"的状态 —— 而它的每一种失败形态
+    在用户侧的表现都是"任务卡住不动"。
+    """
+    approval_timeout = _approval_timeout_seconds(agent)
+
+    async def _approval_cb(tool_name, args, tier, reason):
+        approval_id = uuid.uuid4().hex[:10]
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        _ws_approvals[approval_id] = fut
+        _pending_approvals[approval_id] = {
+            "future": fut, "client_id": client_id, "session_id": session_id,
+            "tool": tool_name, "tier": tier, "asked_at": time.time(),
+        }
+        # 等待人工回答期间不再占用执行槽（名额还给别的任务）
+        if release_slot is not None:
+            release_slot()
+        payload = {
+            "type": "approval_request", "approval_id": approval_id,
+            "session_id": session_id, "tool": tool_name, "tier": tier,
+            "reason": reason,
+            # 截断版仅供展示；editable 是「修改后批准」要回填的原始值，
+            # 不能截断 —— 否则用户"没改的那些参数"会被截断值悄悄覆盖
+            "params": {k: str(v)[:200] for k, v in (args or {}).items()},
+            "editable": _jsonable(args or {}),
+            # 前端据此显示倒计时：不给期限的话，弹窗看起来可以一直等，
+            # 而实际上后端到点就按配置处置了
+            "timeout_s": approval_timeout,
+            "on_timeout": _approval_timeout_action(agent),
+        }
+        try:
+            await ws.send_json(payload)
+        except Exception as e:
+            # 弹窗发不出去 = 用户根本没机会批准。这不是"等等看"，必须当场
+            # 按拒绝收尾并把原因说清，否则整个任务会一直挂到超时。
+            logger.warning("approval_request_undeliverable", tool=tool_name,
+                           client=client_id, error=str(e))
+            _pending_approvals.pop(approval_id, None)
+            _ws_approvals.pop(approval_id, None)
+            if reclaim_slot is not None:
+                reclaim_slot()
+            return {"approved": False, "arguments": None,
+                    "comment": f"审批请求无法送达界面（{type(e).__name__}），已按拒绝处理"}
+        # 让同一会话的其它标签页也能看到并响应（开两个窗口时不必回到原窗口）
+        await _broadcast_to_session(chat_sid, payload, exclude=ws)
+        # 审批事件同样并入观测轨迹：排障时要能看出"这一步在等人"
+        try:
+            _observability.record(chat_sid, {
+                "type": "approval_request", "session_id": session_id,
+                "tool": tool_name, "tier": tier, "approval_id": approval_id})
+        except Exception:
+            pass
+        try:
+            return await asyncio.wait_for(fut, timeout=approval_timeout)
+        except TimeoutError:
+            # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
+            # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
+            action = _approval_timeout_action(agent)
+            approved = action == "approve"
+            outcome = "自动批准" if approved else "自动拒绝"
+            logger.warning("approval_timeout", tool=tool_name,
+                           timeout_s=approval_timeout, session=session_id,
+                           action=action)
+            try:
+                await ws.send_json({
+                    "type": "approval_timeout", "approval_id": approval_id,
+                    "session_id": session_id, "tool": tool_name,
+                    "timeout_s": approval_timeout,
+                    "action": action, "approved": approved,
+                    "message": (f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
+                                f"已按「{outcome}」处理工具 {tool_name}。"
+                                if approved else
+                                f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
+                                f"已按「{outcome}」处理工具 {tool_name}（未执行）。"
+                                "如需无人值守运行，请把审批模式改为「自动」或「全批准」，"
+                                "或调大 execution.approval_timeout_seconds。"),
+                })
+            except Exception:
+                pass          # 连接已断时发不出去很正常，日志已经记下了
+            # 超时事件也并入轨迹与观测图（排障时要能看到"卡在审批上")
+            record_ev = {"type": "approval_timeout", "session_id": session_id,
+                         "tool": tool_name, "timeout_s": approval_timeout,
+                         "action": action}
+            try:
+                _observability.record(chat_sid, record_ev)
+            except Exception:
+                pass
+            # 返回值与"送不到"分支保持同一种形状（结构化 dict）——
+            # 调用方虽然都用 ApprovalOutcome.normalize 归一化，
+            # 但两条分支返回不同类型的值迟早会误导某处调用方。
+            return {"approved": approved, "arguments": None,
+                    "comment": (f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
+                                f"已按「{'自动批准' if approved else '自动拒绝'}」处理")}
+        finally:
+            _ws_approvals.pop(approval_id, None)
+            _pending_approvals.pop(approval_id, None)
+            if reclaim_slot is not None:
+                reclaim_slot()
+
+    return _approval_cb
 
 
 async def _ws_run(ws: WebSocket, client_id: str, data: dict):
@@ -3194,6 +3513,8 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         return
     raw_task = task                 # 语义缓存/路由以用户原文为准
     task = _apply_expert(task)  # 激活的专家角色设定注入（全部模式）
+    # 连接与会话绑定：审批弹窗要能补发到这个会话的其它标签页
+    _ws_bind_session(ws, chat_sid)
 
     agent = get_agent()
     if interaction:
@@ -3238,6 +3559,21 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         return
 
     session_id = uuid.uuid4().hex[:12]
+    # 本次运行的 id 挂在 Agent 上：插话回执要带上它，前端才能把"你补的这句话"
+    # 与"哪一次运行"对上（用户可能连着跑了好几轮，回执串台比没有回执更糟）
+    try:
+        agent._run_session_id = session_id
+    except Exception:                                  # pragma: no cover - 防御性
+        pass
+    # 登记"本会话正在跑谁"（v1.7.2 中途插话要找到这个实例）的时机说明：
+    #
+    #  · 不能在**提前返回**之前（LLM 未配置 / 并发上限 / 配额这三道门都会直接
+    #    return，而注销挂在 finally 里）—— 否则那些路径会把一个"根本没开始跑"
+    #    的 Agent 永久留在表里，此后用户每次插话都被收下并回执"已收到"，
+    #    却永远没有执行循环来取，也不会报"没纳入"。那正是本功能最不能出现的
+    #    一种失败：假装成功。
+    #  · 也不能留在 try 之外（下面 `await ws.send_json(task_start)` 失败就没有
+    #    finally 兜底了）—— 所以它放在 try 的**第一行**。
     _running_tasks["count"] += 1
     #: 本次任务是否已把并发槽让出去（审批等待期间让槽，只让一次）
     slot_state = {"released": False}
@@ -3272,67 +3608,11 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             logger.info("approval_slot_reclaimed", session=session_id)
 
     # 注入审批回调（ask 模式下工具调用前向前端请求批准）
-    approval_timeout = _approval_timeout_seconds(agent)
-
-    async def _approval_cb(tool_name, args, tier, reason):
-        approval_id = uuid.uuid4().hex[:10]
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        _ws_approvals[approval_id] = fut
-        # 等待人工回答期间不再占用执行槽（名额还给别的任务）
-        _release_slot_for_approval()
-        try:
-            await ws.send_json({
-                "type": "approval_request", "approval_id": approval_id,
-                "session_id": session_id, "tool": tool_name, "tier": tier,
-                "reason": reason,
-                # 截断版仅供展示；editable 是「修改后批准」要回填的原始值，
-                # 不能截断 —— 否则用户"没改的那些参数"会被截断值悄悄覆盖
-                "params": {k: str(v)[:200] for k, v in (args or {}).items()},
-                "editable": _jsonable(args or {}),
-                # 前端据此显示倒计时：不给期限的话，弹窗看起来可以一直等，
-                # 而实际上后端到点就按配置处置了
-                "timeout_s": approval_timeout,
-                "on_timeout": _approval_timeout_action(agent),
-            })
-            return await asyncio.wait_for(fut, timeout=approval_timeout)
-        except TimeoutError:
-            # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
-            # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
-            action = _approval_timeout_action(agent)
-            approved = action == "approve"
-            outcome = "自动批准" if approved else "自动拒绝"
-            logger.warning("approval_timeout", tool=tool_name,
-                           timeout_s=approval_timeout, session=session_id,
-                           action=action)
-            try:
-                await ws.send_json({
-                    "type": "approval_timeout", "approval_id": approval_id,
-                    "session_id": session_id, "tool": tool_name,
-                    "timeout_s": approval_timeout,
-                    "action": action, "approved": approved,
-                    "message": (f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
-                                f"已按「{outcome}」处理工具 {tool_name}。"
-                                if approved else
-                                f"审批等待超过 {approval_timeout:.0f} 秒未响应，"
-                                f"已按「{outcome}」处理工具 {tool_name}（未执行）。"
-                                "如需无人值守运行，请把审批模式改为「自动」或「全批准」，"
-                                "或调大 execution.approval_timeout_seconds。"),
-                })
-            except Exception:
-                pass          # 连接已断时发不出去很正常，日志已经记下了
-            # 超时事件也并入轨迹与观测图（排障时要能看到"卡在审批上")
-            record_ev = {"type": "approval_timeout", "session_id": session_id,
-                         "tool": tool_name, "timeout_s": approval_timeout,
-                         "action": action}
-            try:
-                _observability.record(chat_sid, record_ev)
-            except Exception:
-                pass
-            return approved
-        finally:
-            _ws_approvals.pop(approval_id, None)
-            _reclaim_slot_after_approval()
-
+    _approval_cb = make_approval_callback(
+        ws, client_id, session_id, chat_sid, agent,
+        release_slot=_release_slot_for_approval,
+        reclaim_slot=_reclaim_slot_after_approval,
+    )
     agent.approval_callback = _approval_cb
 
     # 注入执行过程事件回调（实时展示思考/工具调用/计划步骤）
@@ -3341,6 +3621,15 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         try:
             _observability.record(chat_sid, ev)
         except Exception:
+            pass
+        # 插话生效事件补上 ref（v1.7.2）：事件是从执行循环深处发出来的，
+        # 那里只认 seq；前端要的是"我发的那条请求"。在这里做一次翻译，
+        # 免得把"查表"这件事推给每个消费方各写一遍。
+        try:
+            if ev.get("type") == "interjection_applied":
+                for it in ev.get("items") or []:
+                    it["ref"] = _interject_refs.pop((chat_sid, it.get("seq")), "")
+        except Exception:                              # pragma: no cover - 纯装饰
             pass
         try:
             await ws.send_json({"session_id": session_id, **ev})
@@ -3354,6 +3643,11 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     await ws.send_json(_start_ev)
     t0 = time.perf_counter()
     try:
+        # 登记"本会话正在跑谁"（v1.7.2 中途插话要找到这个实例）——放在 try 的
+        # 第一行：从这一刻起本次运行的每一步都被 finally 兜住，插话打进队列后
+        # 要么被执行循环取走（interjection_applied），要么在收尾时如实报
+        # interjection_dropped，不存在"收下了却没人管"的中间态。
+        _live_runs[chat_sid] = agent
         # ── 对话模式：流式 ──
         if agent._interaction == InteractionMode.CHAT:
             hist = _get_session_history(chat_sid)
@@ -3402,6 +3696,8 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                 "completion_tokens": usage.completion_tokens,
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "plan": None, "interaction": "chat",
+                # 中途插话账目：这轮收了几条、真正并进回答几条（可观测、可复盘）
+                "interjections": agent.interjection_report(),
             }
             _push_history(record)
             _accumulate_tokens(record)
@@ -3477,6 +3773,8 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             "duration_ms": round(result.duration_ms, 1),
             "plan": _serialize_plan(result.plan) if result.plan else None,
             "interaction": agent._interaction.value,
+            # 中途插话账目：这轮收了几条、真正并进本轮几条（可观测、可复盘）
+            "interjections": agent.interjection_report(),
         }
         _push_history(record)
         _accumulate_tokens(record)
@@ -3503,6 +3801,43 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             pass
     finally:
         agent.approval_callback = None
+        # ── 中途插话的收尾（v1.7.2）──
+        # 用户在这轮跑的过程中补的话，若到最后还没被交给模型（回答先写完了、
+        # 任务被取消、或到了续写次数上限），**必须如实回执**。
+        # 静默丢弃是最坏的一种：用户看到自己那句话出现在屏幕上，就默认它生效了，
+        # 而模型从头到尾没见过它 —— 之后所有基于它的期待都会落空且无从追查。
+        try:
+            leftover = agent.drain_interjections()
+        except Exception as e:                         # pragma: no cover - 防御性
+            leftover = []
+            logger.warning("interjection_drain_failed", error=str(e))
+        for _it in leftover:
+            try:
+                await ws.send_json({
+                    "type": "interjection_dropped", "seq": _it.seq, "text": _it.text,
+                    "session_id": session_id,
+                    "ref": _interject_refs.pop((chat_sid, _it.seq), ""),
+                    "reason": "本轮任务在你补充之前就结束了，这条没有交给模型",
+                })
+            except Exception:
+                # 连接已断/任务被取消 —— 前端在终态事件里会把这批气泡标成
+                # "未纳入本轮"，不靠这一条必达
+                pass
+        if leftover:
+            logger.warning("interjection_dropped", count=len(leftover),
+                           session=chat_sid, run=session_id)
+        try:
+            agent._interjections.dropped += len(leftover)
+        except Exception:                              # pragma: no cover - 防御性
+            pass
+        # 清理本会话的 ref 表：运行结束 = 这些对账标识再也不会被用到，
+        # 留着就是一条只增不减的内存
+        for _key in [k for k in _interject_refs if k[0] == chat_sid]:
+            _interject_refs.pop(_key, None)
+        # 注销"本会话正在跑谁"：此后同一个会话再插话会被当作新任务开跑，
+        # 而不是塞给一个已经结束的执行循环（那才是真的会被无声吞掉）
+        if _live_runs.get(chat_sid) is agent:
+            _live_runs.pop(chat_sid, None)
         agent.event_sink = None
         # 若仍处于"审批让槽"状态（任务在等待中被取消/异常），先把等待计数归位，
         # 再还槽 —— 否则 _approval_waiting 会永久偏差，诊断数据从此不可信。
@@ -3511,6 +3846,55 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             _approval_waiting["count"] = max(0, _approval_waiting["count"] - 1)
             _running_tasks["count"] += 1
         _running_tasks["count"] = max(0, _running_tasks["count"] - 1)
+
+
+def _ws_session_of(ws: Any) -> str:
+    """该连接当前归属的会话标识（未跑过任务时为空串）。
+
+    连接一建立就登记（见 ``ws_endpoint``），`run` 时再按本次请求的
+    ``session_id`` 更新 —— 审批弹窗要按会话找到"同一个用户的其它窗口"。
+    """
+    for sid, sockets in _ws_sessions.items():
+        if ws in sockets:
+            return sid
+    return ""
+
+
+def _ws_bind_session(ws: Any, session_id: str) -> None:
+    """把连接绑定到某个会话（旧的绑定先摘掉）。"""
+    for sid, sockets in list(_ws_sessions.items()):
+        if ws in sockets and sid != session_id:
+            sockets.remove(ws)
+    _ws_sessions.setdefault(session_id, []).append(ws)
+
+
+def _ws_unbind(ws: Any) -> None:
+    for sockets in _ws_sessions.values():
+        if ws in sockets:
+            sockets.remove(ws)
+    for sid in [s for s, v in _ws_sessions.items() if not v]:
+        _ws_sessions.pop(sid, None)
+
+
+async def _broadcast_to_session(session_key: str, data: dict, exclude: Any = None) -> int:
+    """把消息推给**同一会话**的其它连接（用于审批请求的多窗口可达）。
+
+    审批是阻塞式等待：弹窗只发到"发起这个任务的那个连接"时，用户只要把
+    那个标签页最小化/切走，就从界面上看不到"它在等你点"。
+    这里把同会话的其它连接也补一份，谁在场谁就能点。
+    """
+    sent = 0
+    for ws in list(_ws_clients.get("all", [])):
+        if ws is exclude:
+            continue
+        try:
+            if _ws_session_of(ws) != session_key:
+                continue
+            await ws.send_json(data)
+            sent += 1
+        except Exception:
+            pass
+    return sent
 
 
 async def _broadcast(data: dict):

@@ -228,11 +228,19 @@ Chat-mode conversations persist to `.automind/chat_history.json` and are restore
 reload; **🔄 New session** clears the current one. Task history (sidebar 📜) supports
 deleting single entries or clearing everything.
 
-## Streaming · Interruption
+## Streaming · Interruption · Mid-turn Interjection
 
 - **Streaming chat**: chat mode streams token by token over WebSocket with a live cursor.
 - **Interruption**: click ■ during execution to genuinely cancel the background task
   (`asyncio.Task` cancellation) — works in chat, work and coding modes.
+- **💬 Mid-turn interjection (v1.7.2)**: noticed it is missing something halfway through
+  an answer? **You no longer have to stop first** — just type the extra instruction and
+  press `Ctrl/⌘+Enter` (or click "⤴ Insert"). It is folded into **the answer currently
+  being written** and generation continues in the same bubble, so you read one continuous
+  reply. Work/coding modes are covered too (the supplement reaches the model's context
+  before the next step). Each bubble is flagged "pending → ✓ incorporated"; if the turn
+  ended before your note arrived, the app **says so explicitly** instead of pretending it
+  was received.
 - Falls back to synchronous REST automatically when WebSocket is unavailable.
 
 ## Multimodal · Voice · Preview · Token Stats

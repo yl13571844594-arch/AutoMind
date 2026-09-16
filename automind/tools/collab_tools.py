@@ -19,7 +19,15 @@ from typing import Any
 
 from automind.core.logging import get_logger
 from automind.core.types import PermissionTier, ToolResult
-from automind.tools._toolkit import BlockedTarget, bad, check_url, err, need, ok
+from automind.tools._toolkit import (
+    BlockedTarget,
+    bad,
+    check_url,
+    err,
+    need,
+    ok,
+    run_blocking,
+)
 from automind.tools.base import AbstractTool
 
 logger = get_logger("automind.tools.collab")
@@ -54,11 +62,15 @@ class NotifyTool(AbstractTool):
         urgency = str(kwargs.get("urgency") or "normal")
         system = platform.system()
         try:
+            # 三个平台的实现都是**同步** subprocess.run（PowerShell WinRT /
+            # osascript / notify-send），最长各等 20 秒。直接调用会把事件循环
+            # 一起冻住 —— 而这恰恰发生在"长任务刚跑完要通知用户"的时刻，
+            # 用户在界面上看到的是任务完成了但整个界面卡住不动。
             if system == "Windows":
-                return self._windows(title, body)
+                return await run_blocking(self._windows, title, body)
             if system == "Darwin":
-                return self._macos(title, body)
-            return self._linux(title, body, urgency)
+                return await run_blocking(self._macos, title, body)
+            return await run_blocking(self._linux, title, body, urgency)
         except Exception as e:
             return err(self.name, e)
 

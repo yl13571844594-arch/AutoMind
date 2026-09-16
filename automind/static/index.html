@@ -96,6 +96,9 @@
         <button id="mic-btn" class="io-btn" onclick="toggleVoice()" title="语音输入（麦克风）">🎤</button>
         <input type="file" id="img-input" accept="image/*" multiple style="display:none" onchange="onImagesPicked(event)">
         <textarea id="user-input" placeholder="输入消息，Enter 发送，Shift+Enter 换行..." rows="1" onkeydown="handleKeyDown(event)"></textarea>
+        <!-- 执行期间才显示：把这句话插进正在跑的那一轮（Enter 同效），
+             旁边保留「停止」，用户想停仍能停 -->
+        <button id="interject-btn" onclick="interjectMessage()" title="把补充要求插入正在执行的任务（Enter / Ctrl+Enter）" style="display:none">⤴ 插入补充</button>
         <button id="send-btn" onclick="sendMessage()" title="发送 (Enter)">▶</button>
         <button id="stop-btn" onclick="stopTask()" title="停止">■</button>
       </div>

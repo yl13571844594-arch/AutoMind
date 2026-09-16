@@ -14,6 +14,15 @@ from automind.context.project_indexer import ProjectIndexer
 from automind.core.config import AgentConfig
 from automind.core.events import EventBus
 from automind.core.hooks import AgentHooks, invoke_hook
+from automind.core.interject import (
+    MAX_ROUNDS as MAX_INTERJECT_ROUNDS,
+)
+from automind.core.interject import (
+    Interjection,
+    InterjectionQueue,
+    mark_applied,
+    render_for_model,
+)
 from automind.core.llm import LLMBackendFactory
 from automind.core.logging import get_logger
 from automind.core.plugin import PluginManager
@@ -155,6 +164,8 @@ class AutoMindAgent:
         )
         # 审批回调（由 Web 层注入，用于 ask 模式的人工确认）
         self.approval_callback = None
+        #: 本次任务的绝对截止时刻（time.monotonic 基准；None = 不限）
+        self._task_deadline: float | None = None
         self.resources = ResourceManager(
             token_budget=self.config.llm.max_tokens * 10,
         )
@@ -196,6 +207,8 @@ class AutoMindAgent:
             max_retries=self.config.execution.max_retries,
             parallel=self.config.execution.parallel_execution,
             use_cache=self.config.execution.subtask_cache,
+            # v1.7.0：单目标执行上限 —— 并行批里一个目标挂住不再拖死整批
+            goal_timeout=getattr(self.config.execution, "goal_timeout_seconds", 900.0),
         )
         self.fn_handler = FunctionCallHandler(self.tool_registry)
 
@@ -228,6 +241,9 @@ class AutoMindAgent:
         self._interaction: InteractionMode = InteractionMode.CHAT
         # 对话模式的多轮历史
         self._chat_history: list[dict[str, str]] = []
+        #: 用户中途插话（v1.7.2）—— 生成过程中补的那句话先落在这里，
+        #: 由执行循环在**步骤边界**取走并入本轮回答。会话克隆各自独享。
+        self._interjections = InterjectionQueue()
 
         # ── 生命周期钩子 + 插件系统（§3.5 / §14.7）──
         self.hooks = AgentHooks()
@@ -340,6 +356,18 @@ class AutoMindAgent:
         start_time = time.perf_counter()
         backtracks = 0
         errors_corrected = 0
+        # v1.7.0 整轮任务总时长预算。单步超时管"某一步卡住"、无进展检测管
+        # "原地打转"，都管不住"每步都正常但整体就是跑不完"——50 步 × 单次
+        # LLM 5 分钟的理论上限是 4 小时以上。到点不再开新步骤，把已完成
+        # 的工作完整交出去（部分交付清单），而不是硬掐断。
+        try:
+            budget = float(getattr(self.config.execution, "max_task_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            budget = 0.0
+        self._task_deadline = (time.monotonic() + budget) if budget > 0 else None
+        if self._task_deadline is not None:
+            logger.info("task_budget_set", seconds=budget,
+                        interaction=getattr(self._interaction, "value", ""))
 
         if self.llm is None:
             raise RuntimeError(
@@ -371,6 +399,11 @@ class AutoMindAgent:
             result_text = self._build_result_text(plan, step_results)
             backtracks = sum(1 for s in step_results if s.retries > 0) if step_results else 0
             errors_corrected = sum(1 for s in step_results if s.retries > 0 and s.success) if step_results else 0
+            # v1.7.2：计划跑完后，把执行途中收到的用户补充用一次 ReAct 补跑
+            # 纳入本轮交付（计划模式的动作在执行前就定好了，中途改不了道，
+            # 但"收下不办"等于静默丢弃 —— 那是最坏的处理方式）。
+            result_text = await self._absorb_interjections_after_plan(
+                user_input, context, result_text)
 
         # 3.5 自主任务闭环：TDD 测试 + 多 Agent 审查 + Loop 验收（工作/编程模式）
         if self._interaction in (InteractionMode.WORK, InteractionMode.CODING):
@@ -533,9 +566,90 @@ class AutoMindAgent:
         hist.append({"role": "assistant", "content": reply})
         return reply
 
+    def reset_chat(self) -> None:
+        """清空对话历史。"""
+        self._chat_history.clear()
+
+    # ═══════════════════════════════════════════════════════════
+    # 用户中途插话（v1.7.2）
+    # ═══════════════════════════════════════════════════════════
+
+    def interject(self, text: str) -> Interjection:
+        """收下用户在执行过程中补充的一句话。
+
+        供 Web / CLI 层在**任务正在跑**时调用 —— 它只负责"收下并记账"，
+        真正把它交给模型是在执行循环的步骤边界（见 ``drain_interjections``）。
+        **不取消正在跑的任务**：插话的语义是"接着说"，不是"重来"。
+
+        收不下（空/超长/超量）时抛 :class:`InterjectionTooLong`，由调用方
+        如实告诉用户 —— 静默丢弃是这里最不能接受的失败方式，因为用户
+        根本无从发现自己那句话没生效。
+        """
+        item = self._interjections.push(text)
+        logger.info("user_interjected", seq=item.seq, chars=len(item.text),
+                    pending=self._interjections.pending())
+        return item
+
+    def drain_interjections(self) -> list[Interjection]:
+        """取走当前待处理的插话（执行循环在步骤边界调用）。"""
+        return self._interjections.drain()
+
+    def pending_interjections(self) -> int:
+        """还有几条插话没交给模型（流式生成中途用它决定要不要续写）。"""
+        return self._interjections.pending()
+
+    def interjection_report(self) -> dict[str, int]:
+        return self._interjections.report()
+
+    async def _absorb_interjections_after_plan(self, task: str, context: str,
+                                               result_text: str) -> str:
+        """Plan 路径的插话收尾 —— 用一次 ReAct 把补充纳入本轮交付。
+
+        分层计划的每个动作（工具 + 参数）是**执行前就生成好的**，一句补充
+        没法凭空改写已经排好的步骤，所以这里不假装能在计划中途改道。
+        但也不能像什么都没发生：把补充作为追加要求交给 ReAct 跑一轮，
+        产出接在同一轮交付文本的后面，并标明它是"依据你的补充补跑的"。
+
+        补跑失败（模型报错、超预算）时把插话**放回队列**，由上层如实告诉
+        用户"这条没能纳入本轮" —— 用户插了话却看不到任何反应，比拒绝更糟。
+        """
+        notes = self.drain_interjections()
+        if not notes:
+            return result_text
+        supplement = render_for_model(notes)
+        try:
+            extra = await self._run_react(f"{task}\n\n{supplement}", context)
+        except Exception as e:
+            logger.warning("interjection_followup_failed", error=str(e),
+                           seqs=[n.seq for n in notes])
+            for n in reversed(notes):
+                self._interjections._items.appendleft(n)
+            return result_text
+        mark_applied(notes, "plan_followup")
+        await self._emit({"type": "interjection_applied", "at": "plan_followup",
+                          "items": [n.to_event() for n in notes]})
+        logger.info("interjection_merged", where="plan_followup",
+                    seqs=[n.seq for n in notes])
+        return (f"{result_text}\n\n——— 依据你执行途中的补充补跑（ReAct）———\n{extra}")
+
     async def chat_stream(self, user_input: str, images: list[str] | None = None,
                           history: list[dict] | None = None):
-        """对话模式（流式）— 逐字产出，结束后写入历史并估算 token。"""
+        """对话模式（流式）— 逐字产出，结束后写入历史并估算 token。
+
+        v1.7.2：**生成过程中可以接住用户的补充**。此前一轮 ``generate_stream``
+        从头跑到尾，期间用户补的话无处可去（界面连输入框都禁用了），只能等
+        这轮结束再说 —— 而那时回答往往已经写偏了。
+
+        现在的做法：边流边看插话队列，一旦有补充进来，就在**当前这一段**
+        收尾、把已生成的内容作为 assistant 消息留在上下文里，再带着补充
+        继续生成，续写的内容接着同一个气泡往下显示。用户看到的是**一段
+        连续的回答**，而不是"回答到一半突然重来"。
+
+        上限 ``MAX_INTERJECT_ROUNDS`` 次续写：每续一次都是一次额外计费的
+        LLM 调用，而插话是用户手打的、可能连着来好几句 —— 必须有个头。
+        到上限后剩余插话**不会被丢掉**，而是留在队列里由上层如实告知用户
+        （见 ``InterjectionQueue.report`` 与 Web 层的 interjection_dropped）。
+        """
         if self.llm is None:
             raise RuntimeError(
                 "LLM 未初始化。请先在「API Keys」面板配置当前提供商的 API Key。"
@@ -554,12 +668,54 @@ class AutoMindAgent:
         messages = [{"role": "system", "content": self.CHAT_SYSTEM_PROMPT}, *hist[-20:]]
 
         chunks: list[str] = []
-        async for delta in self.llm.generate_stream(messages):
-            chunks.append(delta)
-            yield delta
+        #: 本轮真正被并入的插话 —— 结束后要写进历史，否则下一轮它就"没发生过"
+        merged: list[Interjection] = []
+        rounds = 0
+        while True:
+            start = len(chunks)
+            interrupted = False
+            async for delta in self.llm.generate_stream(messages):
+                chunks.append(delta)
+                yield delta
+                # 每个 delta 都看一眼队列（deque 的读取是原子的、无锁）。
+                # 不在这里 break 的话，用户要等到整段写完才可能被理会 ——
+                # 而长回答正是最需要中途纠偏的场景。
+                if self._interjections.pending() and rounds < MAX_INTERJECT_ROUNDS:
+                    interrupted = True
+                    break
+
+            notes = self.drain_interjections()
+            if not notes:
+                break
+            if rounds >= MAX_INTERJECT_ROUNDS:
+                # 到上限了：**退回队列**，让上层如实告诉用户"这几条没并进去"。
+                # 吞掉它们才是最坏的结果 —— 用户以为说了，模型从未看到。
+                for n in reversed(notes):
+                    self._interjections._items.appendleft(n)
+                break
+            rounds += 1
+            merged.extend(notes)
+            # 已生成的部分作为本轮已有的回答留在上下文里（不能丢：丢了模型
+            # 会从头重写，用户就会看到同一段内容出现两遍）
+            messages.append({"role": "assistant", "content": "".join(chunks[start:])})
+            messages.append({"role": "user",
+                             "content": render_for_model(notes, continuing=interrupted)})
+            mark_applied(notes, "chat_round")
+            await self._emit({
+                "type": "interjection_applied", "at": "chat_round",
+                "round": rounds,
+                "items": [n.to_event() for n in notes],
+            })
+            logger.info("interjection_merged", where="chat_round", round=rounds,
+                        seqs=[n.seq for n in notes])
 
         reply = "".join(chunks) or "(无回复)"
         hist.append({"role": "assistant", "content": reply})
+        # 插话写进历史（放在回答之前）：下一轮它就是"用户说过的话"，
+        # 否则模型对自己刚才被纠正过这件事一无所知
+        if merged:
+            for n in merged:
+                hist.insert(len(hist) - 1, {"role": "user", "content": n.text})
 
         # 流式接口通常不返回用量，这里做估算
         try:
@@ -573,10 +729,6 @@ class AutoMindAgent:
             )
         except Exception:
             self._last_stream_usage = TokenUsage()
-
-    def reset_chat(self) -> None:
-        """清空对话历史。"""
-        self._chat_history.clear()
 
     async def run_multi(self, task: str, on_event: Any = None) -> dict:
         """多智能体协同执行（专业版特性 multi_agent，未授权时抛 FeatureNotAvailable）。"""
@@ -1066,6 +1218,12 @@ class AutoMindAgent:
                 problems.append("没有任何可用工具，任务将无法执行实际操作")
         except Exception as e:
             problems.append(f"工具注册表不可读：{e}")
+        # 分组注册失败同样要在这里冒头：这些工具**本来该有**，用户有权知道
+        # 少了什么、以及怎么补回来（而不是等模型规划到它时才发现不存在）。
+        for f in self.tool_group_failures():
+            problems.append(
+                f"工具组「{f['group']}」未注册成功（{f['error']}）"
+                + (f"，修复：{f['hint']}" if f.get("hint") else ""))
         try:
             root = Path(self.config.project_root)
             if not root.is_dir():
@@ -1100,13 +1258,29 @@ class AutoMindAgent:
             output_limits=limits_from_config(ex),
             # 历史观察折叠时每条保留的字符数（可配，便于按成本调参；0 = 类默认）
             obs_keep_chars=(getattr(ex, "compact_keep_obs_chars", 0) or None),
+            # v1.7.0 无进展治理：重复动作先提示后拦截 + 只读结果跨轮复用。
+            # 此前唯一的兜底是 max_iterations=50 —— "成功但重复"的动作
+            # 不报错、不受控，一路烧到第 50 步。
+            repeat_threshold=int(getattr(ex, "react_repeat_action_threshold", 2) or 2),
+            result_cache=bool(getattr(ex, "react_result_cache", True)),
+            no_progress_limit=int(getattr(ex, "react_no_progress_limit", 12) or 0),
+            # v1.7.0 单步超时：工具挂住不再等于任务挂住。
+            # 模型可在参数里用 timeout 申请更长，但不超过 tool_timeout_max_seconds。
+            tool_timeout=float(getattr(ex, "react_tool_timeout_seconds", 300.0) or 0),
+            tool_timeout_max=float(getattr(ex, "tool_timeout_max_seconds", 1800.0) or 0),
+            # v1.7.2 用户中途插话：执行器在每次迭代边界来取队列里的补充。
+            # 传的是**取值函数**而不是队列本身 —— 会话克隆各自有队列，
+            # 取值时机由执行器决定，两者解耦。
+            interjection_source=self.drain_interjections,
         )
         # 编程模式下注入面向编程的引导
         if self._interaction == InteractionMode.CODING:
             context = f"{self.CODING_SYSTEM_PROMPT}\n\n{context}"
         on_thought, on_action = self._react_callbacks()
         text = await self.react_executor.run(
-            task, context, on_thought=on_thought, on_action=on_action)
+            task, context, on_thought=on_thought, on_action=on_action,
+            on_no_progress=self._emit, deadline=self._task_deadline,
+            on_timeout=self._emit, on_interjection=self._emit)
         # 省 token 总账推给观测/前端：让"长任务越跑越省"看得见、可调参
         try:
             rep = self.react_executor.token_report()
@@ -1164,12 +1338,19 @@ class AutoMindAgent:
             logger.info("plan_created", plan="\n" + self._format_plan(plan))
 
         # 执行计划
+        #
+        # v1.7.2：计划执行期间用户仍可插话。但计划里的步骤与工具参数是**执行前
+        # 就定好的**，一句补充没法凭空改写已经排好的动作 —— 所以这里不假装能
+        # 在计划中途改道，而是把插话原样留给调用方（见 _run_impl_bound 的收尾
+        # 补跑）：本轮结束前用一次 ReAct 把补充纳入交付，而不是收下就完事。
         report = await self.plan_executor.execute(
             plan,
             on_step_start=self._on_step_start,
             on_step_end=self._on_step_end,
             on_backtrack=self._on_backtrack,
             on_approval_needed=self._on_approval_needed,
+            # v1.7.0：整轮任务总时长预算（到点不再开新批次，成果照常交付）
+            deadline=self._task_deadline,
         )
 
         return plan, report.steps
@@ -1378,6 +1559,8 @@ class AutoMindAgent:
         "env", "project_indexer", "input_parser", "memory",
         "tool_registry", "skill_registry", "mcp_registry",
         "checkpoint_mgr", "hooks", "plugin_manager",
+        # 注册失败的账目与工具注册表同源：克隆只读它，不该各自一份
+        "tool_registration_failures",
     )
 
     def clone_for_session(self) -> AutoMindAgent:
@@ -1441,6 +1624,7 @@ class AutoMindAgent:
             max_retries=clone.config.execution.max_retries,
             parallel=clone.config.execution.parallel_execution,
             use_cache=clone.config.execution.subtask_cache,
+            goal_timeout=getattr(clone.config.execution, "goal_timeout_seconds", 900.0),
         )
         clone.fn_handler = FunctionCallHandler(clone.tool_registry)
         clone.quality_assessor = QualityAssessor(clone.llm)
@@ -1456,6 +1640,8 @@ class AutoMindAgent:
         clone._mode = self._mode
         clone._interaction = self._interaction
         clone._chat_history = []
+        # 插话队列必须独享：共享的话，A 标签页补的那句话会插进 B 标签页的回答里
+        clone._interjections = InterjectionQueue()
         # 会话标识与工作区结果按会话独享（共享的话并发会话会互相覆盖）
         clone.session_id = ""
         clone._workspace_plan = None
@@ -1463,6 +1649,9 @@ class AutoMindAgent:
 
     def _register_default_tools(self) -> None:
         """注册默认工具。"""
+        #: 分组注册失败的账目（组名 / 异常 / 该怎么修）——
+        #: 见 _record_tool_group_failure：失败必须留痕且**能被用户看见**。
+        self.tool_registration_failures: list[dict[str, Any]] = []
         ex = self.config.execution
         timeout = float(getattr(ex, "tool_timeout_seconds", 300.0))
         self.tool_registry.register(TerminalTool(
@@ -1482,12 +1671,18 @@ class AutoMindAgent:
             self.tool_registry.register(cls(project_root=_root))
         self.tool_registry.register(PythonSandboxTool())
         # 浏览器 / 网页能力
+        #
+        # v1.7.2：这里此前是裸的 ``except Exception: pass`` —— 最糟的一种写法。
+        # 打包环境里 playwright 缺失时，web_fetch / browser 会**整体消失**：
+        # 模型看不到这两个工具，用户在界面上也看不出少了东西，只会困惑
+        # "它怎么不会用浏览器"。而 v1.6.4 已经确立"失败不再伪装成成功"，
+        # 注册环节恰恰是这条原则最容易漏掉的地方（失败发生在任务开始之前）。
         try:
             from automind.tools.browser import BrowserTool, WebFetchTool
             self.tool_registry.register(WebFetchTool())
             self.tool_registry.register(BrowserTool())
-        except Exception:
-            pass
+        except Exception as e:
+            self._record_tool_group_failure("browser", e)
         # 编程能力增强：把 code_generator 技能（生成/补全/脚手架 + 语法校验 + 自动修复）
         # 以工具形式暴露给 ReAct 循环，编程模式可直接调用
         self.tool_registry.register(_CodeGenerateTool(self))
@@ -1498,7 +1693,9 @@ class AutoMindAgent:
         # icalendar / pywin32），故一律注册、按需导入：模型始终能看到这些能力并
         # 规划到它们，真正调用时若缺库，返回的是一句可照抄的 pip 命令，
         # 而不是让整个工具凭空消失、模型只能干瞪眼。
-        # 逐组 try：某一组导入失败（比如残缺安装）不该连累其余工具。
+        # 逐组 try：某一组导入失败（比如残缺安装）不该连累其余工具 ——
+        # 但"不连累"不等于"不吭声"：失败照样记账并暴露（见 preflight_check
+        # 与 /api/tools），否则用户看到的是一份静悄悄少了几项的能力清单。
         for _loader in (self._register_office_tools,
                         self._register_net_tools,
                         self._register_data_tools,
@@ -1507,9 +1704,42 @@ class AutoMindAgent:
                         self._register_system_tools):
             try:
                 _loader()
-            except Exception as e:                        # pragma: no cover - 防御性
-                logger.warning("optional_tools_register_failed",
-                               group=_loader.__name__, error=str(e))
+            except Exception as e:
+                self._record_tool_group_failure(_loader.__name__, e)
+
+    def _record_tool_group_failure(self, group: str, exc: BaseException) -> None:
+        """记下一次"整组工具没注册上"：留结构化账目 + 给出怎么修。
+
+        只写一行 ``logger.warning`` 是不够的 —— 日志默认只进 stderr，
+        桌面版/Web 版的用户根本看不到，于是"六个工具没注册上"这件事
+        在用户视角里从未发生过。账目会被 ``preflight_check`` 转成任务前
+        告警（界面上直接弹出来）、并通过 ``/api/tools`` 暴露给工具面板。
+        """
+        entry: dict[str, Any] = {
+            "group": group,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        try:
+            from automind.tools._toolkit import (
+                MissingBinary,
+                MissingDependency,
+                binary_install_hint,
+            )
+
+            if isinstance(exc, MissingDependency):
+                entry["missing_dependency"] = exc.package
+                entry["hint"] = f"pip install {exc.package}"
+            elif isinstance(exc, MissingBinary):
+                entry["missing_binary"] = exc.binary
+                entry["hint"] = binary_install_hint(exc.binary)
+        except Exception:                              # pragma: no cover - 防御性
+            pass
+        self.tool_registration_failures.append(entry)
+        logger.warning("tool_group_register_failed", **entry)
+
+    def tool_group_failures(self) -> list[dict[str, Any]]:
+        """注册失败的组（供界面展示"你少了哪些能力、怎么补上"）。"""
+        return [dict(f) for f in getattr(self, "tool_registration_failures", [])]
 
     def _register_office_tools(self) -> None:
         from automind.tools.office import EmailTool, ExcelTool, PdfTool, PptTool, WordTool
