@@ -13,10 +13,17 @@ from automind.core.experts import COMMUNITY_MAX_CUSTOM, ExpertStore  # noqa: E40
 
 @pytest.fixture()
 def srv(tmp_path, monkeypatch):
-    """隔离配置/专家/团队存储与项目根的服务器夹具。"""
+    """隔离配置/专家/团队存储与项目根的服务器夹具。
+
+    v1.7.3：安装/激活专家属于**管理动作**（激活的专家提示词会注入到该部署的
+    **所有**任务里），远程调用必须带管理员令牌。这里给测试客户端配上令牌 ——
+    本文件测的是专家/团队/编辑器的业务行为，不是一个"无令牌也能改全局状态"的
+    反面教材；分权本身由 tests/server/test_admin_privileges.py 专门覆盖。
+    """
     import automind.server as server
     from automind.tools.file_editor import JOURNAL
     monkeypatch.setattr(server, "_AUTH_TOKEN", "")
+    monkeypatch.setenv("AUTOMIND_ADMIN_TOKEN", "test-admin-token")
     monkeypatch.setattr(server._store, "config_file", tmp_path / "cfg.json",
                         raising=False)
     monkeypatch.setattr(server._experts, "_path", tmp_path / "experts.json")
@@ -33,7 +40,10 @@ def srv(tmp_path, monkeypatch):
             project_root = str(proj)
     monkeypatch.setattr(server, "_agent", _FakeAgent())
     JOURNAL.clear()
-    yield TestClient(server.app), server, proj
+    # 管理动作需要令牌 → 测试客户端统一带上（等价于"运维在本机操作"之外的
+    # 另一条正当路径：远程运维配了管理员令牌）
+    yield (TestClient(server.app, headers={"X-Admin-Token": "test-admin-token"}),
+           server, proj)
     JOURNAL.clear()
 
 

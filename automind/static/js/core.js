@@ -4,6 +4,49 @@ let ws = null;
 let providerData = null;
 let currentMode = 'chat';
 
+// ── 管理员令牌（v1.7.3）──────────────────────────────────
+// 后端把"管理动作"（改配置 / 加 MCP / 加载插件技能 / 触发更新 / 回执审批 /
+// 清空审计）与只读、执行动作分了权：**远程**访问时必须带 X-Admin-Token，
+// 否则 403；本机回环访问不需要。
+//
+// 这里用**包装 fetch** 而不是逐个调用点加头：经典界面的请求散在十几个文件、
+// 几十处 fetch 里，逐处改必然漏掉一处 —— 而漏掉的那处会表现成"这个按钮点了
+// 没反应"，比报错更难查。只对同源的 /api/ 请求注入，其它请求一字不动。
+//
+// 与新版界面**共用同一个 localStorage 键**（automind_admin_token），
+// 所以在哪个界面里填过，另一个界面都认。
+function adminToken(){
+  try { return localStorage.getItem('automind_admin_token') || ''; } catch(e){ return ''; }
+}
+function setAdminToken(v){
+  try {
+    const t = (v || '').trim();
+    if (t) localStorage.setItem('automind_admin_token', t);
+    else localStorage.removeItem('automind_admin_token');
+    toast(t ? '管理员令牌已保存在本浏览器' : '已清除管理员令牌', 'info');
+  } catch(e) {}
+}
+// 供控制台/文档使用：automindSetAdminToken('xxx')
+window.automindSetAdminToken = setAdminToken;
+window.automindAdminToken = adminToken;
+(function wrapFetchForAdminToken(){
+  const native = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try {
+      const url = (typeof input === 'string') ? input : ((input && input.url) || '');
+      const t = adminToken();
+      if (t && url.indexOf('/api/') === 0) {
+        init = init || {};
+        const h = new Headers(init.headers || {});
+        if (!h.has('X-Admin-Token')) h.set('X-Admin-Token', t);
+        init.headers = h;
+      }
+    } catch(e) { /* 注入失败不该让请求本身发不出去 */ }
+    return native(input, init);
+  };
+})();
+
+
 // ── 版本（Edition）状态：社区版隐藏/锁定商业功能 ──
 let EDITION = 'community';
 let FEATURES = {};   // 服务端 /api/status 返回的特性开关

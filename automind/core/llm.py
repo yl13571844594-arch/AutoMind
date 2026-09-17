@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
@@ -191,6 +192,7 @@ class LLMBackend(ABC):
         if gen is not None and not getattr(gen, "_usage_wrapped", False):
             @functools.wraps(gen)
             async def _gen(self: Any, *a: Any, **k: Any) -> Any:
+                _t0 = time.monotonic()
                 if self.pre_call_hook is not None:
                     await self.pre_call_hook()      # 预算/限流：拒绝就让它抛
                 try:
@@ -200,6 +202,15 @@ class LLMBackend(ABC):
                         f"LLM 单轮调用超过 {self.call_timeout:.0f} 秒仍未返回，已中止。"
                         "常见原因：模型服务无响应、网络中断、或上下文过长。"
                     ) from e
+                # 可重放轨迹（默认关闭时 record_call 只做一次布尔判断）。这里能同时
+                # 拿到"确切入参 + 真实响应 + 耗时"，且不需要改任何 provider 的签名。
+                try:
+                    from automind.core.replay import record_call, split_generate_args
+                    _msgs, _tools = split_generate_args(a, k)
+                    record_call(self, resp, time.monotonic() - _t0,
+                                messages=_msgs, tools=_tools)
+                except Exception:
+                    pass        # 记录问题绝不能让模型调用失败
                 await self._report_usage(
                     getattr(resp, "prompt_tokens", 0),
                     getattr(resp, "completion_tokens", 0))

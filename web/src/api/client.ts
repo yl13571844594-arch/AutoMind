@@ -2,6 +2,36 @@
 const API = '/api';
 
 /**
+ * 管理员令牌（v1.7.3）。
+ *
+ * 后端把「管理动作」（改配置 / 加 MCP / 加载插件技能 / 触发更新 / 回执审批 /
+ * 清空审计）与只读、执行动作**分了权**：前者在远程访问时必须带
+ * `X-Admin-Token`，否则一律 403（本机回环访问放行）。
+ *
+ * 令牌存在 localStorage 而不是后端配置里：它是"这台浏览器有权做管理动作"的
+ * 凭证，本该由使用者自己保管；存后端等于把权限又还给了任何能读配置的人。
+ */
+const ADMIN_TOKEN_KEY = 'automind_admin_token';
+
+export function getAdminToken(): string {
+  try { return localStorage.getItem(ADMIN_TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+export function setAdminToken(token: string): void {
+  try {
+    const t = (token || '').trim();
+    if (t) localStorage.setItem(ADMIN_TOKEN_KEY, t);
+    else localStorage.removeItem(ADMIN_TOKEN_KEY);
+  } catch { /* 隐私模式等：忽略 */ }
+}
+
+/** 给请求带上管理员令牌（没配就不带，避免发出空头让人误判）。 */
+function adminHeaders(): Record<string, string> {
+  const t = getAdminToken();
+  return t ? { 'X-Admin-Token': t } : {};
+}
+
+/**
  * 带上下文的接口错误。
  *
  * 此前 `apiGet` 只是 `return r.json()`：HTTP 500/502、鉴权 401、后端返回的
@@ -84,7 +114,7 @@ async function parse<T>(r: Response, path: string): Promise<T> {
 export async function apiGet<T = any>(path: string): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${API}${path}`);
+    r = await fetch(`${API}${path}`, { headers: adminHeaders() });
   } catch (e: any) {
     // fetch 只在网络层失败时 reject —— 服务没起来 / 断网 / 被代理拦截
     throw new ApiError(0, e?.message || '网络请求失败', path);
@@ -108,7 +138,7 @@ export async function apiPost<T = any>(path: string, body?: unknown, timeoutMs?:
   try {
     r = await fetch(`${API}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl?.signal,
     });
@@ -127,7 +157,7 @@ export async function apiPost<T = any>(path: string, body?: unknown, timeoutMs?:
 export async function apiDelete<T = any>(path: string): Promise<T> {
   let r: Response;
   try {
-    r = await fetch(`${API}${path}`, { method: 'DELETE' });
+    r = await fetch(`${API}${path}`, { method: 'DELETE', headers: adminHeaders() });
   } catch (e: any) {
     throw new ApiError(0, e?.message || '网络请求失败', path);
   }

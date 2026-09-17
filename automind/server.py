@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import secrets
 import sys
 import time
 import uuid
@@ -22,7 +23,7 @@ from typing import Any
 try:
     from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
     from fastapi.middleware.cors import CORSMiddleware
-    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
     from fastapi.staticfiles import StaticFiles
 except ImportError:
     print("FastAPI not installed. Install with: pip install fastapi uvicorn")
@@ -113,6 +114,91 @@ def _auth_token() -> str:
     return _AUTH_TOKEN or _read_config().get("auth_token", "")
 
 
+def _admin_token() -> str:
+    """管理员令牌（v1.7.3）：高危端点的第二把钥匙。空 = 未配置。"""
+    return (os.environ.get("AUTOMIND_ADMIN_TOKEN", "").strip()
+            or str(_read_config().get("admin_token", "") or "").strip())
+
+
+#: 「管理动作」端点前缀 —— 与只读/执行动作**不同权**。
+#:
+#: 为什么需要这一层：此前**任何**持有访问令牌的人都能改 ``api_base``（把模型出口
+#: 指向攻击者，此后每一次对话的提示词与 API Key 都从那儿过）、都能加 MCP 服务器
+#: （= 以本进程身份启动任意进程）、都能加载插件/技能（= 任意代码）、都能触发静默
+#: 更新与清空审计。而访问令牌的用途本该只是"让 IDE / 前端连上来聊天跑任务"。
+#:
+#: **边界是刻意收窄的**：只拦"能劫持平台本身、或能把密钥与代码带出去"的动作。
+#: 工作区切换、团队看板、文件回滚、知识库上传这些是**内容操作**（改的是用户的
+#: 数据，而 Agent 本来就能做同样的事）—— 拦下来只会让远程协作的同事处处 403，
+#: 却换不到对应的安全收益。分权的目的是"把能一击致命的动作关在本机"，
+#: 不是"把所有写操作都锁起来"（全量回归当场把这条教训打了出来：
+#: tests/server/test_v09_features.py 与 test_workspace_and_rollback.py 一起红了）。
+#:
+#: 判定放在中间件里而不是逐个端点加装饰器：135 个端点里漏一个就是漏洞，
+#: 而漏掉的那种情况不会有任何测试告诉你。集中一张表，新增端点时只需在此登记。
+_ADMIN_PATH_PREFIXES: tuple[str, ...] = (
+    "/api/config",            # api_base / API Key / 审批模式 / 工作目录
+    "/api/mcp",               # 任意进程启动
+    "/api/plugins",           # 加载插件 = 执行任意代码
+    "/api/skills",            # 加载/导入技能 = 执行任意代码
+    "/api/update/apply",      # 静默下载并安装
+    "/api/tools/toggle",      # 关掉安全相关工具
+    "/api/tools/reload",      # 重新扫描连接器目录（= 重新加载用户代码）
+    "/api/experts/activate",  # 激活的专家提示词会注入到**所有**任务里
+    "/api/experts/install",   # 从官方源安装专家（同样是注入共享提示词）
+    "/api/approvals",         # 外部审批回执（v1.7.3 第 8 项）
+    "/api/workflow/run",      # 工作流可携带任意工具参数（v1.7.3 第 9 项）
+    "/api/eval/run",          # 评测会真的执行任务、花钱
+)
+
+#: 删除审计是"管理动作里的管理动作"：单独列出，便于测试与文档引用
+_ADMIN_EXACT_PATHS: tuple[str, ...] = ("/api/audit",)
+
+
+def _is_admin_path(path: str) -> bool:
+    """该路径是否是管理动作端点（只看路径，方法在中间件里另判）。"""
+    if path in _ADMIN_EXACT_PATHS:
+        return True
+    return any(path == p or path.startswith(p + "/") for p in _ADMIN_PATH_PREFIXES)
+
+
+def _admin_header_token(request) -> str:
+    """从请求里取管理员令牌：``X-Admin-Token`` 优先，其次 Bearer。"""
+    got = request.headers.get("x-admin-token", "").strip()
+    if got:
+        return got
+    sent = request.headers.get("authorization", "")
+    return sent[7:].strip() if sent.lower().startswith("bearer ") else ""
+
+
+def _admin_ok(request) -> tuple[bool, str]:
+    """管理动作是否被允许。返回 ``(允许, 拒绝原因)``。
+
+    规则（按优先级）：
+
+    1. **本地即管理台**：请求来自回环地址 —— 桌面版与"我就在这台机器上开浏览器"
+       的场景不该被自己的安全策略挡住，而回环访问本来就等价于本机权限。
+    2. **配了管理员令牌**：远程请求必须带对的管理员令牌（``X-Admin-Token``）。
+    3. **没配管理员令牌**：远程请求**一律拒绝**，并明确告诉运维该怎么开 ——
+       fail-closed。这里不能"没配就放行"：那等于安全策略在默认配置下失效，
+       而默认配置恰恰是最多人用的那一份。
+    """
+    if _is_local_request(request):
+        return True, ""
+    admin = _admin_token()
+    if not admin:
+        return False, (
+            "该操作属于**管理动作**（改配置 / 加 MCP / 加载插件技能 / 触发更新 / "
+            "回执审批 / 清空审计），默认只允许在本机执行。远程执行请设置环境变量 "
+            "AUTOMIND_ADMIN_TOKEN，并在请求头带上 X-Admin-Token。")
+    provided = _admin_header_token(request)
+    if provided and secrets.compare_digest(provided, admin):
+        return True, ""
+    logger.warning("admin_denied", path=request.url.path,
+                   client=request.client.host if request.client else "?")
+    return False, "未授权：该操作需要管理员令牌（请求头 X-Admin-Token）。"
+
+
 # 扩展令牌校验器（扩展契约 v1）：企业版 SSO 等通过 register_token_validator
 # 注册回调，静态令牌不匹配时逐个询问 —— 会话令牌等动态凭据由此通行。
 _token_validators: list = []
@@ -124,7 +210,8 @@ def _register_token_validator(fn) -> None:
 
 
 def _token_ok(provided: str, static_token: str) -> bool:
-    if provided and provided == static_token:
+    # 常量时间比较：令牌比较不该泄露"前几位对上了"这种信息
+    if provided and static_token and secrets.compare_digest(provided, static_token):
         return True
     for v in _token_validators:
         try:
@@ -142,7 +229,9 @@ async def _auth_middleware(request, call_next):
     # 仅保护 /api/*；放开首页、文档、健康检查
     # /api/auth/login 放行：SSO 登录本身不能要求已持有令牌；
     # /v1/*（OpenAI 兼容，IDE 集成）与 /api/* 同等保护。
-    if (token and (path.startswith("/api/") or path.startswith("/v1/"))
+    # /metrics（v1.7.3）：与 /api/* 同等保护 —— 任务数与失败率属于运行信息，
+    # 绑到 0.0.0.0 时不该对全网公开。Prometheus 抓取可用 ?token= 或 Authorization 头。
+    if (token and (path.startswith("/api/") or path.startswith("/v1/") or path == "/metrics")
             and not path.startswith("/api/health")
             and path != "/api/auth/login"):
         sent = request.headers.get("authorization", "")
@@ -152,6 +241,14 @@ async def _auth_middleware(request, call_next):
             logger.warning("auth_denied", path=path,
                            client=request.client.host if request.client else "?")
             return JSONResponse({"error": "未授权：请提供有效的访问令牌"}, status_code=401)
+
+    # 管理动作的第二道门（v1.7.3）：与只读/执行动作不同权。
+    # 独立于上面的令牌检查 —— 即使没配访问令牌（本地模式），管理动作仍然
+    # 只对回环开放；反过来，"有访问令牌"也不再等于"能改平台配置"。
+    if (_is_admin_path(path) and request.method in ("POST", "PUT", "PATCH", "DELETE")):
+        allowed, why = _admin_ok(request)
+        if not allowed:
+            return JSONResponse({"error": why}, status_code=403)
 
     # 速率限制（§14.11-4）：任务执行入口 + OpenAI 兼容补全入口，按客户端 IP 计数
     if (_rate_limiter.enabled and request.method == "POST"
@@ -664,6 +761,19 @@ async def _lifespan(_app):
             logger.warning("startup_scheduler_failed", error=str(e))
     yield
     logger.info("server_shutdown")
+    # 出站事件排空（v1.7.3 第 8 项）：不 flush 的话，进程退出时队列里
+    # 还没发出去的事件会静默消失 —— 而"任务完成了"这种通知丢一次，
+    # 客户侧的自动化流程就会永远少一个触发点。
+    try:
+        from automind.core import webhooks
+
+        if webhooks.stats().get("enabled"):
+            ok = await webhooks.flush(timeout=5.0)
+            logger.info("webhook_flushed", complete=ok, **{
+                k: v for k, v in webhooks.stats().items()
+                if k in ("delivered", "failed", "dropped")})
+    except Exception as e:
+        logger.warning("webhook_flush_failed", reason=str(e))
     if _sched is not None:
         try:
             _sched.stop()
@@ -894,6 +1004,166 @@ async def api_health():
         "uptime_s": round(time.time() - _START_TIME, 1),
         "paths": _paths_describe(),
     }
+
+
+def _readiness_checks() -> dict[str, dict]:
+    """逐项探活（v1.7.3）：把"进程还在"与"真的能干活"分开。
+
+    此前 ``/api/health`` 无论数据库打不开、磁盘满了还是 LLM 没配，都返回
+    ``status: ok`` —— 编排系统据此把流量导进来，用户拿到的是一个个失败任务。
+    这里逐项去**真的碰一下**依赖（写测试文件、打开 SQLite、看磁盘余量）。
+    """
+    import shutil
+
+    checks: dict[str, dict] = {}
+
+    # 1) 数据目录可写 —— 会话、轨迹、检查点都写在这里
+    try:
+        from automind.core.paths import data_dir
+
+        d = Path(data_dir())
+        d.mkdir(parents=True, exist_ok=True)
+        probe = d / ".readiness_probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink(missing_ok=True)
+        checks["data_dir"] = {"ok": True, "path": str(d)}
+    except Exception as e:
+        checks["data_dir"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 2) SQLite 可读写 —— 任务历史 / 会话 / 知识库都在里面
+    try:
+        from automind.core.db import get_db
+
+        db = get_db()
+        db.kv_set(".readiness_probe", {"t": time.time()})
+        db.kv_get(".readiness_probe")
+        checks["database"] = {"ok": True}
+    except Exception as e:
+        checks["database"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 3) 项目目录可写 —— Agent 的产物落在这里
+    try:
+        root = Path(get_agent().config.project_root)
+        if not root.is_dir():
+            raise FileNotFoundError(f"项目目录不存在：{root}")
+        if not os.access(root, os.W_OK):
+            raise PermissionError(f"项目目录不可写：{root}")
+        checks["project_root"] = {"ok": True, "path": str(root)}
+    except Exception as e:
+        checks["project_root"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 4) 磁盘余量 —— 满了之后会先丢轨迹、再写不进检查点
+    try:
+        usage = shutil.disk_usage(str(Path(get_agent().config.project_root)))
+        free_mb = usage.free / 1024 / 1024
+        checks["disk"] = {"ok": free_mb >= 200, "free_mb": round(free_mb, 1)}
+        if free_mb < 200:
+            checks["disk"]["error"] = "可用磁盘不足 200MB —— 轨迹与检查点写入会失败"
+    except Exception as e:
+        checks["disk"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+
+    # 5) LLM 是否配置 —— **不算致命**：界面与配置功能在没有 Key 时依然可用，
+    #    把它记成"就绪失败"会让刚部署还没配 Key 的实例被编排系统反复重启。
+    try:
+        llm_ready = get_agent().llm is not None
+        checks["llm"] = {
+            "ok": True, "configured": llm_ready,
+            "note": "" if llm_ready else "未配置任何提供商的 API Key：界面可用，但任务无法执行",
+        }
+    except Exception as e:
+        checks["llm"] = {"ok": True, "configured": False,
+                         "note": f"无法判定：{type(e).__name__}: {e}"}
+    return checks
+
+
+@app.get("/api/health/ready")
+async def api_health_ready():
+    """就绪探针：依赖真的可用才返回 200，否则 503。
+
+    与 ``/api/health``（存活探针）的分工：存活探针回答"进程还在吗"，
+    就绪探针回答"现在把流量导进来会不会失败"。k8s 的 liveness / readiness
+    分别打这两个，才不会出现"数据库坏了但 Pod 一直显示健康"。
+    """
+    checks = await asyncio.to_thread(_readiness_checks)
+    critical = ("data_dir", "database", "project_root", "disk")
+    failed = [name for name in critical if not checks.get(name, {}).get("ok")]
+    ready = not failed
+    body = {
+        "status": "ready" if ready else "not_ready",
+        "ready": ready,
+        "failed": failed,
+        "checks": checks,
+        "version": app.version,
+    }
+    if not ready:
+        logger.warning("readiness_failed", failed=failed)
+    return JSONResponse(body, status_code=200 if ready else 503)
+
+
+@app.get("/metrics")
+async def api_metrics():
+    """Prometheus 文本指标（v1.7.3）。
+
+    配置了访问令牌时同样受保护（中间件里把 ``/metrics`` 与 ``/api/*`` 同等对待），
+    Prometheus 可在 scrape 配置里用 ``?token=`` 或 ``Authorization`` 头。
+    """
+    from automind.core.metrics import METRICS
+    from automind.core.quota import snapshot as _quota_snapshot
+
+    # 仪表类指标在抓取时现算 —— 它们本来就是"当前值"，没必要每次变化都写一遍
+    try:
+        agent = get_agent()
+        METRICS.gauge("automind_tools", len(agent.tool_registry.list_names()))
+        METRICS.gauge("automind_tool_group_failures", len(agent.tool_group_failures()))
+        METRICS.gauge("automind_interjections_pending", agent.pending_interjections())
+    except Exception as e:                              # pragma: no cover - 防御性
+        logger.warning("metrics_gauge_failed", error=str(e))
+    try:
+        q = _quota_snapshot()
+        METRICS.gauge("automind_quota_tasks_used", q["daily_tasks"]["used"])
+        limit = q["daily_tasks"]["limit"]
+        if limit is not None:
+            METRICS.gauge("automind_quota_tasks_limit", limit)
+    except Exception:                                   # pragma: no cover - 防御性
+        pass
+    METRICS.gauge("automind_info", 1, version=app.version, edition=_edition.get_edition())
+    METRICS.gauge("automind_uptime_seconds", round(time.time() - _START_TIME, 1))
+    METRICS.gauge("automind_running_tasks", _running_tasks["count"])
+    METRICS.gauge("automind_approval_waiting", _approval_waiting["count"])
+    # 出站事件投递账目（v1.7.3 第 8 项）：failed/dropped 是最该告警的两个 ——
+    # dropped > 0 意味着**已经在丢事件**，而调用方永远不会知道。
+    try:
+        from automind.core import webhooks
+
+        st = webhooks.stats()
+        METRICS.gauge("automind_webhook_enabled", 1 if st.get("enabled") else 0)
+        METRICS.gauge("automind_webhook_targets", st.get("targets", 0))
+        METRICS.gauge("automind_webhook_queue_depth", st.get("queue_depth", 0))
+        for key in ("delivered", "failed", "dropped", "queued", "retried",
+                    "skipped", "rejected"):
+            METRICS.gauge(f"automind_webhook_{key}", st.get(key, 0))
+    except Exception as e:                              # pragma: no cover - 防御性
+        logger.warning("webhook_stats_unavailable", reason=str(e))
+    # 工作流（第 9 项）与评测（第 7 项）的运行账目由各自模块提供
+    try:
+        from automind.workflow import stats as _wf_stats
+
+        wf = _wf_stats()
+        for key, value in (wf or {}).items():
+            METRICS.gauge(f"automind_workflow_{key}", value)
+    except Exception:
+        pass
+    try:
+        from automind.eval import stats as _eval_stats
+
+        ev = _eval_stats()
+        for key, value in (ev or {}).items():
+            METRICS.gauge(f"automind_eval_{key}", value)
+    except Exception:
+        pass
+
+    return PlainTextResponse(METRICS.render(),
+                             media_type="text/plain; version=0.0.4; charset=utf-8")
 
 
 @app.get("/api/status")
@@ -1596,6 +1866,12 @@ def _preview_file_sync(root: Path, path: str) -> dict:
     # 限制在项目根目录内，防止目录穿越
     if root not in target.parents and target != root:
         return {"_error": "路径超出项目目录范围", "_status": 403}
+    # 与编辑器同一道判定：预览同样能读到密钥与数据文件（v1.7.3）
+    from automind.core.sensitive import SCOPE_WEB
+    from automind.core.sensitive import reason as _sensitive_reason
+    denied = _sensitive_reason(target, SCOPE_WEB)
+    if denied:
+        return {"_error": denied, "_status": 403}
     if not target.is_file():
         return {"_error": f"文件不存在: {target}", "_status": 404}
     try:
@@ -2122,6 +2398,14 @@ def _editor_target(path: str) -> tuple[Path | None, str]:
         return None, "非法路径"
     if root not in target.parents and target != root:
         return None, "路径超出项目目录范围"
+    # v1.7.3：仅校验"在项目目录内"是不够的 —— 平台的密钥与数据目录就在项目里
+    # （默认 project_root 就是启动目录）。见 automind/core/sensitive.py。
+    from automind.core.sensitive import SCOPE_WEB
+    from automind.core.sensitive import reason as _sensitive_reason
+    denied = _sensitive_reason(target, SCOPE_WEB)
+    if denied:
+        logger.warning("sensitive_file_access_denied", path=str(target))
+        return None, denied
     return target, ""
 
 
@@ -2741,14 +3025,310 @@ async def api_tools_registration():
     """
     agent = get_agent()
     failures = agent.tool_group_failures() if hasattr(agent, "tool_group_failures") else []
+    # 用户连接器（v1.7.3）：它们的加载失败也走同一条通道 ——
+    # "我放进去的连接器为什么没生效"必须在同一个地方能查到，
+    # 而不是去翻 stderr。
+    try:
+        from automind.tools.connectors import describe_dirs, load_failures
+
+        failures = [dict(f, group="connector") for f in load_failures()] + failures
+        dirs = describe_dirs()
+    except Exception as e:                                  # pragma: no cover - 防御性
+        logger.warning("connector_failures_unavailable", reason=str(e))
+        dirs = {}
     return {
         "ok": not failures,
         "failures": failures,
+        "connector_dirs": dirs,
         # 让界面不用自己拼中文：措辞与任务前自检保持一致
         "message": ("；".join(f"工具组「{f['group']}」未注册成功（{f['error']}）"
                               + (f"，修复：{f['hint']}" if f.get("hint") else "")
                               for f in failures) or "全部工具组注册正常"),
     }
+
+
+@app.post("/api/tools/reload")
+async def api_tools_reload():
+    """重载用户连接器（``~/.automind/connectors/*.py``）—— 不必重启服务。
+
+    v1.7.3 第 6 项：这是"接客户系统"的运行时入口 —— 现场写完一个连接器就能
+    立刻在模型的可选工具里看到，不用停下服务、不用改源码。
+    属于管理动作（中间件按 ``/api/tools/reload`` 前缀要求管理员权限）。
+    """
+    from automind.tools.connectors import load_failures, reload_connectors
+
+    agent = get_agent()
+    result = reload_connectors(agent.tool_registry)
+    failed = load_failures()
+    # 加载失败必须让调用方**看得见**（返回体里给全，而不是只写日志）
+    result["failures"] = [dict(f, group="connector") for f in failed]
+    result["tools_total"] = len(agent.tool_registry.list_names())
+    if result.get("failed"):
+        logger.warning("connector_reload_partial", loaded=result.get("loaded"),
+                       failed=result.get("failed"))
+    return result
+
+
+# ── 评测（v1.7.3 第 7 项）────────────────────────────────────
+#
+# 为什么走"后台任务 + 轮询"而不是直接 await：一次套件会**真的跑 N 个任务、
+# 花真金白银**，几分钟到几十分钟都正常。同步等待会把 HTTP 请求挂在那里，
+# 也会把前端的加载态一直转下去。
+#
+# 为什么保留 dry-run：不联网、不需要 Key，就能回答"这套要跑什么、要多少断言" ——
+# 交付现场最常见的问题正是"我不知道它会干什么就点了运行"。
+_eval_jobs: dict[str, dict] = {}
+
+
+@app.get("/api/eval/suites")
+async def api_eval_suites():
+    """列出可用的评测套件（含任务数与断言数；不加载模型、不发请求）。"""
+    try:
+        from automind.eval.suite import SuiteError, find_suites, load_suite
+    except Exception as e:                                  # pragma: no cover - 防御性
+        return JSONResponse({"error": f"评测模块不可用：{e}"}, status_code=503)
+
+    out = []
+    for p in find_suites():
+        try:
+            s = load_suite(p)
+            out.append({"path": str(p), "name": s.name, "cases": len(s.cases),
+                        "assertions": s.total_assertions(),
+                        "description": s.description, "valid": True})
+        except SuiteError as e:
+            # 套件写错要在界面上看得见，而不是让整页 500
+            out.append({"path": str(p), "name": p.stem, "valid": False,
+                        "error": str(e)})
+    return {"suites": out}
+
+
+@app.post("/api/eval/run")
+async def api_eval_run(data: dict):
+    """跑一个评测套件（body: ``{suite, provider?, model?, include?, limit?, dry_run?}``）。"""
+    import asyncio as _aio
+
+    from automind.eval.executors import AutoMindExecutor, detect_llm_target
+    from automind.eval.runner import run_suite
+    from automind.eval.suite import SuiteError, find_suites, load_suite
+
+    want = str(data.get("suite") or "smoke").strip()
+    path = want if want.endswith((".yml", ".yaml")) else ""
+    if not path:
+        hit = [p for p in find_suites() if p.stem == want or p.name == want]
+        if not hit:
+            return JSONResponse({"error": f"找不到套件：{want}"}, status_code=404)
+        path = str(hit[0])
+    try:
+        suite = load_suite(path)
+    except SuiteError as e:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    provider = str(data.get("provider") or "").strip()
+    model = str(data.get("model") or "").strip()
+    target = detect_llm_target(provider, model)
+
+    if data.get("dry_run"):
+        return {"dry_run": True, "suite": suite.name, "path": path,
+                "cases": [{"id": c.id, "mode": c.mode,
+                           "assertions": [a.type for a in c.assertions]}
+                          for c in suite.cases],
+                "target": target.as_dict()}
+    if not target.available:
+        # 与"模型退化"区分开：前端据此提示"去配 Key"，而不是"模型不行"
+        return JSONResponse({"error": target.reason, "code": "llm_not_configured"},
+                            status_code=409)
+
+    job_id = uuid.uuid4().hex[:12]
+    _eval_jobs[job_id] = {"status": "running", "suite": suite.name,
+                          "model": target.model, "report": None, "error": ""}
+    from automind.core.metrics import METRICS
+
+    METRICS.inc("automind_eval_runs_total", status="started")
+
+    async def _run() -> None:
+        try:
+            report = await run_suite(
+                suite, AutoMindExecutor(provider=provider, model=model),
+                model=target.model, provider=target.provider,
+                include=data.get("include") or [],
+                limit=int(data.get("limit") or 0),
+                default_timeout=float(data.get("timeout") or 0.0),
+                target=target)
+            payload = report.as_dict()
+            passed = bool(payload.get("passed"))
+            _eval_jobs[job_id].update(status="done", report=payload)
+            METRICS.inc("automind_eval_runs_total",
+                        status="passed" if passed else "failed")
+        except Exception as e:
+            # 后台任务里的异常必须落进 job —— 否则前端只会一直轮询"运行中"
+            _eval_jobs[job_id].update(status="error", error=str(e))
+            METRICS.inc("automind_eval_runs_total", status="error")
+
+    _aio.create_task(_run())
+    return {"job_id": job_id, "status": "running", "suite": suite.name,
+            "total": len(suite.cases), "model": target.model}
+
+
+@app.get("/api/eval/report/{job_id}")
+async def api_eval_report(job_id: str):
+    """取评测结果（前端轮询这个）。"""
+    job = _eval_jobs.get(job_id)
+    if job is None:
+        return JSONResponse({"error": "job 不存在或已被清理"}, status_code=404)
+    return job
+
+
+# ── 工作流即代码（v1.7.3 第 9 项）─────────────────────────────
+#
+# 与 ReAct / Plan 的分工：那两条路由 LLM 在**运行时**决定步骤；工作流是
+# **确定的**流程（YAML 里写死了每一步），可评审、可版本化、可 diff、可
+# 进 CI。FDE 交付给客户的正是后者。
+
+
+def _resolve_workflow_path(name: str) -> Path:
+    """把 ``file`` 参数解析成项目内的工作流文件路径（**白名单**）。
+
+    为什么必须限制：一份工作流 YAML 能配任意工具 + 任意参数（外发 URL、
+    命令），**等同于执行权限**。接受任意绝对路径等于把"读文件"升级成
+    "以服务身份执行任意动作"，而请求参数是模型/前端可控的。
+
+    规则：只允许 ``<project_root>/workflows/`` 之内、只允许 .yaml/.yml/.json，
+    解析后用 ``is_relative_to`` 判穿越（``..`` 与符号链接都在 resolve 之后暴露）。
+    """
+    root = (Path(get_agent().config.project_root) / "workflows").resolve()
+    raw = str(name or "").strip()
+    if not raw:
+        raise FileNotFoundError("未指定工作流文件")
+    p = Path(raw)
+    target = (root / p).resolve() if not p.is_absolute() else p.resolve()
+    if not target.is_relative_to(root):
+        raise PermissionError(
+            f"工作流文件必须放在项目目录的 workflows/ 下：{root}（已拒绝 {raw}）")
+    if target.suffix.lower() not in (".yaml", ".yml", ".json"):
+        raise PermissionError("工作流文件只支持 .yaml / .yml / .json")
+    if not target.is_file():
+        raise FileNotFoundError(f"工作流文件不存在：{target}")
+    return target
+
+
+def _workflow_loader(tool_names: list[str], unknown_fields: str = "error"):
+    from automind.workflow import WorkflowLoader
+
+    return WorkflowLoader(tool_names=tool_names, unknown_fields=unknown_fields)
+
+
+@app.get("/api/workflow/list")
+async def api_workflow_list():
+    """列出项目 ``workflows/`` 目录下的工作流（供界面选择）。
+
+    顺手把每份文件的校验结果带上 —— 载入期就能看出"这份写得对不对"，
+    而不是等点了运行才报错。
+    """
+    from automind.workflow import WorkflowLoader
+
+    root = (Path(get_agent().config.project_root) / "workflows")
+    out: list[dict[str, Any]] = []
+    if root.is_dir():
+        loader = WorkflowLoader(tool_names=get_agent().tool_registry.list_names())
+        for p in sorted(root.glob("*")):
+            if p.suffix.lower() not in (".yaml", ".yml", ".json"):
+                continue
+            try:
+                schema, errors, warnings = loader.try_parse(
+                    p.read_text(encoding="utf-8"), source=str(p))
+                out.append({"file": p.name, "valid": schema is not None,
+                            "name": getattr(schema, "name", p.stem),
+                            "steps": len(getattr(schema, "steps", []) or []),
+                            "errors": [e.as_dict() for e in errors],
+                            "warnings": [w.as_dict() for w in warnings]})
+            except Exception as e:                    # pragma: no cover - 防御性
+                out.append({"file": p.name, "valid": False,
+                            "errors": [{"message": str(e)}]})
+    return {"dir": str(root), "workflows": out}
+
+
+@app.post("/api/workflow/validate")
+async def api_workflow_validate(payload: dict):
+    """校验一份工作流定义（前端编辑器实时校验用；不执行任何东西）。"""
+    text = payload.get("yaml")
+    source = str(payload.get("source") or "<inline>")
+    if text is None:
+        try:
+            text = _resolve_workflow_path(payload.get("file")).read_text(encoding="utf-8")
+        except (FileNotFoundError, PermissionError) as e:
+            return JSONResponse({"ok": False, "errors": [{"message": str(e)}]},
+                                status_code=404 if isinstance(e, FileNotFoundError) else 403)
+    loader = _workflow_loader(get_agent().tool_registry.list_names(),
+                              str(payload.get("unknown_fields") or "error"))
+    schema, errors, warnings = loader.try_parse(str(text), source=source)
+    return {"ok": schema is not None,
+            "schema": schema.as_dict() if schema is not None else None,
+            "errors": [e.as_dict() for e in errors],
+            "warnings": [w.as_dict() for w in warnings]}
+
+
+@app.post("/api/workflow/run")
+async def api_workflow_run(payload: dict):
+    """执行一份工作流（body: ``{file|yaml, inputs, dry_run, include_outputs}``）。
+
+    属于管理动作（中间件按 ``/api/workflow/run`` 前缀要求管理员权限）——
+    工作流能配任意工具与参数，等同于执行权限。
+    """
+    from automind.workflow import check_inputs, report_to_json, run_workflow
+
+    text = payload.get("yaml")
+    source = str(payload.get("source") or "<inline>")
+    if text is None:
+        try:
+            path = _resolve_workflow_path(payload.get("file"))
+        except FileNotFoundError as e:
+            return JSONResponse({"error": str(e)}, status_code=404)
+        except PermissionError as e:
+            return JSONResponse({"error": str(e)}, status_code=403)
+        source, text = str(path), path.read_text(encoding="utf-8")
+
+    agent = get_agent()
+    loader = _workflow_loader(agent.tool_registry.list_names(),
+                              str(payload.get("unknown_fields") or "error"))
+    schema, errors, warnings = loader.try_parse(str(text), source=source)
+    if schema is None:
+        return JSONResponse({"ok": False,
+                             "errors": [e.as_dict() for e in errors],
+                             "warnings": [w.as_dict() for w in warnings]},
+                            status_code=422)
+
+    # 入参与 CLI 共用同一套规则（否则会出现"命令行说缺参数、接口却能跑"）
+    final_inputs, input_errors, input_warnings = check_inputs(
+        schema, payload.get("inputs") or {})
+    if input_errors:
+        return JSONResponse({"ok": False,
+                             "errors": [{"message": m, "path": "inputs"} for m in input_errors],
+                             "warnings": [{"message": m} for m in input_warnings]},
+                            status_code=422)
+
+    session_id = uuid.uuid4().hex[:12]
+    approval = _headless_approval_callback(
+        str(payload.get("session_id") or "default"), session_id, agent)
+    from automind.core.metrics import METRICS
+
+    try:
+        run = await run_workflow(
+            schema, final_inputs,
+            registry=agent.tool_registry, llm=agent.llm, approval=approval,
+            dry_run=bool(payload.get("dry_run")))
+    except asyncio.CancelledError:
+        # 取消要照常传播（工作流执行器已把当前步骤标 cancelled）；
+        # 这里只记一笔账，绝不吞掉
+        METRICS.inc("automind_workflow_runs_total", status="cancelled")
+        raise
+    report = json.loads(report_to_json(
+        run, include_outputs=bool(payload.get("include_outputs"))))
+    METRICS.inc("automind_workflow_runs_total",
+                status="ok" if report.get("summary", {}).get("ok") else "failed")
+    _record_and_notify(str(payload.get("session_id") or "default"), {
+        "type": "workflow_run", "session_id": session_id,
+        "task": getattr(schema, "name", ""), "workflow_run": report})
+    return report
 
 
 @app.post("/api/tools/toggle")
@@ -3385,6 +3965,196 @@ def _fail_pending_approvals(client_id: str, reason: str) -> int:
     return killed
 
 
+# ── 出站事件（v1.7.3 第 8 项）──────────────────────────────
+
+#: 事件类型 → webhook 事件名。只映射"客户系统真正关心"的几类：
+#: 任务起止 + 审批三态。中间过程（思考、工具输出）不发 —— 出站事件是给
+#: 集成方做自动化的，把每一条轨迹都推出去只会把对方打爆，也把客户数据
+#: 送到没必要的地方。
+_WEBHOOK_EVENT_MAP: dict[str, str] = {
+    "task_start": "task_start",
+    "chat_done": "task_complete",
+    "task_complete": "task_complete",
+    "task_error": "task_error",
+    "task_cancelled": "task_cancelled",
+    "approval_request": "approval_request",
+    "approval_timeout": "approval_timeout",
+    "approval_resolved": "approval_resolved",
+}
+
+
+def _emit_webhook(event_type: str, **fields: Any) -> None:
+    """投递一条出站事件。
+
+    **绝不抛异常、绝不阻塞**：这是主任务路径上唯一与外部 HTTP 打交道的地方，
+    通知失败把任务弄挂是最不能接受的失败模式（用户宁可收不到通知）。
+    默认未配置目标时是零成本空操作。
+    """
+    try:
+        from automind.core import webhooks
+
+        name = _WEBHOOK_EVENT_MAP.get(event_type)
+        if not name:
+            return
+        webhooks.emit(name, webhooks.build_payload(name, **fields))
+    except Exception as e:
+        logger.warning("webhook_emit_failed", kind=event_type, reason=str(e))
+
+
+def _webhook_for_event(event: dict) -> None:
+    """把一条内部事件折算成出站事件（不需要外发的类型直接返回）。"""
+    etype = event.get("type") or ""
+    if etype not in _WEBHOOK_EVENT_MAP:
+        return
+    fields: dict[str, Any] = {
+        "session_id": event.get("session_id") or "",
+        "task": event.get("task") or "",
+        "status": event.get("status") or "",
+    }
+    if etype in ("chat_done", "task_complete"):
+        fields["status"] = "ok"
+        if event.get("duration_ms") is not None:
+            fields["elapsed"] = float(event["duration_ms"]) / 1000.0
+        if event.get("tokens") is not None:
+            fields["tokens"] = {"total": event.get("tokens") or 0}
+    elif etype == "task_error":
+        fields["status"] = "error"
+        fields["error"] = str(event.get("error") or "")[:500]
+    elif etype == "task_cancelled":
+        fields["status"] = "cancelled"
+    elif etype == "approval_request":
+        fields.update({
+            "tool": event.get("tool") or "", "tier": event.get("tier") or "",
+            "reason": str(event.get("reason") or "")[:300],
+            "arguments": event.get("arguments") or event.get("params") or {},
+            "approval_id": event.get("approval_id") or "",
+            "timeout_s": event.get("timeout_s") or 0,
+            "on_timeout": event.get("action") or event.get("on_timeout") or "",
+        })
+        try:
+            from automind.core import webhooks
+
+            fields["callback_url"] = webhooks.approval_callback_url(
+                str(fields["approval_id"]))
+        except Exception:
+            fields["callback_url"] = ""
+    elif etype == "approval_timeout":
+        fields.update({
+            "tool": event.get("tool") or "", "tier": event.get("tier") or "",
+            "approval_id": event.get("approval_id") or "",
+            "status": str(event.get("action") or "timeout"),
+            "timeout_s": event.get("timeout_s") or 0,
+        })
+    elif etype == "approval_resolved":
+        fields.update({
+            "tool": event.get("tool") or "", "tier": event.get("tier") or "",
+            "approval_id": event.get("approval_id") or "",
+            "status": "approved" if event.get("approved") else "denied",
+        })
+    _emit_webhook(etype, **fields)
+
+
+def _record_and_notify(session_id: str, event: dict) -> None:
+    """把一条任务事件并入观测/轨迹，并投递对应的出站事件。
+
+    v1.7.3：把 server.py 里原先散落的 11 处 ``_observability.record(...)``
+    收敛到这一个入口 —— 因为**事件漏斗只有一个**，出站通知才可能不漏：
+    将来新增一条终态路径时，只要它照惯例记事件，通知就自动有了。
+    """
+    try:
+        _observability.record(session_id, event)
+    except Exception:
+        pass
+    _webhook_for_event(event)
+
+
+@app.post("/api/approvals/{approval_id}")
+async def api_approval_receipt(approval_id: str, request: Request):
+    """外部系统的审批回执（v1.7.3 第 8 项）。
+
+    为什么需要它：客户要求"在工单系统 / 群里批准"，而此前审批**只能**在 Web
+    弹窗里点 —— 客户侧的自动化流程接不进来，只能让人守着浏览器。
+
+    安全要求（三道，缺一不可）：
+
+    1. **这是管理动作**：中间件已按 ``/api/approvals`` 前缀要求管理员权限，
+       远程必须带 ``X-Admin-Token``（本机回环放行）—— 这个端点的能力等价于
+       "批准任意高风险工具调用"，绝不能是公网上的开放审批后门；
+    2. **迟到回执必须明确拒绝**（409 + ``approval_stale``），与 WebSocket 分支
+       同语义 —— 静默丢弃会让对方的工单永远停在"已发送审批"；
+    3. **拒绝时参数强制置空**：否则只读 ``modified`` 的调用点会把
+       "拒绝 + 参数"误判成"改后批准"（那是把拒绝当成放行）。
+    """
+    from automind.core import webhooks
+
+    aid = str(approval_id or "").strip()
+    if not aid:
+        return JSONResponse({"ok": False, "error": "缺少 approval_id"}, status_code=400)
+
+    state = webhooks.approval_receipt_state(aid, _pending_approvals)
+    if not state.get("resolvable"):
+        return JSONResponse(
+            {"ok": False, "type": "approval_stale", "approval_id": aid,
+             "message": state.get("reason") or "这次审批已经结束，本次回执不再生效。"},
+            status_code=409)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "请求体必须是 JSON"}, status_code=400)
+    if not isinstance(data, dict):
+        return JSONResponse({"ok": False, "error": "请求体必须是 JSON 对象"}, status_code=400)
+
+    receipt = webhooks.build_approval_receipt(
+        aid, data.get("approved"), str(data.get("comment") or ""),
+        data.get("arguments") if isinstance(data.get("arguments"), dict) else None)
+
+    from automind.state.human_loop import ApprovalOutcome
+
+    outcome = ApprovalOutcome.normalize(receipt)
+    rec = _pending_approvals.get(aid) or {}
+    fut = rec.get("future")
+    if fut is None or fut.done():
+        # 竞态兜底：状态检查与取 future 之间可能刚好被超时/断连收尾
+        return JSONResponse({"ok": False, "type": "approval_stale", "approval_id": aid,
+                             "message": "这次审批刚刚结束，本次回执不再生效。"},
+                            status_code=409)
+    fut.set_result({"approved": outcome.approved,
+                    "arguments": outcome.arguments if outcome.approved else None,
+                    "comment": outcome.comment or "外部系统回执"})
+    logger.info("approval_receipt_external", approval_id=aid,
+                approved=outcome.approved, modified=outcome.modified)
+    return {"ok": True, "approval_id": aid, "approved": outcome.approved,
+            "modified": outcome.modified}
+
+
+def _external_approval_available() -> bool:
+    """外部审批通道是否可用（v1.7.3）。
+
+    两个条件缺一不可：① 配了出站 webhook（审批请求才会被送出去）；
+    ② 配了管理员令牌或本机可访问（回执端点的鉴权前提）。
+    判据集中在这里，避免"界面没送到就当场拒绝"与"外部还能批"两条规则
+    各写一遍、然后在某个分支上互相矛盾。
+    """
+    try:
+        from automind.core import webhooks
+
+        return bool(webhooks.stats().get("enabled"))
+    except Exception:                                   # pragma: no cover - 防御性
+        return False
+
+
+def _headless_approval_callback(chat_sid: str, session_id: str, agent: Any):
+    """给"没有 WebSocket 的调用方"用的审批回调（工作流 / REST 触发）。
+
+    复用 ``make_approval_callback`` 的同一条链路：同一张待决表
+    （``_pending_approvals``）、同一套超时处置、同一个外部回执端点 ——
+    否则"弹窗审批"和"外部回执审批"会演化成两套语义，而审批是安全控制，
+    两套语义必然有一套是错的。
+    """
+    return make_approval_callback(None, "http", session_id, chat_sid, agent)
+
+
 def make_approval_callback(
     ws: Any,
     client_id: str,
@@ -3402,6 +4172,10 @@ def make_approval_callback(
     超时/断连/送不到三种异常收尾。埋在闭包里就只能靠端到端跑整个任务
     才测得到，于是它长期处于"没人测"的状态 —— 而它的每一种失败形态
     在用户侧的表现都是"任务卡住不动"。
+
+    v1.7.3：``ws`` 允许为 ``None``（工作流经 HTTP 触发时没有 WebSocket）——
+    此时只广播弹窗、并把"外部系统回执"（``POST /api/approvals/{id}``）
+    当成可用的回答通道。
     """
     approval_timeout = _approval_timeout_seconds(agent)
 
@@ -3422,37 +4196,62 @@ def make_approval_callback(
             "reason": reason,
             # 截断版仅供展示；editable 是「修改后批准」要回填的原始值，
             # 不能截断 —— 否则用户"没改的那些参数"会被截断值悄悄覆盖
-            "params": {k: str(v)[:200] for k, v in (args or {}).items()},
+            "params": {k: str(v)[:200] for k, (v) in (args or {}).items()},
             "editable": _jsonable(args or {}),
             # 前端据此显示倒计时：不给期限的话，弹窗看起来可以一直等，
             # 而实际上后端到点就按配置处置了
             "timeout_s": approval_timeout,
             "on_timeout": _approval_timeout_action(agent),
         }
+        delivered = 0
+        if ws is not None:
+            try:
+                await ws.send_json(payload)
+                delivered += 1
+            except Exception as e:
+                # 弹窗发不出去 = 用户根本没机会批准。这不是"等等看"，必须当场
+                # 按拒绝收尾并把原因说清，否则整个任务会一直挂到超时。
+                logger.warning("approval_request_undeliverable", tool=tool_name,
+                               client=client_id, error=str(e))
+                _pending_approvals.pop(approval_id, None)
+                _ws_approvals.pop(approval_id, None)
+                if reclaim_slot is not None:
+                    reclaim_slot()
+                return {"approved": False, "arguments": None,
+                        "comment": f"审批请求无法送达界面（{type(e).__name__}），已按拒绝处理"}
+        # 让同一会话的其它标签页也能看到并响应（开两个窗口时不必回到原窗口）
         try:
-            await ws.send_json(payload)
-        except Exception as e:
-            # 弹窗发不出去 = 用户根本没机会批准。这不是"等等看"，必须当场
-            # 按拒绝收尾并把原因说清，否则整个任务会一直挂到超时。
-            logger.warning("approval_request_undeliverable", tool=tool_name,
-                           client=client_id, error=str(e))
+            delivered += await _broadcast_to_session(chat_sid, payload, exclude=ws)
+        except Exception:                               # pragma: no cover - 防御性
+            pass
+        if delivered == 0 and not _external_approval_available():
+            # 界面一个都没送到、外部回执通道也没开 → 没人能回答，当场按拒绝收尾。
+            # （v1.7.3：工作流经 HTTP 触发时没有 ws，审批只能靠外部系统回执；
+            #   那条路开了就继续等，没开就别让调用方白等一个超时。）
+            logger.warning("approval_no_channel", tool=tool_name,
+                           session=session_id, approval_id=approval_id)
             _pending_approvals.pop(approval_id, None)
             _ws_approvals.pop(approval_id, None)
             if reclaim_slot is not None:
                 reclaim_slot()
             return {"approved": False, "arguments": None,
-                    "comment": f"审批请求无法送达界面（{type(e).__name__}），已按拒绝处理"}
-        # 让同一会话的其它标签页也能看到并响应（开两个窗口时不必回到原窗口）
-        await _broadcast_to_session(chat_sid, payload, exclude=ws)
-        # 审批事件同样并入观测轨迹：排障时要能看出"这一步在等人"
+                    "comment": ("审批请求没有可送达的界面，且未配置外部审批通道"
+                                "（webhook），已按拒绝处理")}
+        # 审批事件同样并入观测轨迹：排障时要能看出"这一步在等人"。
+        # v1.7.3：这里同时是**出站审批事件**的数据源（客户系统要在自己的
+        # 工单/群里批准），所以把 reason/参数/时限一并记上 —— 只记 tool 与
+        # tier 的话，收到通知的人根本不知道该不该批。
         try:
-            _observability.record(chat_sid, {
+            _record_and_notify(chat_sid, {
                 "type": "approval_request", "session_id": session_id,
-                "tool": tool_name, "tier": tier, "approval_id": approval_id})
+                "tool": tool_name, "tier": tier, "approval_id": approval_id,
+                "reason": reason, "arguments": _jsonable(args or {}),
+                "timeout_s": approval_timeout,
+                "action": _approval_timeout_action(agent)})
         except Exception:
             pass
         try:
-            return await asyncio.wait_for(fut, timeout=approval_timeout)
+            answered = await asyncio.wait_for(fut, timeout=approval_timeout)
         except TimeoutError:
             # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
             # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
@@ -3483,7 +4282,7 @@ def make_approval_callback(
                          "tool": tool_name, "timeout_s": approval_timeout,
                          "action": action}
             try:
-                _observability.record(chat_sid, record_ev)
+                _record_and_notify(chat_sid, record_ev)
             except Exception:
                 pass
             # 返回值与"送不到"分支保持同一种形状（结构化 dict）——
@@ -3497,6 +4296,17 @@ def make_approval_callback(
             _pending_approvals.pop(approval_id, None)
             if reclaim_slot is not None:
                 reclaim_slot()
+        # 走到这里说明**有人回答了**（界面点、或外部系统经 /api/approvals 回执）。
+        # 记一条"审批已裁决"：指标要算批准率，出站事件要让客户系统知道结果 ——
+        # 否则对方工单里的那一条会永远停在"等待审批"。
+        try:
+            _record_and_notify(chat_sid, {
+                "type": "approval_resolved", "session_id": session_id,
+                "tool": tool_name, "tier": tier, "approval_id": approval_id,
+                "approved": bool((answered or {}).get("approved"))})
+        except Exception:
+            pass
+        return answered
 
     return _approval_cb
 
@@ -3619,7 +4429,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     async def _event_sink(ev):
         # 先并入观测 DAG（纯内存，异常不影响推送），再发给前端
         try:
-            _observability.record(chat_sid, ev)
+            _record_and_notify(chat_sid, ev)
         except Exception:
             pass
         # 插话生效事件补上 ref（v1.7.2）：事件是从执行循环深处发出来的，
@@ -3638,8 +4448,11 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     agent.event_sink = _event_sink
 
     _start_ev = {"type": "task_start", "session_id": session_id,
-                 "interaction": agent._interaction.value}
-    _observability.record(chat_sid, _start_ev)
+                 "interaction": agent._interaction.value,
+                 # task 一并记上：出站事件（webhook）要告诉集成方"开始了什么"，
+                 # 否则客户系统收到的只是一条"有个任务开始了"的空通知
+                 "task": raw_task[:200]}
+    _record_and_notify(chat_sid, _start_ev)
     await ws.send_json(_start_ev)
     t0 = time.perf_counter()
     try:
@@ -3669,7 +4482,13 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                     "cached": True, "cache_score": cached["score"],
                 }
                 _push_history(record)
-                _observability.record(chat_sid, {"type": "chat_done"})
+                # 终态事件带上身份与账目：出站通知与指标都要用
+                # （只发 {"type": "chat_done"} 的话，客户系统收到的是
+                # 一条没有会话、没有耗时、没有用量的空通知）
+                _record_and_notify(chat_sid, {
+                    "type": "chat_done", "session_id": session_id,
+                    "task": raw_task[:200], "status": "ok",
+                    "duration_ms": record["duration_ms"], "tokens": 0})
                 await ws.send_json({"type": "chat_done", "session_id": session_id,
                                     "tokens": 0, "prompt_tokens": 0,
                                     "completion_tokens": 0, "cached": True,
@@ -3701,7 +4520,10 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
-            _observability.record(chat_sid, {"type": "chat_done"})
+            _record_and_notify(chat_sid, {
+                "type": "chat_done", "session_id": session_id,
+                "task": raw_task[:200], "status": "ok",
+                "duration_ms": record["duration_ms"], "tokens": usage.total})
             await ws.send_json({"type": "chat_done", "session_id": session_id,
                                 "tokens": usage.total,
                                 "prompt_tokens": usage.prompt_tokens,
@@ -3731,7 +4553,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
-            _observability.record(chat_sid, {"type": "task_complete", **record})
+            _record_and_notify(chat_sid, {"type": "task_complete", **record})
             await ws.send_json({"type": "task_complete", **record})
             return
 
@@ -3757,7 +4579,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             }
             _push_history(record)
             _accumulate_tokens(record)
-            _observability.record(chat_sid, {"type": "task_complete", **record})
+            _record_and_notify(chat_sid, {"type": "task_complete", **record})
             await ws.send_json({"type": "task_complete", **record})
             return
 
@@ -3778,14 +4600,16 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         }
         _push_history(record)
         _accumulate_tokens(record)
-        _observability.record(chat_sid, {"type": "task_complete", **record})
+        _record_and_notify(chat_sid, {"type": "task_complete", **record})
         await ws.send_json({"type": "task_complete", **record})
         # 团队协作：向所有在线成员广播活动（同事的 Agent 改了文件 → 通知你）
         await _broadcast(_team_event(chat_sid, task, record))
 
     except asyncio.CancelledError:
         try:
-            _observability.record(chat_sid, {"type": "task_cancelled"})
+            _record_and_notify(chat_sid, {
+                "type": "task_cancelled", "session_id": session_id,
+                "task": raw_task[:200], "status": "cancelled"})
             await ws.send_json({"type": "task_cancelled", "session_id": session_id})
         except Exception:
             pass
@@ -3794,7 +4618,9 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         import traceback
         traceback.print_exc()
         try:
-            _observability.record(chat_sid, {"type": "task_error", "error": str(e)})
+            _record_and_notify(chat_sid, {
+                "type": "task_error", "session_id": session_id,
+                "task": raw_task[:200], "status": "error", "error": str(e)})
             await ws.send_json({"type": "task_error", "session_id": session_id,
                                 "error": str(e)})
         except Exception:

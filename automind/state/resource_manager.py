@@ -17,10 +17,30 @@ class TokenCounter:
         self.budget = budget
         self.tokens_used = TokenUsage()
 
+    def track_usage(self, prompt_tokens: int = 0, completion_tokens: int = 0) -> None:
+        """按**增量**记账（唯一写入口径）。
+
+        v1.7.3：这里必须只有一个写入点。此前 agent 的用量回调直接往
+        ``tokens_used.prompt`` / ``.completion`` 上累加 —— 而 ``TokenUsage``
+        的字段叫 ``prompt_tokens`` / ``completion_tokens``（名字不一样），
+        于是每次调用都抛 ``AttributeError``，被上层 ``except`` 吞成一条
+        warning。后果不是"少记一点"，而是**整条预算链路空转**：
+        ``usage_fraction()`` 恒为 0 → 80% 预警不报、超额不拦、预算驱动的
+        上下文压缩永不触发，账单与上下文双双无上限。
+
+        把写入收敛到这一个方法，同类问题以后再犯就会在测试里立刻暴露
+        （测试只需要对着这个方法断言，而不是猜字段名）。
+        """
+        try:
+            self.tokens_used.prompt_tokens += int(prompt_tokens or 0)
+            self.tokens_used.completion_tokens += int(completion_tokens or 0)
+        except (TypeError, ValueError):
+            # 用量来自各提供商的 usage 字段，偶有字符串/None；宁可少记也不能炸
+            pass
+
     def track(self, response: LLMResponse) -> None:
         """追踪一次 LLM 调用的消耗。"""
-        self.tokens_used.prompt_tokens += response.prompt_tokens
-        self.tokens_used.completion_tokens += response.completion_tokens
+        self.track_usage(response.prompt_tokens, response.completion_tokens)
 
     def remaining(self) -> int:
         """剩余 token 预算。"""

@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "1.7.2"
+version = "1.7.3"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
@@ -135,6 +135,17 @@ asyncio_mode = "auto"
 where = ["."]
 # 显式排除商业包（automind_pro 位于 pro/ 目录，另行打包分发）
 include = ["automind", "automind.*"]
+# v1.7.3：把与发布无关的巨型目录排除在**发现范围**之外。
+# 为什么必须写：`find_packages(where=".")` 会递归遍历工作区里的**所有**目录
+# 去找 `__init__.py` —— 包括 web/node_modules（几万个文件）与
+# desktop/dist（PyInstaller 产物，含 playwright 的 90MB node.exe、三平台安装包）。
+# 结果是本地 `python -m build` 从"几秒"变成"十分钟以上"，而且产出物里
+# 可能混进这些不该发布的路径。写成 exclude 比"靠 gitignore"可靠：
+# 打包器看的是文件系统，不是 git。
+exclude = [
+    "web*", "desktop*", "promo*", "analytics-service*", "pro*",
+    "tests*", "examples*", "docs*", "scripts*", "demo*", "dist*", "build*",
+]
 
 # Web 工作台静态资源必须随包分发，否则 pip 安装后界面退化为兜底页
 # v1.0：dist/ 为 React 前端构建产物（web/ 目录 pnpm build 生成），优先伺服
@@ -148,6 +159,8 @@ automind = [
     # 内置插件（非 Python 包，需显式随包分发 plugin.json + hooks.py）
     "builtin_plugins/*/plugin.json",
     "builtin_plugins/*/hooks.py",
+    # 评测套件（v1.7.3）：随包分发冒烟套件，装完即可 `python -m automind.eval run smoke`
+    "eval/suites/*.yml",
 ]
 
 [tool.ruff]

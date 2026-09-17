@@ -170,6 +170,61 @@ def _trace_reset_for_tests(root: Any = None, enabled: bool = True) -> None:
     _trace.reset_for_tests(root=root, enabled=enabled)
 
 
+def _record_metrics(etype: str, event: dict) -> None:
+    """把事件流同时折算成 Prometheus 指标（v1.7.3）。
+
+    **为什么挂在这里**：``record()`` 是全会话事件的唯一漏斗 —— 服务端把
+    ``task_start`` / ``chat_done`` / ``task_complete`` / ``task_cancelled`` /
+    ``task_error`` 以及 agent 侧的全部事件（``step_action``、``approval_*``、
+    ``interjection_*``、``budget_*``）都投到这里。在别处逐个打点意味着
+    "新增一条终态路径就漏一个指标"，而漏掉的那种情况不会有任何测试告诉你；
+    集中在这一个函数里，覆盖率与事件覆盖率天然一致。
+
+    指标异常一律吞掉：监控设施故障绝不允许影响任务执行（与轨迹写入同一条原则）。
+    """
+    try:
+        from automind.core.metrics import METRICS
+
+        if etype == "task_start":
+            METRICS.inc("automind_tasks_total", status="started")
+        elif etype in ("task_complete", "chat_done"):
+            METRICS.inc("automind_tasks_total", status="completed")
+            dur = event.get("duration_ms")
+            if isinstance(dur, (int, float)) and dur >= 0:
+                METRICS.observe("automind_task_duration_seconds", float(dur) / 1000.0)
+        elif etype == "task_error":
+            METRICS.inc("automind_tasks_total", status="failed")
+        elif etype == "task_cancelled":
+            METRICS.inc("automind_tasks_total", status="cancelled")
+        elif etype == "step_action":
+            METRICS.inc("automind_tool_calls_total",
+                        tool=event.get("tool") or "?",
+                        result="ok" if event.get("success") else "fail")
+        elif etype == "tool_error":
+            METRICS.inc("automind_tool_errors_total", tool=event.get("tool") or "?")
+        elif etype == "approval_request":
+            METRICS.inc("automind_approvals_total", outcome="requested")
+        elif etype == "approval_timeout":
+            METRICS.inc("automind_approvals_total", outcome="timeout")
+        elif etype == "approval_resolved":
+            METRICS.inc("automind_approvals_total",
+                        outcome="approved" if event.get("approved") else "denied")
+        elif etype == "interjection_received":
+            METRICS.inc("automind_interjections_total", state="accepted")
+        elif etype == "interjection_applied":
+            METRICS.inc("automind_interjections_total", state="applied")
+        elif etype == "interjection_dropped":
+            METRICS.inc("automind_interjections_total", state="dropped")
+        elif etype in ("budget_warning", "budget_exceeded"):
+            METRICS.inc("automind_budget_events_total", kind=etype)
+        elif etype == "usage_update":
+            cum = event.get("cumulative") or {}
+            METRICS.gauge("automind_tokens_prompt", cum.get("prompt_tokens", 0))
+            METRICS.gauge("automind_tokens_completion", cum.get("completion_tokens", 0))
+    except Exception:            # pragma: no cover - 监控绝不影响主链路
+        pass
+
+
 def record(session_id: str, event: dict) -> None:
     """把一条任务事件并入该会话的当前 DAG（未知事件安全忽略）。
 
@@ -181,6 +236,8 @@ def record(session_id: str, event: dict) -> None:
     if not etype:
         return
     sid = session_id or "default"
+
+    _record_metrics(etype, event)
 
     try:
         _trace_event(sid, event)

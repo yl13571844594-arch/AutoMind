@@ -3,6 +3,8 @@
 import asyncio
 import time
 
+import pytest
+
 from automind.core.config import AgentConfig, ExecutionConfig
 from automind.core.types import (
     Action,
@@ -378,6 +380,16 @@ class TestAutonomyClosure:
 # ── Web API 开关 ────────────────────────────────────────
 
 class TestAutopilotApi:
+    #: v1.7.3：``/api/config/*`` 属于**管理动作**（改 api_base / API Key / 审批模式
+    #: 这些能劫持平台本身的配置），远程调用必须带管理员令牌。本文件测的是开关的
+    #: 读写与持久化，不是"无令牌也能改全局配置"；分权本身由
+    #: tests/server/test_admin_privileges.py 专门覆盖。
+    _ADMIN = {"X-Admin-Token": "test-admin-token"}
+
+    @pytest.fixture(autouse=True)
+    def _admin_env(self, monkeypatch):
+        monkeypatch.setenv("AUTOMIND_ADMIN_TOKEN", "test-admin-token")
+
     def test_get_and_toggle(self, tmp_path):
         from fastapi.testclient import TestClient
 
@@ -385,7 +397,7 @@ class TestAutopilotApi:
         srv._store.config_file = tmp_path / "cfg.json"
         srv._AUTH_TOKEN = ""
         srv._agent = None
-        c = TestClient(srv.app)
+        c = TestClient(srv.app, headers=self._ADMIN)
 
         flags = c.get("/api/config/autopilot").json()
         # v1.6.4：新增了几个开关。其中**唯一**默认关闭的是目录级隔离
@@ -409,7 +421,7 @@ class TestAutopilotApi:
         srv._store.config_file = tmp_path / "cfg.json"
         srv._AUTH_TOKEN = ""
         srv._agent = None
-        c = TestClient(srv.app)
+        c = TestClient(srv.app, headers=self._ADMIN)
 
         r = c.post("/api/config/autopilot", json={
             "tool_timeout_seconds": 900,

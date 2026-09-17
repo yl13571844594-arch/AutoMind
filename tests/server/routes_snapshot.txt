@@ -29,6 +29,8 @@ GET /api/config/autopilot
 GET /api/config/full
 GET /api/config/mode-models
 GET /api/costs
+GET /api/eval/report/{job_id}
+GET /api/eval/suites
 GET /api/experts
 GET /api/experts/export
 GET /api/experts/pending
@@ -40,6 +42,7 @@ GET /api/fs/list
 GET /api/gateway
 GET /api/gateway/check
 GET /api/health
+GET /api/health/ready
 GET /api/history
 GET /api/history/{session_id}
 GET /api/integrations/continue
@@ -77,10 +80,13 @@ GET /api/tools
 GET /api/tools/registration
 GET /api/update/check
 GET /api/update/state
+GET /api/workflow/list
 GET /api/workspaces
 GET /legacy
 GET /manual
+GET /metrics
 GET /v1/models
+POST /api/approvals/{approval_id}
 POST /api/auth/login
 POST /api/auth/logout
 POST /api/cache/config
@@ -95,6 +101,7 @@ POST /api/config/project
 POST /api/config/provider
 POST /api/config/test
 POST /api/config/ui
+POST /api/eval/run
 POST /api/experts
 POST /api/experts/activate
 POST /api/experts/import
@@ -129,8 +136,11 @@ POST /api/skills/load
 POST /api/team/tasks
 POST /api/team/tasks/{tid}
 POST /api/templates/custom
+POST /api/tools/reload
 POST /api/tools/toggle
 POST /api/update/apply
+POST /api/workflow/run
+POST /api/workflow/validate
 POST /api/workspaces
 POST /api/workspaces/switch
 POST /v1/chat/completions

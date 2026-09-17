@@ -162,10 +162,33 @@ class _RootGuard:
             allowed.append(session_root)
         for root in allowed:
             if resolved == root or root in resolved.parents:
-                return resolved
+                return self._guard_platform_secrets(resolved, path)
         raise PermissionError(
             f"路径越界：'{path}' 解析到允许范围之外，已拒绝访问。"
         )
+
+    @staticmethod
+    def _guard_platform_secrets(resolved: Path, original: str | Path) -> Path:
+        """在项目目录之内**再挡一层平台自身的密钥与数据**（v1.7.3）。
+
+        路径守卫原本只管"在不在 project_root 之内"，平台的密钥与数据恰好就在
+        项目里：``.automind_config.json``（全部提供商 API Key）、
+        ``.automind/automind.db``（全部会话历史）、``.automind/traces/**``
+        （提示词与被读过的文件内容）。模型没有任何正当理由读它们，而提示注入
+        最想拿的就是它们 —— 一次 ``file_read(".automind_config.json")``
+        就足以把密钥带进发给模型提供商的上下文里。
+
+        注意与 Web 端点的**粒度差异**：这里只挡平台自身的文件，不挡用户项目里的
+        ``.env`` / ``.ssh`` —— 读项目文件是 Agent 的本职，"帮我看看 .env 缺哪项"
+        是正常任务。理由与边界写在 ``automind/core/sensitive.py`` 的模块文档里。
+        """
+        from automind.core.sensitive import SCOPE_TOOL
+        from automind.core.sensitive import reason as _sensitive_reason
+
+        denied = _sensitive_reason(resolved, SCOPE_TOOL)
+        if denied:
+            raise PermissionError(f"拒绝访问 '{original}'：{denied}")
+        return resolved
 
 
 def _write_guard() -> Any:

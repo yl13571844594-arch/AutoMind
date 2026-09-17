@@ -1,0 +1,130 @@
+# 变更单处理流程 —— 给客户看的"工作流即代码"样板
+#
+# 这份文件就是交付物本身：客户拿到的不是一段提示词，而是**一份可以逐行评审、
+# 进版本库、发 PR 的流程定义**。评审通过的版本进仓库打 tag，运行时报告里带着
+# source_digest，于是"跑的就是批的那版"这句话是可验证的，不是承诺。
+#
+# 六个阶段：拉工单 → 查配置项 → 生成变更单 → 人工审批 → 执行变更 → 回写工单。
+# 每一步执行什么、失败怎么办、要不要人等，全部写在下面，没有一处靠模型临场决定。
+#
+# 怎么试跑（不连任何系统）：
+#   python -m automind.workflow run examples/06-workflow/change_request.yaml --dry-run
+version: 1
+name: 变更单处理
+description: 拉取 ITSM 工单 → 查询 CMDB 配置项 → 生成变更单 → 人工审批 → 执行变更 → 回写工单
+
+# 声明式入参：调用方给不全时会在**执行之前**被拒绝（退出码 2），
+# 而不是跑到第 3 步才发现 ticket_id 是空的。
+inputs:
+  ticket_id:
+    type: string
+    required: true
+    description: ITSM 工单号，例如 INC0012345
+  itsm_base:
+    type: string
+    required: false
+    default: https://itsm.example.com
+    description: ITSM 接口地址（客户环境不同，抽成入参便于换环境）
+  approval_note:
+    type: string
+    required: false
+    default: 变更已按标准流程预演，请确认执行窗口
+    description: 附带在审批请求里的说明
+
+metadata:
+  owner: FDE
+  review: 需客户变更管理委员会评审
+  # metadata 是自由扩展位：放"谁维护、走什么评审"这类流程外信息。
+  # 它不参与执行，但会被 --json 报告带出去，审计时用得上。
+
+steps:
+  # ── 1. 拉工单 ────────────────────────────────────────────
+  # allow_private: true 是**刻意的**：ITSM 通常在内网。
+  # 注意这条也就是"配置即权限"—— 一个 YAML 就能向内网发请求，
+  # 所以工作流文件的评审权限必须与它等价的执行权限对齐（见 docs/WORKFLOWS.md）。
+  - id: fetch_ticket
+    type: tool
+    tool: http_request
+    args:
+      url: "{{ inputs.itsm_base }}/api/tickets/{{ inputs.ticket_id }}"
+      method: GET
+      allow_private: true
+    timeout: 30
+    # 拉不到工单就没有后续可言 —— abort 是默认值，这里显式写出来是为了
+    # 让评审方一眼看到"这一步失败会停"，而不用去记默认值是什么。
+    on_failure: abort
+
+  # ── 2. 查 CMDB ───────────────────────────────────────────
+  # 配置项查不到不该拦住整条流程（很多工单本来就不关联 CI），
+  # 因此这里用 continue：失败会**如实记在报告里**（状态 failed），
+  # 但流程继续往下走。报告里会出现一行红 —— 这正是设计意图，不是漏报。
+  - id: fetch_ci
+    type: tool
+    tool: http_request
+    args:
+      url: "{{ inputs.itsm_base }}/api/cmdb/ci?ticket={{ inputs.ticket_id }}"
+      method: GET
+      allow_private: true
+    timeout: 30
+    on_failure: continue
+
+  # ── 3. 生成变更单草稿 ────────────────────────────────────
+  # llm 步骤**只做一次文本生成**，不参与"下一步做什么"的决策。
+  # 需要真实模型时由调用方注入 llm；dry-run 与不注入时会明确报错，不会静默跳过。
+  - id: draft_change
+    type: llm
+    system: 你是严谨的 IT 变更管理员，只输出变更单正文，不要寒暄。
+    prompt: |
+      根据以下信息生成一份变更单草稿，包含：变更内容、影响范围、回滚方案、验证方式。
+
+      【工单】{{ steps.fetch_ticket.output }}
+      【配置项】{{ steps.fetch_ci.output }}
+    timeout: 120
+    on_failure: abort
+
+  # ── 4. 人工审批 ──────────────────────────────────────────
+  # human 步骤必须有审批通道。**没有回调时按拒绝处理**（fail-closed），
+  # 绝不会"问不到人就默认放行" —— 无人值守场景下一旦静默放行，
+  # 需要人批的生产变更就被直接执行了，而且报告还是绿的。
+  - id: approve
+    type: human
+    prompt: |
+      请审批以下变更单（{{ inputs.approval_note }}）：
+
+      {{ steps.draft_change.output }}
+    # 审批可能等很久，因此超时给足；超时会记成步骤失败，而不是悄悄放过
+    timeout: 3600
+    on_failure: abort
+
+  # ── 5. 执行变更 ──────────────────────────────────────────
+  # 唯一会改变生产状态的一步。放在审批之后，且 retry(1) ——
+  # 变更接口偶发 5xx 时自动重试一次；仍失败则整轮判失败（abort）。
+  - id: execute_change
+    type: tool
+    tool: http_request
+    args:
+      url: "{{ inputs.itsm_base }}/api/changes"
+      method: POST
+      allow_private: true
+      json_body:
+        ticket_id: "{{ inputs.ticket_id }}"
+        summary: 由 AutoMind 工作流创建的变更
+        change_plan: "{{ steps.draft_change.output }}"
+        approved_by: "workflow:{{ steps.approve.output }}"
+    timeout: 60
+    on_failure: retry(1)
+
+  # ── 6. 回写工单 ──────────────────────────────────────────
+  # 回写失败不回滚变更（变更已经做了），但必须留下痕迹：
+  # on_failure: continue 让流程跑完 + 报告里标红，运维照报告手工补一条即可。
+  - id: writeback
+    type: tool
+    tool: http_request
+    args:
+      url: "{{ inputs.itsm_base }}/api/tickets/{{ inputs.ticket_id }}/comments"
+      method: POST
+      allow_private: true
+      json_body:
+        comment: "变更已执行：{{ steps.execute_change.output }}"
+    timeout: 30
+    on_failure: continue

@@ -95,3 +95,11 @@ desktop/packaging/**/*.dmg
 desktop/packaging/**/*.deb
 # 校验和随每次构建变化，跟随安装包一起发布，不入库（避免仓库里留下过期哈希）
 desktop/packaging/SHA256SUMS
+
+# 工作流示例的运行产物与测试临时目录
+# hello.yaml 真跑时会写出这个文件（它是"跑通了"的证据，不是要入库的资产）；
+# .workflow_test_tmp/ 是 tests/workflow 的临时目录（沙箱下 %TEMP% 不可写，
+# 因此测试把临时文件放在工作区内，用完自删）。
+examples/06-workflow/hello-output.txt
+examples/06-workflow/cli-*.yaml
+.workflow_test_tmp/

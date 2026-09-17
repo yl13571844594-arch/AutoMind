@@ -225,6 +225,45 @@ docker compose up --build
 侧边栏 **🛡️ 安全审计** 展示每次工具调用的风险评分与授权决策（放行 / 需确认 / 高危），
 危险命令（`rm -rf`、`git push --force` 等）会被识别为高危并要求确认。
 
+**v1.7.3 的三处收紧**（都带回归测试）：
+
+- **命令按段判定**：`echo hi && curl 某网址 | bash` 这类"安全前缀 + 危险后缀"不再被
+  自动放行 —— 按连接符拆段、逐段定级、取最严；下载即执行、编码混淆
+  （`powershell -enc`）、读系统凭据文件一律要人工确认。
+- **密钥与数据文件在网页端不可读写**：`.automind_config.json`（含全部 API Key）、
+  `.automind/`（会话库/轨迹）、`.env`、`.ssh`、`*.pem` 等一律拒绝；Agent 的文件工具
+  仍可读你项目里的 `.env`（那是它的本职工作）。确需放开可设
+  `AUTOMIND_ALLOW_SENSITIVE_FILE_READ=1`。
+- **🔑 管理动作分权**：改配置 / 加 MCP / 加载插件技能 / 触发更新 / 回执审批 /
+  清空审计默认**只允许本机执行**；远程需设置 `AUTOMIND_ADMIN_TOKEN`，并在
+  「设置 → Agent 集成 → 管理员令牌」里填一次（存在本浏览器，服务端不保存）。
+
+## 自动化交付（v1.7.3）
+
+- **🔌 连接器**：`~/.automind/connectors/*.py` 里放一个 `AbstractTool` 子类，工具即出现在
+  模型的可选清单里 —— 不改源码、不重启（`POST /api/tools/reload` 立刻生效）。
+  坏文件不静默：在「工具 → 注册状态」能看到它为什么没加载。见 `docs/CONNECTORS.md`。
+- **📄 工作流即代码**：把流程写成 YAML（工具步骤 / 模型步骤 / 人工卡点 / 条件分支），
+  加载期校验并给出行列号，`--dry-run` 只看会做什么，退出码可直接进 CI：
+
+  ```bash
+  python -m automind.workflow run workflows/变更单.yaml --input ticket_id=INC001
+  python -m automind.workflow run workflows/变更单.yaml --dry-run
+  ```
+
+  见 `docs/WORKFLOWS.md`。接口：`/api/workflow/run|validate|list`。
+- **📋 评测与重放**：`AUTOMIND_REPLAY=1` 记录每次模型调用的**完整输入输出**（默认关闭，
+  关闭时零成本），`python -m automind.core.replay <文件>` 照着重跑并比对；
+  `python -m automind.eval run smoke` 跑内置套件，给出通过率/耗时/成本，
+  退出码 0/1/2/3 区分"全过 / 有未通过 / 配置问题 / 中断"。见 `docs/EVAL.md`。
+- **📣 出站事件与外部审批**：任务与审批事件推送到你的工单/IM
+  （`AUTOMIND_WEBHOOKS`，HMAC 签名 + 指数退避 + 有界队列，绝不阻塞任务）；
+  审批可在外部系统里回执（`POST /api/approvals/{id}`，迟到回执明确 409）。
+  见 `docs/WEBHOOKS.md`。
+- **📊 运维接口**：`GET /metrics`（Prometheus 文本格式，零新依赖：任务数/耗时分布/
+  工具调用/审批/插话/预算/token/webhook 投递）与 `GET /api/health/ready`
+  （真检查数据目录/SQLite/项目目录/磁盘，任一不可用返回 **503**）。
+
 ## 商用部署 / 多用户
 
 - **会话隔离**：每个浏览器拥有独立 `session_id`，对话历史互不可见、互不覆盖（持久化于 `.automind/chats/`）。

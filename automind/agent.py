@@ -1023,14 +1023,18 @@ class AutoMindAgent:
             t["completion_tokens"] += usage.get("completion_tokens", 0)
             t["total_tokens"] += usage.get("total_tokens", 0)
             t["calls"] += 1
-            # 同步记进 ResourceManager —— 不记账，预算检查就永远看到 0
+            # 同步记进 ResourceManager —— 不记账，预算检查就永远看到 0。
+            #
+            # v1.7.3：此前这里写的是 ``tokens_used.prompt`` / ``.completion``，
+            # 而字段名是 ``prompt_tokens`` / ``completion_tokens`` —— 每次调用
+            # 都抛 AttributeError 被下面的 except 吞掉，预算因此**永远看到 0**：
+            # 预警不报、超额不拦、上下文压缩不触发。现在统一走
+            # ``TokenCounter.track_usage``（单一写入点），并由
+            # tests/core/test_token_budget_chain.py 盯着真实回调路径。
             rm = getattr(self, "resources", None)
             if rm is not None:
-                try:
-                    rm.tokens.tokens_used.prompt += usage.get("prompt_tokens", 0)
-                    rm.tokens.tokens_used.completion += usage.get("completion_tokens", 0)
-                except Exception as e:
-                    logger.warning("token_accounting_failed", error=str(e))
+                rm.tokens.track_usage(usage.get("prompt_tokens", 0),
+                                      usage.get("completion_tokens", 0))
             await self._emit({"type": "usage_update", "delta": usage,
                               "cumulative": dict(t)})
 
@@ -1706,6 +1710,20 @@ class AutoMindAgent:
                 _loader()
             except Exception as e:
                 self._record_tool_group_failure(_loader.__name__, e)
+
+        # 用户连接器（v1.7.3）：把客户自己的工具接进来，不改源码。
+        #
+        # 与上面六组同一条原则 —— 失败必须留痕并让用户看见。单文件坏掉只影响
+        # 它自己（加载器逐文件 try），整体挂掉也不该拖垮启动；两种情况都会进
+        # ``tool_group_failures()`` → 任务前自检 → ``/api/tools/registration``。
+        try:
+            from automind.tools.connectors import load_connectors
+
+            names = load_connectors(self.tool_registry)
+            if names:
+                logger.info("connectors_registered", tools=names)
+        except Exception as e:
+            self._record_tool_group_failure("connectors", e)
 
     def _record_tool_group_failure(self, group: str, exc: BaseException) -> None:
         """记下一次"整组工具没注册上"：留结构化账目 + 给出怎么修。

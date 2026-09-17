@@ -3,7 +3,7 @@ import {
   Alert, App, Button, Checkbox, Divider, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
 } from 'antd';
 import { useEffect, useState, type ReactNode } from 'react';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, getAdminToken, setAdminToken } from '../../api/client';
 import { prettyCombo } from '../../lib/hotkeys';
 import { notifyPermission, notifySupported, notifyTask, requestNotifyPermission } from '../../lib/notify';
 import { MODE_LABELS, useApp } from '../../store/app';
@@ -762,9 +762,63 @@ function IntegrationsModal() {
               </div>
             )}
           </div>
+          <AdminTokenBlock />
         </Space>
       )}
     </Modal>
+  );
+}
+
+/**
+ * 管理员令牌（v1.7.3）。
+ *
+ * 后端把管理动作（改配置 / 加 MCP / 加载插件技能 / 触发更新 / 回执审批 /
+ * 清空审计）与只读、执行动作分了权：远程访问时必须带 `X-Admin-Token`，
+ * 否则 403；本机回环访问不需要。
+ *
+ * 为什么要在这里给输入框：不给的话，只有 curl 用户能用上分权 ——
+ * 而"从另一台机器打开界面改设置"恰恰是最容易被 403 挡住的正常场景。
+ * 令牌存在本浏览器的 localStorage，服务端不保存。
+ */
+function AdminTokenBlock() {
+  const { message } = App.useApp();
+  const [tok, setTok] = useState('');
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { setSaved(!!getAdminToken()); }, []);
+
+  return (
+    <div style={{ border: '1px solid var(--border)', borderRadius: 10, padding: 12 }}>
+      <b>🔐 管理员令牌（远程改设置时需要）</b>
+      <Paragraph type="secondary" style={{ fontSize: '.78em', margin: '4px 0' }}>
+        在服务端设置 <code>AUTOMIND_ADMIN_TOKEN</code> 后，把同一个值填在这里。
+        仅保存在本浏览器；本机访问不需要填。改配置 / 加 MCP / 加载插件 / 检查更新 /
+        回执审批 / 清空审计都会用到它。
+      </Paragraph>
+      <Space.Compact style={{ width: '100%' }}>
+        <Input.Password
+          value={tok}
+          placeholder={saved ? '已保存（重新输入可覆盖）' : 'AUTOMIND_ADMIN_TOKEN 的值'}
+          onChange={(e) => setTok(e.target.value)}
+        />
+        <Button
+          type="primary"
+          onClick={() => {
+            if (!tok.trim()) { message.warning('请先填入令牌'); return; }
+            setAdminToken(tok);
+            setTok('');
+            setSaved(true);
+            message.success('已保存到本浏览器');
+          }}
+        >保存</Button>
+        <Button
+          onClick={() => { setAdminToken(''); setTok(''); setSaved(false); message.info('已清除本机保存的管理员令牌'); }}
+        >清除</Button>
+      </Space.Compact>
+      <div className="hint-text" style={{ marginTop: 6 }}>
+        当前：{saved ? '✅ 已配置' : '未配置（远程管理动作会返回 403，本机不受影响）'}
+      </div>
+    </div>
   );
 }
 

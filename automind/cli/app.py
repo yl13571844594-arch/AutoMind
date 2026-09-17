@@ -205,6 +205,18 @@ def main() -> None:
     # 必须在任何输出之前：中文 Windows 控制台默认 GBK，
     # 任务报告里的 emoji / 制表符一写就 UnicodeEncodeError 崩进程。
     enable_utf8_console()
+
+    # 子命令转发（v1.7.3）：`automind workflow run xxx.yaml`。
+    #
+    # 为什么用"在 argparse 之前直接交棒"而不是加一个可选位置参数：
+    # 现有用法是 `automind "任务描述"`（位置参数就是任务文本），加子命令参数会与
+    # "没参数进 REPL" 的分支互相打架（一句叫 workflow 的任务会被当成子命令）。
+    # 只有恰好以 workflow 开头才转发，其余路径一字未动。
+    if sys.argv[1:2] == ["workflow"]:
+        from automind.workflow.__main__ import main as _workflow_main
+
+        sys.exit(_workflow_main(sys.argv[2:]))
+
     parser = create_parser()
     args = parser.parse_args()
 

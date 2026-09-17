@@ -1,0 +1,124 @@
+# AutoMind 冒烟评测套件（smoke）
+#
+# 用途：五分钟内回答一个最基本的问题 —— "这个版本还能干活吗？"
+#      它**不衡量聪明程度**，只用最短的提示词覆盖四条主干路径：
+#      写文件 / 读文件 / 执行命令 / 产出脚本，外加一条反向断言体检。
+#
+# ⚠ 运行前提：需要配置**任一**提供商的 API Key（OpenAI / DeepSeek / Kimi /
+#    百炼 / 智谱 / 豆包 / Anthropic / Google / Grok / Ollama 均可），
+#    例如 `set AUTOMIND_DEEPSEEK_API_KEY=sk-...` 或在配置里填写。
+#    没有 Key 时 runner 会明确报"LLM 未配置，无法评测"并以退出码 2 结束 ——
+#    不会把"跑不了"记成"全部失败"或"全部通过"。
+#
+# 运行：
+#     python -m automind.eval run automind/eval/suites/smoke.yml
+#     python -m automind.eval run automind/eval/suites/smoke.yml --model gpt-4o-mini --json
+#     python -m automind.eval run automind/eval/suites/smoke.yml --dry-run   # 不联网、不需要 Key
+#
+# 成本：任务短、步骤少，全套（7 个任务）在 gpt-4o-mini / deepseek-chat 上
+#      通常远低于 $0.05。若只想快速自检，用 --include 挑两三个：
+#     --include smoke_write_file,smoke_run_command
+
+name: smoke
+description: 冒烟评测：文件读写 / 命令执行 / 断言机制自检（需要配置任一提供商的 API Key）
+mode: coding
+# 单任务默认超时（秒）。任务里可各自覆盖；跑不动时宁可判"超时"也不要挂死整场评测。
+timeout_seconds: 180
+
+cases:
+  # ── 1. 写文件：工具调用路径 + 产物落盘 ─────────────────────────
+  - id: smoke_write_file
+    description: 用 file_write 落一个文件，验证产物与工具调用
+    prompt: 在当前目录创建 hello.txt，内容为一行：hello automind
+    expect:
+      - tool_called:
+          name: file_write
+          args: {path: hello.txt}
+      - file_exists:
+          path: hello.txt
+          min_bytes: 5
+      - contains: hello.txt          # 回答里应提到它写了哪个文件
+      - not_contains: Traceback      # 出现 Python traceback 说明内部炸了
+      - regex: "hello|automind"
+      - max_seconds: 180
+      - max_tokens: 120000
+
+  # ── 2. 读文件：读回内容并如实汇报（防止"假装读过"）─────────────
+  - id: smoke_read_file
+    description: 读取既有文件并把内容原样汇报
+    setup:
+      note.txt: |
+        AutoMind eval marker: ZEBRA-42
+    prompt: 读取 note.txt，把它里面的那串标记原样告诉我，不要解释。
+    expect:
+      - contains: ZEBRA-42
+      - max_seconds: 180
+      - max_tokens: 120000
+
+  # ── 3. 执行命令：terminal 路径 ─────────────────────────────────
+  - id: smoke_run_command
+    description: 执行一条 shell 命令并汇报结果
+    prompt: 用终端执行 `python -c "print('PY-OK')"`，把输出告诉我。
+    expect:
+      - tool_called: terminal
+      - contains: PY-OK
+      - max_seconds: 180
+      - max_tokens: 120000
+
+  # ── 4. 产出可执行脚本：写代码 + 运行 + 校验第二次产物 ──────────
+  - id: smoke_generate_script
+    description: 写脚本、运行它、并检查它产生的第二个文件
+    prompt: |
+      创建 hello.py，内容为：
+      import json
+      print(json.dumps({"status": "ok"}))
+      然后运行 `python hello.py`，把输出告诉我。
+    expect:
+      - file_exists:
+          path: hello.py
+          min_bytes: 20
+      - tool_called: terminal
+      - contains: ok
+      - max_seconds: 240
+      - max_tokens: 160000
+
+  # ── 5. 中文内容与文件落盘 ──────────────────────────────────────
+  - id: smoke_chinese_content
+    description: 中文内容写入（编码路径）
+    prompt: 创建 备注.txt，写入一行中文：你好，自动化。
+    expect:
+      - file_exists:
+          path: 备注.txt
+          min_bytes: 4
+      - contains: 备注.txt
+      - max_seconds: 180
+      - max_tokens: 120000
+
+  # ── 6. 不存在的东西要如实说（降低"编造"倾向）────────────────────
+  - id: smoke_missing_file_honesty
+    description: 面对不存在的文件应如实报告，而不是编内容
+    prompt: 读取 not_here_9f3.txt 并把内容告诉我；如果它不存在，就直接说不存在。
+    expect:
+      - regex: "不存在|找不到|没有|not exist|cannot|no such"
+      - not_contains: ZEBRA-42
+      - max_seconds: 180
+      - max_tokens: 120000
+
+  # ── 7. 反向断言：给评测框架本身做体检 ──────────────────────────
+  #
+  # 这条任务的断言故意不可能满足（要求文件里出现一个不存在的标记）。
+  # `expect_fail: true` 表示"我期望它有断言失败"：
+  #   · 竟然通过了 → 说明断言判定链路断了（执行器没跑、断言被跳过、
+  #     报告把失败写成了通过）—— 那是最危险的情况，必须红；
+  #   · 如实失败 → 通过，并且报告里会带出"期望 vs 实际"，正好当作
+  #     断言失败样例的活文档。
+  # 删掉这条会让整套评测失去"断言真的在工作"的证据。
+  - id: smoke_assertion_failure_sample
+    description: 反向断言样例：故意不可能满足，用来证明断言链路真的在判定
+    expect_fail: true
+    prompt: 创建 marker.txt，内容为一行：alpha
+    expect:
+      - file_exists: marker.txt
+      - contains: THIS_MARKER_MUST_NOT_APPEAR_9F3
+      - max_seconds: 180
+      - max_tokens: 120000

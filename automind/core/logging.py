@@ -171,7 +171,16 @@ def configure_logging(level: str = "INFO", debug: bool = False) -> None:
 
 
 class _StdlibStructAdapter:
-    """标准库 logging 适配器 — 兼容 structlog 的 ``logger.info(event, **kw)`` 签名。"""
+    """标准库 logging 适配器 — 兼容 structlog 的 ``logger.info(event, **kw)`` 签名。
+
+    v1.7.3：位置参数**刻意不叫** ``event``。此前它就叫这个名字，于是
+    ``logger.warning("...", event="task_start")`` 会直接
+    ``TypeError: got multiple values for argument 'event'`` —— 而 ``event``
+    恰恰是这套接口里最自然的结构化键名（本仓到处都在记"发生了什么事件"）。
+    更糟的是异常发生在**日志调用自身**：它会把调用点所在的整段逻辑一起带走
+    （实测：webhook 投递协程里的一次告警把整批投递跳过，重试逻辑根本没执行）。
+    改成语义等价但不会撞名的 ``_message``，把 ``event=`` 留给业务字段。
+    """
 
     __slots__ = ("_logger",)
 
@@ -179,26 +188,26 @@ class _StdlibStructAdapter:
         self._logger = logger
 
     @staticmethod
-    def _fmt(event: str, kw: dict[str, Any]) -> str:
+    def _fmt(message: str, kw: dict[str, Any]) -> str:
         if not kw:
-            return event
+            return message
         pairs = " ".join(f"{k}={v!r}" for k, v in kw.items())
-        return f"{event} {pairs}"
+        return f"{message} {pairs}"
 
-    def debug(self, event: str, **kw: Any) -> None:
-        self._logger.debug(self._fmt(event, kw))
+    def debug(self, _message: str, **kw: Any) -> None:
+        self._logger.debug(self._fmt(_message, kw))
 
-    def info(self, event: str, **kw: Any) -> None:
-        self._logger.info(self._fmt(event, kw))
+    def info(self, _message: str, **kw: Any) -> None:
+        self._logger.info(self._fmt(_message, kw))
 
-    def warning(self, event: str, **kw: Any) -> None:
-        self._logger.warning(self._fmt(event, kw))
+    def warning(self, _message: str, **kw: Any) -> None:
+        self._logger.warning(self._fmt(_message, kw))
 
-    def error(self, event: str, **kw: Any) -> None:
-        self._logger.error(self._fmt(event, kw))
+    def error(self, _message: str, **kw: Any) -> None:
+        self._logger.error(self._fmt(_message, kw))
 
-    def exception(self, event: str, **kw: Any) -> None:
-        self._logger.exception(self._fmt(event, kw))
+    def exception(self, _message: str, **kw: Any) -> None:
+        self._logger.exception(self._fmt(_message, kw))
 
     def bind(self, **kw: Any) -> _StdlibStructAdapter:
         """structlog 兼容占位 — 标准库模式下忽略绑定上下文。"""
