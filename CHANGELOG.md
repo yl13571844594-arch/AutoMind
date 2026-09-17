@@ -204,6 +204,17 @@ ReAct / Plan 两条路由 LLM 在**运行时**决定步骤；FDE 要交付给客
 已改名为 `_message` 并加用例锁住五个级别。
 （这个坑只在**没装 structlog** 的降级路径上出现，而那是刻意支持的路径。）
 
+### 修复 — 出站事件发往本机/内网时不再被系统代理截走
+
+`webhooks` 的真实传输用的是 `urllib.request.urlopen`，它会读取 `HTTP_PROXY` /
+`HTTPS_PROXY` 与 Windows 系统代理设置 —— 而 webhook 的目标经常恰恰是**本机或
+内网的收集器**（客户自建的告警接收端、本机调试用的 `127.0.0.1`）。把发往
+`127.0.0.1` 的请求交给代理，后果是代理直接断连（实测 `RemoteDisconnected`），
+而现象看起来完全像"对端服务有问题"，排查方向会被彻底带偏。
+
+- **🔌 本机/私网目标直连**（`ProxyHandler({})`），公网目标沿用系统代理设置；
+  `localhost` / 回环 / 私网 / 链路本地地址都识别。
+
 ### 测试
 
 - 新增 11 个测试文件、700+ 用例：token 预算链路、命令分段、敏感路径、管理分权、
@@ -211,6 +222,10 @@ ReAct / Plan 两条路由 LLM 在**运行时**决定步骤；FDE 要交付给客
   工作流（208，含 4 条真子进程用例）。
 - 全量回归：社区 `python -m pytest -q`、`ruff check .`、`pro/tests`、
   前端 `tsc --noEmit` + `vite build` 全绿；`dist` 已重建。
+- 三平台 CI 上暴露的两处**测试自身**的跨平台问题也已修：`tmp_path` 在
+  macOS 是符号链接（`/var`→`/private/var`）、Windows CI 是 `RUNNER~1` 短名，
+  替身未 resolve 会被判成"路径越界"；以及读了只在 Windows 存在的
+  `os.environ["TEMP"]`（POSIX `KeyError`）。
 
 ### 说明
 
