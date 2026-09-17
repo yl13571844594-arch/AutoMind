@@ -531,9 +531,15 @@ class TestRunSuite:
         out = report.write(tmp_path / "sub" / "report.json")
         assert json.loads(out.read_text(encoding="utf-8"))["suite"] == "s"
 
-    async def test_data_dir_is_isolated_and_restored(self):
+    async def test_data_dir_is_isolated_and_restored(self, tmp_path):
+        """隔离目录要能还原环境变量。
+
+        用 ``tmp_path`` 而不是 ``os.environ["TEMP"]``：后者**只在 Windows 上存在**，
+        在 Linux/macOS 上直接 ``KeyError``（CI 上实测就是这个原因红的）。
+        隔离逻辑本身与平台无关，测试也不该只在某个平台上能跑。
+        """
         before = os.environ.get("AUTOMIND_DATA_DIR")
-        with runner.isolated_data_dir(Path(os.environ["TEMP"])) as d:
+        with runner.isolated_data_dir(Path(tmp_path)) as d:
             assert os.environ["AUTOMIND_DATA_DIR"] == str(d)
         assert os.environ.get("AUTOMIND_DATA_DIR") == before
 

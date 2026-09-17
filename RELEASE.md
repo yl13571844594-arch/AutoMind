@@ -46,6 +46,32 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 脚本会自动**审计**产物：任何产物中出现 `automind_pro`、许可证、
 `.automind_config.json` 等敏感/商业内容即构建失败。
 
+> **v1.7.3 提示（本机实测）**：`python -m build` 可能**卡住不返回** ——
+> 进程阻塞、CPU 0.2s、十分钟以上无任何输出（不是慢，是卡在子进程/后端调用上）。
+> 绕开办法是在**进程内**直接调用 PEP 517 后端，产物完全一致：
+>
+> ```bash
+> python -u -c "import setuptools.build_meta as b; print(b.build_sdist('dist')); print(b.build_wheel('dist'))"
+> ```
+>
+> 再跑 `python scripts/build_community.py` 补"源码包 + 审计"两步即可
+> （该脚本内部仍会调一次 `python -m build`）。
+> 另外 `[tool.setuptools.packages.find]` 已加 `exclude`（`web/`、`desktop/`、
+> `promo/`…）：`find_packages(where=".")` 会递归遍历整个工作区去找
+> `__init__.py`，包括 `web/node_modules` 与 `desktop/dist` 里 playwright 的
+> 90MB 二进制 —— **打包器看的是文件系统，不是 .gitignore**。
+
+**v1.7.3 已构建并审计通过**（2026-09-17，`twine check` PASSED）：
+
+| 产物 | 大小 | sha256 |
+|---|---|---|
+| `automind_agent-1.7.3-py3-none-any.whl` | 1191 KB | `227080c31e86364d6236cdf16389a74d9739c497760ab5883fc4e29d4ca4034a` |
+| `automind_agent-1.7.3.tar.gz` | 1143 KB | `3d50224755bb372438362c7cf29f797b93e82ff15f603a6d410533311a46f2c6` |
+| `automind-community-1.7.3-src.zip` | 2817 KB | `bfe8d80bd9bb466c1a9a5fb1190410005e4936c26f2aca79bff1448e1704bdc9` |
+
+> 上传 PyPI 仍需先按「上传 PyPI（社区版）」一节配好 Trusted Publisher，
+> 或用本机 twine（`dist/automind_agent-1.7.3-*` 已就绪）。
+
 ## 构建商业版（内部）
 
 ```bash

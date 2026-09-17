@@ -26,6 +26,8 @@ Web 侧的文件端点只校验"路径在不在 project_root 之内"，而默认
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from automind.core.sensitive import SCOPE_TOOL, SCOPE_WEB, is_denied, reason
@@ -165,10 +167,17 @@ def test_other_values_do_not_release_the_guard(monkeypatch, value):
 
 
 def test_editor_endpoints_are_wired(tmp_path, monkeypatch):
-    """``_editor_target`` 必须真的调用判定 —— 定义了不接线等于没修。"""
+    """``_editor_target`` 必须真的调用判定 —— 定义了不接线等于没修。
+
+    ``_editor_root`` 的替身必须给**已解析**的路径：``_editor_target`` 会把目标
+    ``resolve()``，而 macOS 上 ``/var`` 是指向 ``/private/var`` 的符号链接、
+    Windows CI 的临时目录是 ``RUNNER~1`` 这种 8.3 短名 —— 两边不 resolve 就会被
+    判成"路径超出项目目录范围"，看起来像分权拦错了，其实是替身给错了基准。
+    （产品侧本来就 resolve，见 ``server.py`` 的 ``_editor_root``。）
+    """
     import automind.server as srv
 
-    monkeypatch.setattr(srv, "_editor_root", lambda: tmp_path)
+    monkeypatch.setattr(srv, "_editor_root", lambda: Path(tmp_path).resolve())
     secret = tmp_path / ".automind_config.json"
     secret.write_text('{"api_keys": {"deepseek": "sk-xxx"}}', encoding="utf-8")
     ok = tmp_path / "app.py"
@@ -177,7 +186,7 @@ def test_editor_endpoints_are_wired(tmp_path, monkeypatch):
     target, err = srv._editor_target(".automind_config.json")
 
     assert target is None and err, "密钥文件竟然通过了编辑器端点"
-    assert srv._editor_target("app.py")[0] == ok
+    assert srv._editor_target("app.py")[0] == ok.resolve()
 
 
 def test_preview_endpoint_is_wired(tmp_path, monkeypatch):

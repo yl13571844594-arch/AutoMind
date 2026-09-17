@@ -397,6 +397,38 @@ def _headers_for(target: WebhookTarget, body: bytes, event: str,
 Transport = Callable[[str, bytes, dict[str, str], float], "tuple[int, str] | Any"]
 
 
+def _direct_opener() -> Any:
+    """一个**不使用任何代理**的 opener（按需构造）。
+
+    为什么必须显式绕开代理：``urllib.request.urlopen`` 默认会读取
+    ``HTTP_PROXY``/``HTTPS_PROXY`` 与 Windows 系统代理设置 —— 而 webhook 的
+    目标经常就是**内网/本机**的收集器（客户自建的告警接收端、本机调试用的
+    ``127.0.0.1``）。把发往 127.0.0.1 的请求交给代理，结果是代理直接断连
+    （实测：``RemoteDisconnected``），而且**看起来像"对端服务有问题"**，
+    排查方向完全被带偏。企业内网里这条路径是常态，不是边角情况。
+    """
+    import urllib.request
+
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _is_local_target(url: str) -> bool:
+    """目标是否指向本机/私网（这类目标不该走代理）。"""
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except Exception:                                   # pragma: no cover - 防御性
+        return False
+    if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    import ipaddress
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host.endswith(".local") or host.endswith(".internal")
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
 def _urllib_transport(url: str, body: bytes, headers: dict[str, str],
                       timeout: float) -> tuple[int, str]:
     """真实传输：标准库 urllib（不额外引入 httpx 依赖）。
@@ -418,8 +450,10 @@ def _urllib_transport(url: str, body: bytes, headers: dict[str, str],
     #     FastAPI ``request.headers`` / Node ``req.headers`` 都是小写化后取值）；
     #   · 任何"照抄文档大小写、再用裸 dict 精确匹配"的写法都会踩坑。
     req.unredirected_hdrs.update(headers)
+    # 本机/内网目标直连（见 _direct_opener 的说明）；公网目标沿用系统代理设置
+    opener = _direct_opener() if _is_local_target(url) else urllib.request.build_opener()
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:   # noqa: S310
+        with opener.open(req, timeout=timeout) as resp:              # noqa: S310
             return int(getattr(resp, "status", 200) or 200), resp.read(
                 _MAX_RESP_SNIPPET).decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
