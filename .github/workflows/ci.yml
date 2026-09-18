@@ -105,12 +105,17 @@ jobs:
         #
         # v1.7.3：加 `--timeout`（pytest-timeout，dev extra 里）与 `--durations`。
         # 为什么必须加：一旦某个用例挂住，"挂在哪"在日志里是**完全看不出来**的 ——
-        # 只有一条迟迟不结束的 job。逐用例超时会把堆栈打出来（点名到具体用例与
-        # 卡住的那一行），`--durations` 则把最慢的一批列出来，便于顺藤摸瓜。
+        # 只有一条迟迟不结束的 job。逐用例超时会给出行号级堆栈，
+        # `--durations` 则把最慢的一批列出来。
+        #
+        # 用 `-v` 而不是 `-q`：`thread` 模式的超时转储里**没有用例名**，而 `-v`
+        # 会按顺序打印每条用例的 id —— 于是"最后一条已完成的用例"之后的那一条
+        # 就是挂住的那个，可以确定性地定位，不用靠猜（1750 行日志换一次精确归因，
+        # 值）。定位到之后可以再改回 `-q`。
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
-        run: pytest tests/ -q --timeout=180 --timeout-method=thread --durations=15
+        run: pytest tests/ -v --timeout=180 --timeout-method=thread --durations=15
 
   # ── 2. 商业扩展包（automind-pro）───────────────────────
   #
