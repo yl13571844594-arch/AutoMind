@@ -139,10 +139,11 @@ pip install "automind-agent[web]"     # Web + OpenAI-compatible backends
 # Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
 ```
 
-> ⚠️ **PyPI currently lags behind this repository.** The newest release on PyPI is
-> `1.3.2` because the project's PyPI Trusted Publisher registration is still pending;
-> the packages themselves build and pass audit on every release. Until that is resolved,
-> use the installers or a source install to get the latest version.
+> ✅ **PyPI is up to date**: `pip install -U "automind-agent[web]"` gets you the same
+> version as this repository. Desktop installers live on
+> [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+> (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`),
+> and each release ships a `SHA256SUMS` file you can check with `sha256sum -c`.
 
 ```bash
 # Start the Web workbench (recommended)
@@ -275,6 +276,7 @@ every tool call (allowed / needs confirmation / dangerous). Destructive commands
 | `AUTOMIND_RATE_LIMIT` | Per-client per-minute limit for `/api/run` (0 = off) |
 | `AUTOMIND_REDACT_SECRETS` | Redact API keys / tokens in task output |
 | `AUTOMIND_ALLOWED_ORIGINS` | WebSocket `Origin` allowlist |
+| `AUTOMIND_TRUSTED_HOSTS` | Extra `Host` names allowed to reach the service (comma-separated, `*.example.com` supported). Needed behind a reverse proxy / tunnel; loopback names always work |
 
 ```bash
 export AUTOMIND_AUTH_TOKEN="your-secret-token"

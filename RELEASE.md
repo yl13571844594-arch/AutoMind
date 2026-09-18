@@ -54,30 +54,87 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > python -u -c "import setuptools.build_meta as b; print(b.build_sdist('dist')); print(b.build_wheel('dist'))"
 > ```
 >
-> 再跑 `python scripts/build_community.py` 补"源码包 + 审计"两步即可
-> （该脚本内部仍会调一次 `python -m build`）。
+> 再补"源码包 + 审计"两步即可（`scripts/build_community.py` 内部仍会调一次
+> `python -m build`，v1.7.4 实测仍会卡住，故那两步单跑：`build_source_zip()`
+> 与 `audit()`）。
 > 另外 `[tool.setuptools.packages.find]` 已加 `exclude`（`web/`、`desktop/`、
 > `promo/`…）：`find_packages(where=".")` 会递归遍历整个工作区去找
 > `__init__.py`，包括 `web/node_modules` 与 `desktop/dist` 里 playwright 的
 > 90MB 二进制 —— **打包器看的是文件系统，不是 .gitignore**。
 
-**v1.7.3 已构建并审计通过**（2026-09-18 重打，`twine check` PASSED）：
+**v1.7.4 已构建并审计通过**（2026-09-18，`twine check` PASSED）：
 
 | 产物 | 大小 | sha256 |
 |---|---|---|
-| `automind_agent-1.7.3-py3-none-any.whl` | 1194 KB | `487e3e01e2df2901acc83dd78857d22cae2579c30aace365d5f6451e51bf0fe4` |
-| `automind_agent-1.7.3.tar.gz` | 1146 KB | `4dc840e30cd252c1fe57452389b50bb3cce77e9bd36d5184f79a31399febecb5` |
-| `automind-community-1.7.3-src.zip` | 2826 KB | `a0c99a7d3389d94593e5bfa46b96aaa764d8c2a3a4daec6f97cd563ed48537ac` |
+| `automind_agent-1.7.4-py3-none-any.whl` | 1200 KB | `9a9f5e2ec6091117277567e6f6bc53fdece4c578cbba31474aadce31d6fa74cf` |
+| `automind_agent-1.7.4.tar.gz` | 1156 KB | `33ed9297f99971f4c4e0f179b5b83f14a5a187e1b874b717ed919d9c444b7aea` |
+| `automind-community-1.7.4-src.zip` | 2846 KB | `5be9899447a86c1b9eb0e67b4b564490912e4c0f43cc9fe553e11d8c478f93f5` |
 
-> **为什么重打过一次**：首次构建（09-17 23:23）之后才修掉"py3.11 上 webhook
-> 投递协程取消不干净导致 CI 挂死"这个缺陷（commit `843d933`）。旧产物里**不含**
-> 该修复，若照旧上传，PyPI 上的 1.7.3 与仓库里的 1.7.3 会是两份不同的代码 ——
-> 这类"发出去的和修好的不是同一个东西"必须避免。重打后已逐项核验：
-> wheel 内 `automind/core/webhooks.py` 带 `_IDLE_POLL_S` 轮询、`aclose` 已导出、
-> `background.py` 带取消修复，且 Web 静态资源 / 评测套件 / 工作流 / 连接器模块都在包内。
+> v1.7.4 核验项：wheel 内 `automind/core/http_guard.py` 在包内且 `server.py`
+> 已接线（`_host_allowed` + `host_denied` 日志）、`updater._SUMS_ASSETS` 认两个
+> 校验和名字、`env_detector` 捕获 `OSError`、Web 静态资源为本次前端构建产物；
+> 三份产物内均无绝对路径泄漏（`Administrator`/`Desktop` 零命中）。
 
 > 上传 PyPI 仍需先按「上传 PyPI（社区版）」一节配好 Trusted Publisher，
-> 或用本机 twine（`dist/automind_agent-1.7.3-*` 已就绪）。
+> 或用本机 twine（`dist/automind_agent-1.7.4-*` 已就绪）。
+
+## 构建桌面三平台安装包
+
+| 平台 | 怎么来 | 产物 | 签名 |
+|---|---|---|---|
+| Windows | **本机** `desktop\build_release.ps1 -SkipWeb` | `desktop\Output\AutoMind-Setup-<ver>.exe` | Certum 代码签名证书（本机证书存储）+ RFC3161 时间戳 |
+| macOS | CI `desktop-build.yml`（`workflow_dispatch`） | `AutoMind-<ver>.dmg`（通用二进制） | 配了 `MAC_CERT_P12_BASE64` 等 secrets 才签名；未配则 ad-hoc，DMG 仍可安装 |
+| Linux | 同上 | `automind_<ver>_amd64.deb` | 无（deb 不做签名） |
+
+Windows 包**必须本机构建**：CI 产的既未签名、也不含内嵌 WebView2 引导器，
+`desktop-build.yml` 因此刻意不 attach 它（历史上出过"CI 未签名版覆盖已签名版"的事故）。
+
+```powershell
+cd desktop
+$env:AUTOMIND_CERT_THUMBPRINT = "<证书指纹>"
+.\build_release.ps1 -SkipWeb      # 前端没改时跳过重建
+```
+
+> 证书指纹查看：`Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert`。
+> 构建末尾会**自动验签**（主程序 + 安装包都必须 `Valid`），不通过直接失败。
+
+**装完必须冒烟**（冻结包里少一个 datas 是"能装能开、一用就错"的典型来源）：
+
+```powershell
+$p = Start-Process -PassThru .\dist\AutoMind\AutoMind.exe -ArgumentList "--server-only","--port","18766"
+Invoke-WebRequest http://127.0.0.1:18766/api/health -UseBasicParsing | Select-Object -Expand Content
+Stop-Process -Id $p.Id -Force
+```
+
+`/api/health` 里 `version` 必须等于本次版本号、`edition` 必须是 `community`。
+
+## 本地归档与上传 Release
+
+**先在本地凑齐三平台包，再一次性建 Release**（避免"发布页上缺一个平台"的中间态）：
+
+```powershell
+# 1) Windows 包进 dist\desktop\
+Copy-Item desktop\Output\AutoMind-Setup-<ver>.exe dist\desktop\ -Force
+# 2) 下载 CI 的 macOS / Linux 产物
+gh run download <run-id> --dir $env:TEMP\automind-release-<ver>
+Copy-Item <dmg> dist\desktop\ ; Copy-Item <deb> dist\desktop\
+# 3) 校验和（文件名必须是 SHA256SUMS，见下节）
+# 4) 建 Release：tag 随之创建
+gh release create v<ver> --title "AutoMind v<ver>" --notes-file dist\release_notes_v<ver>.md `
+  dist\desktop\AutoMind-Setup-<ver>.exe <dmg> <deb> `
+  dist\desktop\SHA256SUMS dist\desktop\RELEASE-INFO.txt `
+  dist\automind_agent-<ver>-py3-none-any.whl dist\automind_agent-<ver>.tar.gz `
+  dist\automind-community-<ver>-src.zip
+```
+
+**本机留档**：三平台包与校验和同时复制一份到 `dist\releases\v<ver>\`
+（按版本分目录，便于日后回溯"这一版到底发了什么"）。
+`dist/` 已在 `.gitignore` 内 —— 留档是本地行为，不进版本库。
+
+> ⚠️ **建 Release = 建 tag**，而 tag 会同时触发 `publish.yml`（PyPI）与
+> `desktop-build.yml`。PyPI 未配 Trusted Publisher 时 `publish` 作业会红 ——
+> 那是"没配"，不是"发坏了"；桌面包本身由上面的手工上传保证齐全。
+> 若本次不想动 PyPI，别用 `git push --tags`，让 tag 只随 Release 创建。
 
 ## 构建商业版（内部）
 

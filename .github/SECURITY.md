@@ -8,8 +8,8 @@ Only the latest minor release receives security fixes. Please upgrade before rep
 
 | 版本 / Version | 支持状态 / Supported |
 |---|---|
-| 1.6.x | ✅ |
-| < 1.6 | ❌ |
+| 1.7.x | ✅ |
+| < 1.7 | ❌ |
 
 ## 报告漏洞 / Reporting a Vulnerability
 
@@ -52,4 +52,7 @@ AutoMind 会**在你的机器上执行命令、读写文件、访问网络**，�
 - 绕过权限引擎的路径限制读写项目目录之外的文件（路径穿越）；
 - 绕过 Python 沙箱访问文件系统 / 网络 / 子进程；
 - 未授权访问已启用令牌的实例，或令牌泄漏到日志 / 响应体；
+- **未授权访问默认配置（绑回环、未设令牌）的实例** —— 包括 DNS 重绑定、
+  恶意网页经 WebSocket 驱动本机 Agent 这类"请求看起来来自本机"的手法。
+  服务以 `Host` 判定本机身份（v1.7.4 起），回环地址之外的 `Host` 一律 403；
 - API Key、令牌等敏感信息未被脱敏地写入日志、审计记录或前端。

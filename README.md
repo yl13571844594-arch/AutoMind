@@ -130,9 +130,10 @@ pip install "automind-agent[web]"     # Web + OpenAI 兼容后端
 # 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
 ```
 
-> ⚠️ **PyPI 上的版本目前落后于本仓库。** PyPI 最新为 `1.3.2` —— 项目的 PyPI
-> Trusted Publisher 登记尚未完成，发布流水线的构建与审计每次都通过、只卡在最后
-> 一步上传。在此之前，想用最新版请走**方式 A 或方式 B**。
+> ✅ **PyPI 已同步至最新版**：`pip install -U "automind-agent[web]"` 拿到的就是本仓库
+> 当前版本。桌面安装包见 [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+> （Windows `.exe` 已代码签名 · macOS `.dmg` 通用二进制 · Linux `.deb`），
+> 三平台包的 `SHA256SUMS` 随 Release 一并提供，可直接 `sha256sum -c` 校验。
 
 ```bash
 # 启动 Web 工作台（推荐）
@@ -288,6 +289,11 @@ docker compose up --build
   ```
 
   前端请求需带 `Authorization: Bearer <token>`，WebSocket 用 `ws://host/ws?token=<token>`。
+- **Host 准入（v1.7.4）**：所有"仅本机允许"的判定（管理动作 / 目录浏览 / 令牌端点）
+  以请求头 `Host` 为准 —— 挡住了 **DNS 重绑定**（把外部域名解析到 `127.0.0.1`，
+  借"IP 是回环"冒充本机）。从 `localhost` / `127.0.0.1` 访问无感；
+  走反向代理、隧道或内网域名的，把域名写进 `AUTOMIND_TRUSTED_HOSTS`
+  （逗号分隔，支持 `*.example.com`），否则会被 403 —— 报错文案里会写明怎么填。
 - **健康检查**：`GET /api/health`（无需鉴权）返回版本、运行任务数、并发上限、uptime，供探活/负载均衡。
 - **资源保护**：并发任务超过 `AUTOMIND_MAX_CONCURRENT` 时返回 429。
 
