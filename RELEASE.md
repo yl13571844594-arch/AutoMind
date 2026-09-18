@@ -61,13 +61,20 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > `__init__.py`，包括 `web/node_modules` 与 `desktop/dist` 里 playwright 的
 > 90MB 二进制 —— **打包器看的是文件系统，不是 .gitignore**。
 
-**v1.7.3 已构建并审计通过**（2026-09-17，`twine check` PASSED）：
+**v1.7.3 已构建并审计通过**（2026-09-18 重打，`twine check` PASSED）：
 
 | 产物 | 大小 | sha256 |
 |---|---|---|
-| `automind_agent-1.7.3-py3-none-any.whl` | 1191 KB | `227080c31e86364d6236cdf16389a74d9739c497760ab5883fc4e29d4ca4034a` |
-| `automind_agent-1.7.3.tar.gz` | 1143 KB | `3d50224755bb372438362c7cf29f797b93e82ff15f603a6d410533311a46f2c6` |
-| `automind-community-1.7.3-src.zip` | 2817 KB | `bfe8d80bd9bb466c1a9a5fb1190410005e4936c26f2aca79bff1448e1704bdc9` |
+| `automind_agent-1.7.3-py3-none-any.whl` | 1194 KB | `487e3e01e2df2901acc83dd78857d22cae2579c30aace365d5f6451e51bf0fe4` |
+| `automind_agent-1.7.3.tar.gz` | 1146 KB | `4dc840e30cd252c1fe57452389b50bb3cce77e9bd36d5184f79a31399febecb5` |
+| `automind-community-1.7.3-src.zip` | 2826 KB | `a0c99a7d3389d94593e5bfa46b96aaa764d8c2a3a4daec6f97cd563ed48537ac` |
+
+> **为什么重打过一次**：首次构建（09-17 23:23）之后才修掉"py3.11 上 webhook
+> 投递协程取消不干净导致 CI 挂死"这个缺陷（commit `843d933`）。旧产物里**不含**
+> 该修复，若照旧上传，PyPI 上的 1.7.3 与仓库里的 1.7.3 会是两份不同的代码 ——
+> 这类"发出去的和修好的不是同一个东西"必须避免。重打后已逐项核验：
+> wheel 内 `automind/core/webhooks.py` 带 `_IDLE_POLL_S` 轮询、`aclose` 已导出、
+> `background.py` 带取消修复，且 Web 静态资源 / 评测套件 / 工作流 / 连接器模块都在包内。
 
 > 上传 PyPI 仍需先按「上传 PyPI（社区版）」一节配好 Trusted Publisher，
 > 或用本机 twine（`dist/automind_agent-1.7.3-*` 已就绪）。
