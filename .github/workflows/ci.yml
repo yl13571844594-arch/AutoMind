@@ -62,6 +62,11 @@ jobs:
   test:
     name: 测试 (${{ matrix.os }} · py${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
+    # v1.7.3：**挂住的测试必须自己暴露出来**。
+    # 起因：某个平台上的 job 从 2 分钟变成 40 分钟以上不结束，而 GitHub 的
+    # 默认上限是 6 小时 —— 期间"红还是绿"完全不可知，等于这道门暂时失效。
+    # 上限 + 逐用例超时（见下）一起，把"看不见的挂住"变成"3 分钟内点名报到"。
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -87,17 +92,25 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
-          pip install ruff
+          # pytest-timeout 已进 dev extra，这里再显式装一次：`--timeout=` 是
+          # **硬参数**，插件缺席会让整个测试作业以"unrecognized arguments"直接死掉
+          # —— 那种失败看起来像"测试全挂"，与真正的问题毫无关系。
+          pip install ruff pytest-timeout
 
       - name: Lint (ruff)
         run: ruff check .
 
       - name: Run tests
         # 中文输出在 Windows 控制台默认 GBK 下会崩，CI 里显式锁 UTF-8
+        #
+        # v1.7.3：加 `--timeout`（pytest-timeout，dev extra 里）与 `--durations`。
+        # 为什么必须加：一旦某个用例挂住，"挂在哪"在日志里是**完全看不出来**的 ——
+        # 只有一条迟迟不结束的 job。逐用例超时会把堆栈打出来（点名到具体用例与
+        # 卡住的那一行），`--durations` 则把最慢的一批列出来，便于顺藤摸瓜。
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
-        run: pytest tests/ -q
+        run: pytest tests/ -q --timeout=180 --timeout-method=thread --durations=15
 
   # ── 2. 商业扩展包（automind-pro）───────────────────────
   #

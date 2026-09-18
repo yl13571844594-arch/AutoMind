@@ -111,6 +111,10 @@ dev = [
     "mutagen>=1.47",
     "pytest>=8.0",
     "pytest-asyncio>=0.23.0",
+    # v1.7.3：逐用例超时。CI 里"某个用例挂住"此前是完全不可见的 ——
+    # 只有一条迟迟不结束的 job（GitHub 默认给 6 小时），期间这道门形同虚设。
+    # 装上它之后 `pytest --timeout=180` 会把堆栈打出来，指名道姓说卡在哪。
+    "pytest-timeout>=2.3",
 ]
 # 桌面版打包（Windows/macOS/Linux 通用；平台窗口/托盘后端见下）
 #   pywebview 后端：Windows=WebView2 内置，macOS=pyobjc（随 pywebview 装），
