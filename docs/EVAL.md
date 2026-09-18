@@ -1,6 +1,6 @@
 # 评测与可重放轨迹（Evaluation & Replay）
 
-> 版本：v1.7.3 · 相关代码：`automind/eval/`、`automind/core/replay.py`
+> 版本：v1.7.4 · 相关代码：`automind/eval/`、`automind/core/replay.py`
 
 这份文档回答四个问题：**为什么要评测**、**怎么跑冒烟评测**、**怎么写自己的套件**、
 **怎么把它接进 CI**；最后两节讲报告字段与常见的坑。

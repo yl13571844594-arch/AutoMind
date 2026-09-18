@@ -1,4 +1,4 @@
-﻿# AutoMind 社区版 GitHub 发布 —— 认证之后一键跑完。
+# AutoMind 社区版 GitHub 发布 —— 认证之后一键跑完。
 #
 # 用法（先且仅需做一次交互式登录）：
 #   gh auth login                       # 走浏览器/设备码，凭据进系统凭据管理器
@@ -138,21 +138,37 @@ Write-Host "`n提示：若未配置 MAC_NOTARY_* secrets，DMG 为「已签名�
 Write-Host "      用户首次打开需右键 → 打开。" -ForegroundColor Yellow
 
 # ── 4) 重算校验和 ──────────────────────────────────────────
-Step "生成 SHA256SUMS"
-$sumFile = "dist\desktop\SHA256SUMS.txt"
-$header = @(
-    "# AutoMind v$ver 桌面安装包校验和",
-    "# Windows 包已用 Certum 代码签名证书签署，含 RFC3161 时间戳。",
-    "# macOS/Linux 包由 GitHub Actions 构建（见仓库 desktop-build.yml）。"
-)
+# 文件名必须是 `SHA256SUMS`（不带扩展名）：automind/core/updater.py 的
+# `_SUMS_ASSET` 找的就是这个名字，它是"下载后校验镜像内容"的基线。
+# v1.7.3 及更早的 Release 里叫 `SHA256SUMS.txt`，于是自动更新每次都走
+# "未提供校验和，跳过" 那条分支 —— 哈希这一层从未生效过（字节数与签名仍在校验）。
+# 自 v1.7.4 起改为官方名字；updater 侧同时认两个名字，老 Release 不再失校。
+$sumName = "SHA256SUMS"
+Step "生成 $sumName"
+# 文件内容**只放校验和行**，不放任何注释：注释行会让 `Get-FileHash` 之外的
+# 标准校验器（`sha256sum -c`、updater 的解析器）读不懂，用户照着做会得到
+# "格式错误"而不是"校验通过"。说明性文字放 RELEASE-INFO.txt。
 $lines = @()
 foreach ($f in Get-ChildItem "dist\desktop" -Include *.exe,*.dmg,*.deb -Recurse) {
     $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
     $lines += "$h  $($f.Name)"
     Write-Host "  $h  $($f.Name)"
 }
-# 用 UTF8 无 BOM 写，避免下游校验工具把 BOM 当成内容
-[System.IO.File]::WriteAllLines((Join-Path $repoRoot $sumFile), ($header + $lines))
+# 用 UTF8 无 BOM 写：BOM 会被下游校验工具当成内容（本仓库为换行符踩过一次同类坑）
+$sumFile = "dist\desktop\$sumName"
+[System.IO.File]::WriteAllLines((Join-Path $repoRoot $sumFile), $lines)
+
+$infoFile = "dist\desktop\RELEASE-INFO.txt"
+$info = @(
+    "AutoMind v$ver 桌面安装包",
+    "",
+    "Windows : $(Split-Path $winExe -Leaf)  — Certum 代码签名证书签署，含 RFC3161 时间戳",
+    "macOS   : $($dmg.Name)  — GitHub Actions 构建（desktop-build.yml），通用二进制",
+    "Linux   : $($deb.Name)  — GitHub Actions 构建（desktop-build.yml），Debian/Ubuntu amd64",
+    "",
+    "校验：sha256sum -c $sumName   （或 Get-FileHash -Algorithm SHA256 <文件>）"
+)
+[System.IO.File]::WriteAllLines((Join-Path $repoRoot $infoFile), $info)
 
 # ── 5) 建草稿 Release 并上传 ───────────────────────────────
 Step "创建草稿 Release 并上传三平台安装包"
@@ -167,12 +183,14 @@ $notes = @"
 | macOS | ``$($dmg.Name)`` | 通用二进制（Apple Silicon + Intel） |
 | Linux | ``$($deb.Name)`` | Debian / Ubuntu，amd64 |
 
-校验和见 ``SHA256SUMS.txt``。完整变更见 [CHANGELOG.md](https://github.com/yl13571844594-arch/AutoMind/blob/main/CHANGELOG.md)。
+校验和见 ``$sumName``（格式与 ``sha256sum`` 一致，可直接 ``sha256sum -c $sumName``）。
+完整变更见 [CHANGELOG.md](https://github.com/yl13571844594-arch/AutoMind/blob/main/CHANGELOG.md)。
 "@
 $notesFile = Join-Path $tmp "notes.md"
 [System.IO.File]::WriteAllText($notesFile, $notes)
 
-$assets = @($winExe, "dist\desktop\$($dmg.Name)", "dist\desktop\$($deb.Name)", $sumFile)
+$assets = @($winExe, "dist\desktop\$($dmg.Name)", "dist\desktop\$($deb.Name)",
+            $sumFile, $infoFile)
 gh release create "v$ver" $assets --draft --title "AutoMind v$ver" --notes-file $notesFile
 if ($LASTEXITCODE -ne 0) { Fail "创建 Release 失败" }
 

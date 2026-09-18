@@ -1,4 +1,4 @@
-# 发布流程（当前版本 v1.7.3）
+# 发布流程（当前版本 v1.7.4）
 
 > 各版本变更明细见 [CHANGELOG.md](CHANGELOG.md)。本文档为**发布操作手册**，
 > 与具体版本号解耦 —— 下文 `<ver>` 以 `automind/__init__.py` 的
@@ -185,6 +185,27 @@ git push origin main
 git tag v<ver> && git push origin v<ver>
 # GitHub Releases 页基于该 tag 发布，正文粘贴 CHANGELOG 对应段落
 ```
+
+### ⚠️ 校验和资产必须叫 `SHA256SUMS`（v1.7.4 起）
+
+桌面包的自动更新有三重校验：字节数 / SHA256 / Authenticode 签名。其中 SHA256
+的基线来自 Release 上的校验和资产，而 `automind/core/updater.py` 找的是
+**`SHA256SUMS`**（不带扩展名）。
+
+v1.7.3 及更早的 Release 里这个资产叫 `SHA256SUMS.txt` —— 两侧名字差一个后缀，
+于是 `asset_sha256` 恒为空、`_verify_integrity()` 每次都走
+**"未提供校验和，跳过"**：不加日志、不报错，界面上照旧显示"三重校验"。
+隐蔽点在于**它不会坏**，只会让最该防篡改的那一层长期缺席。
+
+- 发布侧：`scripts/release_github.ps1` 现在产出 `SHA256SUMS`，且**文件里只放
+  校验和行**（注释行会让 `sha256sum -c` 报格式错误 —— 用户照着验证反而得到
+  "校验失败"）；说明文字移入 `RELEASE-INFO.txt`，两个文件都上传；
+- 更新侧：`_SUMS_ASSETS` 同时认 `SHA256SUMS` 与 `SHA256SUMS.txt`（官方名优先），
+  免得已经发布的版本为了一个文件名变成校验盲区；
+- 有测试钉住这条接线：`tests/test_updater.py::TestChecksumAssetWiring`。
+
+**手工建 Release 时同理**：上传的校验和文件必须命名为 `SHA256SUMS`，
+否则桌面版的自动更新会静默跳过哈希校验。
 
 ## 验证
 

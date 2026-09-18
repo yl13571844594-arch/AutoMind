@@ -1,6 +1,6 @@
 # 出站事件（Webhook）与外部审批回执
 
-> 适用版本：v1.7.3 第 8 项 ｜ 实现：`automind/core/webhooks.py` ｜ 测试：`tests/core/test_webhooks.py`
+> 适用版本：v1.7.3 第 8 项（v1.7.4 沿用） ｜ 实现：`automind/core/webhooks.py` ｜ 测试：`tests/core/test_webhooks.py`
 
 ## 1. 这个功能解决什么
 

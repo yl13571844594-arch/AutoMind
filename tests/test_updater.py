@@ -272,3 +272,107 @@ class TestSpawnCrossPlatform:
         monkeypatch.setattr(sp, "Popen", fake_popen)
         updater._spawn_installer(tmp_path / "apply_update.bat", tmp_path)
         assert seen["creationflags"] == want
+
+
+class TestChecksumAssetWiring:
+    """``SHA256SUMS`` 这条线必须真的通 —— v1.7.3 及更早它是**断的**。
+
+    症状：``asset_sha256`` 恒为空 → ``_verify_integrity`` 每次都走
+    "未提供校验和，跳过" 分支。字节数与 Authenticode 签名还在校验，
+    但"防篡改/防损坏"这一层从未生效；而 UI 与文档都在说"三重校验"。
+
+    根因是**两侧各写各的名字**：发布脚本产出 ``SHA256SUMS.txt``，
+    本模块找 ``SHA256SUMS``。这类"名字对不上"不会有任何报错，
+    只会在某天真的需要校验时才发现它从来没校验过。
+    """
+
+    def test_official_name_is_first_and_txt_still_recognised(self):
+        from automind.core import updater
+
+        assert updater._SUMS_ASSETS[0] == "SHA256SUMS", \
+            "官方资产名必须排第一 —— 它是发布脚本现在产出的名字"
+        assert "SHA256SUMS.txt" in updater._SUMS_ASSETS, \
+            "老 Release 用的是 .txt，去掉它等于让那些版本全部失去校验基线"
+
+    def test_parses_sha256sum_binary_and_text_formats(self):
+        from automind.core import updater
+
+        h = "a" * 64
+        assert updater._parse_sums(f"{h}  AutoMind-Setup-1.0.0.exe",
+                                   "AutoMind-Setup-1.0.0.exe") == h
+        assert updater._parse_sums(f"{h} *AutoMind-Setup-1.0.0.exe",
+                                   "AutoMind-Setup-1.0.0.exe") == h
+        # 路径形式：按 basename 匹配（脚本可能写成 dist/desktop/xxx）
+        assert updater._parse_sums(f"{h}  desktop/Output/AutoMind-Setup-1.0.0.exe",
+                                   "AutoMind-Setup-1.0.0.exe") == h
+
+    def test_parses_crlf_sums_file(self):
+        """文本模式写出的 ``\\r\\n`` 不能让校验失配（本仓库踩过同类坑）。"""
+        from automind.core import updater
+
+        h = "b" * 64
+        text = f"{h}  AutoMind-Setup-1.0.0.exe\r\n{'c' * 64}  other.exe\r\n"
+        assert updater._parse_sums(text, "AutoMind-Setup-1.0.0.exe") == h
+
+    def test_ignores_comment_lines_and_bad_digests(self):
+        from automind.core import updater
+
+        text = ("# AutoMind v1.7.3 桌面安装包校验和\n"
+                "not-a-hash  AutoMind-Setup-1.0.0.exe\n"
+                "\n")
+        assert updater._parse_sums(text, "AutoMind-Setup-1.0.0.exe") == ""
+
+    def test_fetch_falls_back_to_the_txt_asset(self, monkeypatch):
+        from automind.core import updater
+
+        h = "d" * 64
+        body = f"{h}  AutoMind-Setup-1.0.0.exe\n".encode()
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, *_a, **_k):
+            # 只有 .txt 资产存在（= 线上 1.7.3 之前的实况）
+            assert ".txt" in req.full_url, f"不该去取不存在的资产：{req.full_url}"
+            return _Resp(body)
+
+        monkeypatch.setattr(updater, "_open", fake_open)
+        assets = [{"name": "SHA256SUMS.txt",
+                   "browser_download_url": "https://github.com/x/SHA256SUMS.txt"}]
+        assert updater._fetch_sha256(assets, "AutoMind-Setup-1.0.0.exe") == h
+
+    def test_fetch_prefers_the_official_asset(self, monkeypatch):
+        from automind.core import updater
+
+        good, stale = "e" * 64, "f" * 64
+
+        class _Resp(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_open(req, *_a, **_k):
+            # 两个资产同时存在时，必须取官方名那个（.txt 只是兼容旧版本）
+            assert req.full_url.endswith("/SHA256SUMS"), req.full_url
+            return _Resp(f"{good}  AutoMind-Setup-1.0.0.exe\n".encode())
+
+        monkeypatch.setattr(updater, "_open", fake_open)
+        assets = [
+            {"name": "SHA256SUMS.txt",
+             "browser_download_url": "https://github.com/x/SHA256SUMS.txt"},
+            {"name": "SHA256SUMS",
+             "browser_download_url": "https://github.com/x/SHA256SUMS"},
+        ]
+        assert updater._fetch_sha256(assets, "AutoMind-Setup-1.0.0.exe") == good
+        assert good != stale
+
+    def test_no_sums_asset_at_all_is_not_a_crash(self):
+        from automind.core import updater
+
+        assert updater._fetch_sha256([], "AutoMind-Setup-1.0.0.exe") == ""

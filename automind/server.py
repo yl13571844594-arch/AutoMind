@@ -30,6 +30,7 @@ except ImportError:
     sys.exit(1)
 
 from automind import __version__
+from automind.core.http_guard import host_allowed as _host_allowed
 from automind.core.logging import get_logger
 from automind.server_web import apply_security_headers as _apply_security_headers
 from automind.server_web import dist_asset_refs as _dist_asset_refs
@@ -222,10 +223,32 @@ def _token_ok(provided: str, static_token: str) -> bool:
     return False
 
 
+def _host_ok(request) -> tuple[bool, str]:
+    """Host 头准入（v1.7.4）—— 判定逻辑与理由见 ``automind/core/http_guard.py``。
+
+    这里只做一件事：把请求头里的 Host 交给守卫。**优先看 ``Host`` 而不是
+    ``X-Forwarded-Host``** —— 后者是客户端可任意伪造的头，拿它当判据等于没有判据。
+    """
+    return _host_allowed(request.headers.get("host", ""))
+
+
 @app.middleware("http")
 async def _auth_middleware(request, call_next):
-    token = _auth_token()
     path = request.url.path
+
+    # Host 判定必须在令牌之前（v1.7.4）：它挡的是"外部域名被解析到本机"的
+    # DNS 重绑定 —— 那种请求的客户端 IP 是回环、Host 是攻击者域名，
+    # 而下游的管理动作放行、目录浏览放行、令牌端点全都在拿"回环 IP"当信任依据。
+    # 只挡 /api/ 会漏掉"重绑定页面直接开首页 → 前端脚本自己调 /api"这条路：
+    # 首页不是 /api/，但它的脚本是。故放在最前面，按整站判。
+    # WS 不受影响（本中间件只处理 HTTP；WS 有自己的 Origin 判定）。
+    host_ok, host_why = _host_ok(request)
+    if not host_ok:
+        logger.warning("host_denied", host=request.headers.get("host", "")[:120],
+                       client=request.client.host if request.client else "?")
+        return JSONResponse({"error": host_why}, status_code=403)
+
+    token = _auth_token()
     # 仅保护 /api/*；放开首页、文档、健康检查
     # /api/auth/login 放行：SSO 登录本身不能要求已持有令牌；
     # /v1/*（OpenAI 兼容，IDE 集成）与 /api/* 同等保护。

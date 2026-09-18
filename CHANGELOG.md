@@ -2,6 +2,86 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [1.7.4] - 2026-09-18
+
+**三处"看起来在防、其实没接上"的地方**
+
+这一版继续沿着 1.7.3 的主线走：把承诺与代码对齐。三处都有一个共同特征 ——
+**测试全绿、界面正常、文档写着有防护**，而防护本身从未生效。
+
+### 安全 — DNS 重绑定：判定"这是本机"的依据从 IP 换成 Host
+
+服务默认绑回环（`127.0.0.1`），此前据此认为"回环 == 本机用户"，并把管理动作
+（改 `api_base` / 加 MCP / 加载插件 = 任意代码 / 触发更新）、目录浏览、
+`/api/integrations/continue`（会吐明文令牌）都挂在这个判断上。
+
+**这个推理有一个反例**：攻击者让自己的域名先解析到自己的服务器（页面正常
+跑起来，Origin = 攻击者域名），TTL 归零后改成 `127.0.0.1`。浏览器再请求时
+**TCP 连的是本机、`Host` 却仍是攻击者域名** —— 于是 `request.client.host`
+是回环，上面每一项信任全部成立。而管理动作里那些 `POST` 是"简单请求"，
+浏览器不发预检，CORS 拦不住它们**已经生效**：`api_base` 一改，此后每次对话的
+提示词与 API Key 都从攻击者的地址过。
+
+- **判据换成本次请求的 `Host` 头**（浏览器自己按 URL 填，重绑定场景下必然是
+  攻击者的域名，伪造不了）：回环的各种写法（`localhost`、`127.0.0.1`、
+  `[::1]`、`127.0.0.0/8`、带端口、带尾点）正常放行；
+- **在令牌判定之前执行，且按整站判**（不只 `/api/`）—— 只保护 `/api/` 是漏的：
+  重绑定页面能先把**首页与其前端脚本**取回去，再由脚本去调 `/api`；
+- **逃生门**：反代 / 内网域名 / 隧道场景设 `AUTOMIND_TRUSTED_HOSTS`
+  （逗号分隔，支持 `*.example.com`）；403 文案里直接写明怎么放行，
+  不留一个没有出路的报错；
+- 绑 `0.0.0.0` 时不做 Host 判定 —— 那种部署 Host 只能是外部名字，
+  按 Host 拦会把正常用法全拦掉，准入交给 `auth_token`。
+
+### 修复 — 自动更新的 SHA256 校验从未生效（发布侧与更新侧各写各的文件名）
+
+`updater` 的三重校验里，"防篡改/防损坏"那一层要求从 Release 的
+`SHA256SUMS` 资产里取基线，而发布脚本产出的名字是 `SHA256SUMS.txt`：
+
+```python
+_SUMS_ASSET = "SHA256SUMS"        # updater 找的
+$sumFile = "dist\desktop\SHA256SUMS.txt"   # release_github.ps1 产出的
+```
+
+两侧名字对不上 → `asset_sha256` 恒为空 → `_verify_integrity()` 每次都走
+`"未提供校验和，跳过"` 这条分支。字节数与 Authenticode 签名还在校验，
+所以**一切看起来都正常** —— 只有哈希这一层是空的，而文档与界面都在说"三重校验"。
+
+- 发布脚本改为产出官方名字 `SHA256SUMS`，且**文件里只放校验和行**（注释行会让
+  `sha256sum -c` 报格式错误，用户照着做反而得到"校验失败"）；说明性文字移入
+  新增的 `RELEASE-INFO.txt`；
+- `updater` 同时认 `SHA256SUMS` 与 `SHA256SUMS.txt`，**已发布的旧版本不再失校**
+  （优先官方名，缺了才退到 `.txt`）；
+- 顺带修掉解析器对文本模式换行（`\r\n`）与 `sha256sum -c` 两种行格式
+  （`hash␠␠name` / `hash *name`）的容忍度 —— 这类"有校验和却校验不上"的
+  症状排起来极费时间。
+
+### 修复 — 环境探测的 `PermissionError` 会把"探不到"变成"起不来"
+
+`EnvironmentDetector._check_command()` 只捕获 `FileNotFoundError` 与
+`TimeoutExpired`，漏了同属 `OSError` 的 `PermissionError`：
+
+- Windows 上把**目录**放进 `PATH` 时 `CreateProcess` 抛
+  `PermissionError(WinError 5)`；
+- 受限令牌（应用容器 / 杀软拦截）同样抛 `PermissionError`。
+
+而这个调用发生在 `AutoMindAgent.__init__` 里 —— 抛出去就是**构造 Agent 失败**：
+界面白屏、任务全挂，根因却只是"环境里有个命令探不到"。探活函数的契约是
+回答"能不能用"（不能用 = `False`），不是把异常往上扔。
+
+- 改为捕获整个 `OSError`；`TimeoutExpired` 不是 `OSError` 子类，单独列出；
+- 探活失败**绝不返回 True** —— 那会让上层以为工具可用，然后在更远的地方炸；
+- 补了"整个环境里一个命令都起不来时 `detect()` 仍要给出结果"的用例。
+
+### 验证
+
+- 全量回归：`pytest tests/ -q`（本机 700+ 用例全绿）、`ruff check .` 零告警；
+- 新增用例：`tests/test_http_guard.py`、`tests/server/test_host_guard_wiring.py`
+  （Host 判定**真的挂在请求链路上**，而不是只测函数）、
+  `tests/test_env_detector_robustness.py`、`tests/test_updater.py` 的校验和接线组；
+- 桌面三平台安装包（Windows 签名版 / macOS 通用 DMG / Linux deb）随本版一并发布，
+  并在 Release 里附上 `SHA256SUMS` 与 `RELEASE-INFO.txt`。
+
 ## [1.7.3] - 2026-09-17
 
 **接线版本：把"写了但没通电"的六个环节接上，并补上交付真正缺的四件事**

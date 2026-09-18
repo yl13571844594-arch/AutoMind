@@ -60,6 +60,13 @@ _ASSET_PATTERNS = {
 }
 _ASSET_RE = _ASSET_PATTERNS["win32"]   # 兼容旧引用
 _SUMS_ASSET = "SHA256SUMS"
+#: 校验和资产的备选名。**这不是洁癖，是接线**：v1.7.3 及更早的 Release 里，
+#: 资产名是 ``SHA256SUMS.txt``（scripts/release_github.ps1 当年写的就是这个名字），
+#: 而本模块只找 ``SHA256SUMS`` —— 结果 ``asset_sha256`` 恒为空，
+#: ``_verify_integrity`` 每次都走"未提供校验和，跳过"这条分支：字节数与签名
+#: 还在校验，但**哈希这一层从来没有生效过**。发布侧已改为产出官方名字，
+#: 这里同时认两个名字，免得为了一个文件名把已发布的版本全变成校验盲区。
+_SUMS_ASSETS = (_SUMS_ASSET, "SHA256SUMS.txt")
 
 _ALLOWED_HOSTS = ("github.com", "api.github.com", "objects.githubusercontent.com",
                   "release-assets.githubusercontent.com", "githubusercontent.com")
@@ -193,22 +200,15 @@ def can_auto_install() -> bool:
     return _is_frozen() and sys.platform == "win32"
 
 
-def _fetch_sha256(assets: list[dict], filename: str) -> str:
-    """从 Release 的 SHA256SUMS 资产里取某个安装包的哈希；取不到返回空串。
+def _parse_sums(text: str, filename: str) -> str:
+    """从校验和文本里取某个文件的哈希；取不到返回空串。
 
-    **直连官方地址**取（不走镜像）：这是校验镜像内容的基线，自己必须来自可信源。
-    格式为 ``<hash> *<平台目录>/<文件名>``，按 basename 匹配。
+    容忍 ``sha256sum`` 的两种行格式：``<hash>  <name>``（二进制，两个空格）
+    与 ``<hash> *<name>``（文本模式，星号前缀），也容忍行尾 ``\\r`` ——
+    后者在本仓库踩过一次（文件按文本模式写出来变成 ``\\r\\r\\n``），
+    而 ``splitlines()`` 已经吃掉 ``\\n``，剩下的 ``\\r`` 会让 basename
+    匹配失败，症状就是"有校验和却校验不上"。
     """
-    sums = next((a for a in assets if a.get("name") == _SUMS_ASSET), None)
-    if not sums:
-        return ""
-    try:
-        req = urllib.request.Request(sums["browser_download_url"], headers=_UA)
-        with _open(req, timeout=15) as r:
-            text = r.read(64 * 1024).decode("utf-8", "replace")
-    except Exception as e:
-        logger.warning("update_sums_fetch_failed", error=str(e))
-        return ""
     for line in text.splitlines():
         parts = line.strip().split(None, 1)
         if len(parts) != 2:
@@ -216,6 +216,31 @@ def _fetch_sha256(assets: list[dict], filename: str) -> str:
         digest, name = parts[0], parts[1].lstrip("*").strip()
         if PurePosixPath(name).name == filename and re.fullmatch(r"[0-9a-fA-F]{64}", digest):
             return digest.lower()
+    return ""
+
+
+def _fetch_sha256(assets: list[dict], filename: str) -> str:
+    """从 Release 的校验和资产里取某个安装包的哈希；取不到返回空串。
+
+    **直连官方地址**取（不走镜像）：这是校验镜像内容的基线，自己必须来自可信源。
+    格式为 ``<hash> *<平台目录>/<文件名>``，按 basename 匹配。
+    资产名先找 ``SHA256SUMS``，再退到 ``SHA256SUMS.txt``（见 ``_SUMS_ASSETS``）。
+    """
+    for name in _SUMS_ASSETS:
+        sums = next((a for a in assets if a.get("name") == name), None)
+        if not sums:
+            continue
+        try:
+            req = urllib.request.Request(sums["browser_download_url"], headers=_UA)
+            with _open(req, timeout=15) as r:
+                text = r.read(64 * 1024).decode("utf-8", "replace")
+        except Exception as e:
+            logger.warning("update_sums_fetch_failed", asset=name, error=str(e))
+            continue
+        got = _parse_sums(text, filename)
+        if got:
+            return got
+        logger.warning("update_sums_entry_missing", asset=name, file=filename)
     return ""
 
 

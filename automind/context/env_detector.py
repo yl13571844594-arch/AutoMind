@@ -122,10 +122,21 @@ class EnvironmentDetector:
 
     @staticmethod
     def _check_command(cmd: list[str]) -> bool:
+        # 捕获面必须覆盖 **OSError 全家**，不能只列 FileNotFoundError：
+        #   · Windows 上把一个**目录**放进 PATH 时 CreateProcess 抛
+        #     PermissionError(WinError 5) —— 探活炸掉而不是回答"没有"；
+        #   · 应用容器的令牌限制、杀软拦截同样抛 PermissionError/OSError。
+        # 这些都不是"命令存在但出错"（那种情况 subprocess 会正常返回），
+        # 而是"根本没能启动它" —— 探活要回答的正是这个，答案为否。
+        # TimeoutExpired 不是 OSError 子类，单独列出。
         try:
             subprocess.run(cmd, capture_output=True, timeout=5, check=False)
             return True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            # 5 秒还没结束：命令存在但卡住（如首次运行的防病毒扫描）。
+            # 视为不可用 —— 探活的意义是"现在能不能用"，不是"装没装"。
+            return False
+        except OSError:
             return False
 
     @staticmethod

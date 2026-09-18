@@ -1,6 +1,6 @@
 # 工作流即代码（Workflow as Code）
 
-> 版本：AutoMind v1.7.3 · schema `version: 1` · 实现见 `automind/workflow/`
+> 版本：AutoMind v1.7.4 · schema `version: 1` · 实现见 `automind/workflow/`
 
 一句话：**把"先拉工单 → 查 CMDB → 生成变更单 → 等人批 → 执行 → 回写"这条流程，
 从提示词里搬到一份 YAML 里。** 于是它可评审、可 diff、可进版本库、可在 CI 里被拒绝，
