@@ -829,6 +829,15 @@ def admin_token_ok(provided: str, expected: str) -> bool:
 # 投递器
 # ═══════════════════════════════════════════════════════════════
 
+#: 空闲等待的轮询间隔（秒）。必须很小（唤醒延迟），但也必须是**裸 sleep**：
+#: 见 ``WebhookDispatcher._idle`` —— 用 wait_for 等 Event 会在关循环收尾时
+#: 变成"取消不掉的后台任务"（v1.7.3 在 py3.11 上因此挂死过一整条 CI 作业）。
+_IDLE_POLL_S = 0.02
+
+#: flush 的轮询间隔（秒）。同样必须是裸 sleep（理由见 ``_idle``）；
+#: 比空闲轮询更短，因为它在"事件已经入队、正等投递"的关键路径上。
+_FLUSH_POLL_S = 0.005
+
 #: 投递结果记账（供 ``/metrics`` 与排障使用）
 _COUNTERS_of = (
     "queued",        # 入队的事件数
@@ -1018,29 +1027,47 @@ class WebhookDispatcher:
             self._wake_loop = loop
         self._worker = loop.create_task(self._run(), name="automind-webhook-delivery")
 
-    async def _idle(self, timeout: float) -> None:
-        """在事件循环里等待"有新事件"或超时。
+    def _take_wakeup(self) -> bool:
+        """消费一次唤醒信号（跨线程的 ``threading.Event`` 与循环侧的 Event 都清）。
 
-        等待对象是 ``asyncio.Event``（循环侧），所以这是一个**真正让出控制权**
-        的 await：后台协程不会占线程，测试替换 ``asyncio.sleep`` 也不会让它
-        变成忙等。超时上限 0.25s 是兜底：即便某次唤醒信号因为跨线程竞态丢了，
-        事件也最多迟到 0.25 秒，而不是永远卡在队列里。
+        清掉是必须的：残留的信号会让下一轮空闲等待立刻返回，退化成忙等。
+        用"标志位 + 短睡"代替"等一个 Event"是刻意的，理由见 :meth:`_idle`。
         """
+        hit = False
+        if self._wakeup.is_set():
+            self._wakeup.clear()
+            hit = True
         event = self._wake_ev
-        if event is None:
-            await asyncio.sleep(timeout)
-            return
-        try:
-            await asyncio.wait_for(event.wait(), timeout=timeout)
-        # 3.11+ 起 asyncio.TimeoutError 就是内置 TimeoutError（UP041）
-        except TimeoutError:
-            pass
-        except asyncio.CancelledError:
-            raise
-        finally:
-            # 清掉已消费的信号；如果此刻恰好有新事件入队，它最多等一个
-            # 超时周期就会被处理（不会丢）
+        if event is not None and event.is_set():
             event.clear()
+            hit = True
+        return hit
+
+    async def _idle(self, timeout: float) -> None:
+        """在事件循环里让出控制权地等待"有新事件"或超时。
+
+        为什么是**短睡轮询**而不是 ``await asyncio.wait_for(event.wait(), timeout)``
+        （v1.7.3 踩过的坑，必读）：
+
+        关事件循环时，``asyncio`` 会取消循环里所有残留协程，然后等它们结束。
+        ``wait_for`` 收到取消后并不会立刻返回 —— 它还要"取消自己的内层等待
+        任务，再等那个内层任务结束"。在 **py3.11** 上这一步没能完成：CI 上
+        表现为一条作业静静挂死（pytest-asyncio 的收尾卡在
+        ``_cancel_all_tasks``），日志里连是哪个用例都没有 —— 因为挂的是
+        **fixture 收尾**，堆栈全是 asyncio 内部帧。
+
+        裸 ``asyncio.sleep`` **没有内层任务**：取消一定立刻生效，收尾不可能
+        被它挂住。代价只是唤醒延迟上限 ``_IDLE_POLL_S``（20ms，相对 0.25s 的
+        兜底周期可以忽略）。超时上限本身仍是兜底：即便某次唤醒信号因跨线程
+        竞态丢了，事件也最多迟到 0.25 秒，而不是永远卡在队列里。
+        """
+        deadline = time.monotonic() + max(0.0, timeout)
+        while True:
+            if self._take_wakeup():
+                return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(_IDLE_POLL_S)
 
     async def _run(self) -> None:
         """投递主循环：等待信号 → 排空队列 → 并发投递。
@@ -1158,10 +1185,10 @@ class WebhookDispatcher:
         服务进程退出、以及所有测试都用它 —— 没有 flush 的话，"事件到没到"
         只能靠 sleep 猜，测试必然是 flaky 的。
 
-        等待方式刻意用 ``asyncio.wait_for``（而不是裸 ``asyncio.sleep``）：
-        它是一个**有真实超时的 await**，既能可靠地让出控制权给后台投递协程，
-        又不会因为"睡眠被替换成空实现"（测试里常见的做法）而变成忙等 ——
-        忙等的后果是后台协程一次都排不上队，flush 永远等不到结果。
+        等待方式刻意用**裸 sleep 轮询**（而不是 ``asyncio.wait_for(...)``）：
+        理由与 ``_idle`` 完全相同 —— ``wait_for`` 收到取消后还要"取消内层任务
+        并等它结束"，py3.11 上那一步可能完不成，于是取消不掉、收尾挂死。
+        这里只需要一个能让出控制权、且**取消一定立刻生效**的 await。
         """
         deadline = time.monotonic() + max(0.0, timeout)
         while True:
@@ -1173,10 +1200,32 @@ class WebhookDispatcher:
                 with self._lock:
                     return not self._queue and self._pending == 0
             self._signal()
-            try:
-                await asyncio.wait_for(asyncio.sleep(0), timeout=0.02)
-            except TimeoutError:                          # 3.11+ 内置即 asyncio 的那个
-                pass
+            await asyncio.sleep(_FLUSH_POLL_S)
+
+    def _stop_worker(self) -> None:
+        """取消后台投递协程（同步、幂等、尽力而为、不抛异常）。
+
+        为什么 ``close()`` 也要取消它：投递器被关掉/换掉之后，协程如果还留在
+        这个事件循环里轮询，就只能等"关循环时统一取消"来收尾 —— 那个时机是
+        被动的，也正是 ``_idle`` 里记录的挂死坑所在。这里主动停掉，收尾就
+        永远不必依赖"取消一个正在等待的后台协程"。
+        """
+        worker, loop = self._worker, self._worker_loop
+        self._worker = None
+        self._worker_loop = None
+        if worker is None or worker.done():
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError:                              # 纯同步上下文
+            running = None
+        try:
+            if loop is not None and loop is not running:
+                loop.call_soon_threadsafe(worker.cancel)  # 别的线程/别的循环
+            else:
+                worker.cancel()
+        except Exception:                                 # pragma: no cover - 循环已关
+            pass
 
     async def aclose(self, timeout: float = 5.0) -> None:
         """排空后停掉后台投递协程（进程退出/测试清理时调用）。"""
@@ -1184,20 +1233,28 @@ class WebhookDispatcher:
         self._closed = True
         self._signal()
         worker = self._worker
+        self._stop_worker()
         if worker is not None and not worker.done():
-            worker.cancel()
             try:
                 await worker
             except asyncio.CancelledError:
-                pass
+                # 是我们刚取消的那个后台协程 → 正常收尾。但若**当前任务**自己
+                # 也被取消了（worker 并未 cancelled），必须继续抛出：吞掉取消
+                # 会把调用方变成"取消不掉的任务"，那是最难查的一类挂死。
+                if not worker.cancelled():
+                    raise
             except Exception:                             # pragma: no cover - 收尾不抛
                 pass
-        self._worker = None
 
     def close(self) -> None:
-        """同步关闭：不再接受新事件（协程由 aclose 负责收尾）。"""
+        """同步关闭：不再接受新事件，并停掉后台投递协程。
+
+        （v1.7.3 之前只置 ``_closed``，协程继续留着轮询；换投递器/测试收尾时
+        就攒下一个"关循环才被取消"的残留协程。）
+        """
         self._closed = True
         self._signal()
+        self._stop_worker()
 
     def reset_counters(self) -> None:
         """清零计数（测试与"排障后重新观察"用）。"""
@@ -1225,9 +1282,16 @@ def get_dispatcher() -> WebhookDispatcher:
 
 def reset_for_tests(settings: WebhookSettings | None = None,
                     transport: Transport | None = None) -> WebhookDispatcher:
-    """重建进程级投递器（测试用：钉死配置与传输，避免真发网络请求）。"""
+    """重建进程级投递器（测试用：钉死配置与传输，避免真发网络请求）。
+
+    换掉之前先把旧投递器**关掉**：只换全局引用的话，旧协程会一直留在这个
+    事件循环里轮询（换一次漏一个），最后只能靠"关循环时统一取消"被动收尾
+    —— 那正是 py3.11 上让整条 CI 挂死的时机（见 ``_idle``）。
+    """
     global _default
-    _default = WebhookDispatcher(settings=settings, transport=transport)
+    old, _default = _default, WebhookDispatcher(settings=settings, transport=transport)
+    if old is not None:
+        old.close()                                       # 幂等：停掉它的后台协程
     return _default
 
 
@@ -1252,6 +1316,17 @@ async def flush(timeout: float = 5.0) -> bool:
     if _default is None:
         return True
     return await _default.flush(timeout=timeout)
+
+
+async def aclose(timeout: float = 5.0) -> None:
+    """排空并停掉进程级默认投递器（服务退出/测试收尾用）。
+
+    与 ``flush`` 的区别：flush 只保证"发完了"，后台协程还活着；aclose 连协程
+    一起停掉。进程要退出（或测试要关事件循环）时，留下一个仍在等待的后台
+    协程只会把收尾拖进"取消它"这条更脆弱的路 —— 所以收尾一律用这个。
+    """
+    if _default is not None:
+        await _default.aclose(timeout=timeout)
 
 
 def stats() -> dict[str, Any]:
@@ -1279,6 +1354,7 @@ __all__ = [
     "WebhookEvent",
     "WebhookSettings",
     "WebhookTarget",
+    "aclose",
     "admin_token_ok",
     "approval_callback_url",
     "approval_receipt_state",

@@ -772,6 +772,10 @@ async def _lifespan(_app):
             logger.info("webhook_flushed", complete=ok, **{
                 k: v for k, v in webhooks.stats().items()
                 if k in ("delivered", "failed", "dropped")})
+        # 排空之后连后台投递协程一起停掉：只 flush 的话协程还挂在事件循环里，
+        # 收尾时又要走"取消一个正在等待的后台协程"这条脆弱的路
+        # （py3.11 上真挂过，见 core/webhooks.py 的 _idle 注释）。
+        await webhooks.aclose(timeout=1.0)
     except Exception as e:
         logger.warning("webhook_flush_failed", reason=str(e))
     if _sched is not None:

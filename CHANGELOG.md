@@ -215,10 +215,46 @@ ReAct / Plan 两条路由 LLM 在**运行时**决定步骤；FDE 要交付给客
 - **🔌 本机/私网目标直连**（`ProxyHandler({})`），公网目标沿用系统代理设置；
   `localhost` / 回环 / 私网 / 链路本地地址都识别。
 
+### 修复 — py3.11 上 CI 整条作业挂死：后台投递协程取消不干净
+
+1.7.3 的第一次推送后，**ubuntu · py3.11** 那一档从 2 分钟变成不结束（另三档
+两分多钟就绿了），最后被人工取消时已经跑掉 6 小时 —— 期间"红还是绿"完全不可知，
+等于这道门暂时失效。日志里连是哪个用例都看不出来：堆栈全是 asyncio 内部帧。
+
+排查路径（记下来是因为这套办法以后还用得上）：
+
+1. 先让"挂住"必须自己暴露 —— 逐用例 `--timeout=180` + 作业 `timeout-minutes: 30`；
+   于是那次失败在 3 分 56 秒点名报到，并给出行号级堆栈。
+2. 堆栈形状说明问题不在用例体里，而在 **fixture 收尾**：
+   `pytest_runtest_teardown → pytest_asyncio._scoped_runner → asyncio.Runner.close()
+   → _cancel_all_tasks → run_until_complete(gather(...))` 再也不返回 ——
+   即"关循环时取消残留协程"这一步有协程取消不掉。
+3. 关循环前把残留协程点名（`tests/conftest.py` 里的取消探针，`AUTOMIND_CANCEL_PROBE=1`）：
+   唯一残留的就是 `automind-webhook-delivery`（`WebhookDispatcher._run`）。
+
+根因：投递协程空闲等待写的是 `await asyncio.wait_for(event.wait(), timeout)`。
+`wait_for` 收到取消后并不能立刻返回 —— 它还要"取消自己的内层等待任务，再等它结束"，
+而 **py3.11** 上这一步没能完成（3.12 的 `wait_for` 是用 `asyncio.timeout` 重写过的，
+所以本地与其它三档都测不出来，只有 py3.11 挂）。
+
+- **😴 空闲等待改成裸 sleep 轮询**（20ms，`_idle`）：等待期间**没有任何内层任务**，
+  取消必定立刻生效 —— 代价只是唤醒延迟上限 20ms，而原本的兜底周期就是 0.25s。
+  `flush` 的等待同样换掉（它也在关键路径上，且是同一类脆弱写法）。
+- **🛑 收尾主动停协程，而不是等"关循环被动取消"**：新增 `WebhookDispatcher._stop_worker()`，
+  `close()` 会真的停掉后台协程（此前只置一个标志位），`reset_for_tests()` 换投递器时
+  先把旧的关掉（此前只换全局引用，**换一次漏一个协程**），新增进程级 `aclose()`，
+  服务端 lifespan 收尾改为 `flush → aclose`。
+- **🧹 顺手修掉一处同类写法**：`tools/background.py` 的 `kill()` 里
+  `except (asyncio.CancelledError, Exception): pass` 会把**调用方自己**的取消一起吞掉
+  （那正是"取消不掉的任务"的来源），现在只在"确实是自己取消的那个协程"上吞。
+- **🛡 把它钉成硬不变量**：新增 4 条用例（空闲协程必须 1 秒内可取消、`aclose`、
+  换投递器、实例 `close()` 都必须停掉协程），并在 CI 上开启取消探针 ——
+  以后这类"吞掉取消/取消不掉"的缺陷会是一条**带任务名的失败**，而不是一条挂死的作业。
+
 ### 测试
 
 - 新增 11 个测试文件、700+ 用例：token 预算链路、命令分段、敏感路径、管理分权、
-  指标与就绪、日志键名、连接器（37）、webhook（87）、重放（26）、评测（45）、
+  指标与就绪、日志键名、连接器（37）、webhook（91）、重放（26）、评测（45）、
   工作流（208，含 4 条真子进程用例）。
 - 全量回归：社区 `python -m pytest -q`、`ruff check .`、`pro/tests`、
   前端 `tsc --noEmit` + `vite build` 全绿；`dist` 已重建。

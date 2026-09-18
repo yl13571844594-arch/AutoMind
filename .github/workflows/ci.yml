@@ -108,14 +108,20 @@ jobs:
         # 只有一条迟迟不结束的 job。逐用例超时会给出行号级堆栈，
         # `--durations` 则把最慢的一批列出来。
         #
-        # 用 `-v` 而不是 `-q`：`thread` 模式的超时转储里**没有用例名**，而 `-v`
-        # 会按顺序打印每条用例的 id —— 于是"最后一条已完成的用例"之后的那一条
-        # 就是挂住的那个，可以确定性地定位，不用靠猜（1750 行日志换一次精确归因，
-        # 值）。定位到之后可以再改回 `-q`。
+        # AUTOMIND_CANCEL_PROBE=1：async 用例关事件循环时，把"取消不掉的残留任务"
+        # 点名（tests/conftest.py 里实现）。加它的直接原因是一次真实事故：py3.11
+        # 上 webhook 投递协程取消不干净，pytest-asyncio 的收尾无限等下去 ——
+        # 作业静静挂到被人工取消，日志里连是哪个用例都没有（堆栈全是 asyncio 内部帧）。
+        # 现在这类"吞掉取消/取消不掉"的缺陷会变成一条带任务名的失败。
+        #
+        # 如果哪天还有别种挂法（比如阻塞在同步 I/O 上）：把 `-q` 换成 `-v`
+        # 再跑一次即可 —— `thread` 模式的超时转储**不含用例名**，而 `-v` 会按顺序
+        # 打印用例 id，"最后一条已完成的用例"之后的那条就是挂住的那个。
         env:
           PYTHONUTF8: "1"
           PYTHONIOENCODING: "utf-8"
-        run: pytest tests/ -v --timeout=180 --timeout-method=thread --durations=15
+          AUTOMIND_CANCEL_PROBE: "1"
+        run: pytest tests/ -q --timeout=180 --timeout-method=thread --durations=15
 
   # ── 2. 商业扩展包（automind-pro）───────────────────────
   #

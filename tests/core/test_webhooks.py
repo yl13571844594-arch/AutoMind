@@ -21,11 +21,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
 import socket
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -83,6 +85,26 @@ def _offline_config(monkeypatch):
     monkeypatch.setattr(webhooks, "_env", lambda name, default="": env.get(name, default))
     monkeypatch.setattr(webhooks, "_cfg_attr", lambda _name, default=None: default)
     return env
+
+
+def _live_delivery_tasks() -> list[asyncio.Task]:
+    """当前事件循环里还活着的投递协程（按任务名认，名字由产品代码钉死）。"""
+    return [t for t in asyncio.all_tasks()
+            if not t.done() and t.get_name() == "automind-webhook-delivery"]
+
+
+async def _no_live_delivery_tasks(timeout: float = 1.0) -> bool:
+    """等"投递协程都结束了"。
+
+    ``Task.cancel()`` 只是**投递**取消请求，协程要等下一次被调度才会真正结束，
+    所以断言前必须给它落地的时间（否则测试会时对时错）。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _live_delivery_tasks():
+            return True
+        await asyncio.sleep(0.005)
+    return not _live_delivery_tasks()
 
 
 def _dispatcher(capture: _Capture, script: list[int] | None = None, **kwargs):
@@ -769,6 +791,9 @@ class TestProcessLevelEntry:
             assert stats["queue_depth"] == 0
             assert len(capture.calls) == 1
         finally:
+            # 显式收尾：flush 只保证"发完了"，投递协程还活着；aclose 连协程
+            # 一起停掉，测试关事件循环时就不必再依赖"取消一个正在等待的协程"。
+            await webhooks.aclose(timeout=1.0)
             webhooks.reset_for_tests(settings=WebhookSettings())
 
     def test_stats_shape_before_first_use(self):
@@ -794,6 +819,86 @@ class TestProcessLevelEntry:
             webhooks.set_transport(None)
         assert webhooks.get_transport() is original
         assert webhooks.is_custom_transport() is False
+
+    # ── 后台协程的收尾（v1.7.3：py3.11 上真挂死过一整条 CI 作业）─────────
+    #
+    # 事实经过：关事件循环时 asyncio 会取消循环里所有残留协程并等它们结束。
+    # 后台投递协程当时用 ``wait_for(event.wait(), timeout)`` 等待唤醒，
+    # **py3.11** 上这一步取消不干净 → ``_cancel_all_tasks`` 无限等 → 整条
+    # 作业挂死，而且堆栈全在 asyncio 内部，日志里连是哪个用例都看不出来。
+    # 因此下面这四条把"投递协程能被立刻取消/被主动停掉"钉成硬不变量。
+
+    async def test_worker_cancels_promptly_while_idle(self, _offline_config):
+        """空闲等待中的投递协程，取消必须**立刻**生效。"""
+        capture = _Capture()
+        d = _dispatcher(capture)
+        d.emit(WebhookEvent.TASK_COMPLETE, build_payload(WebhookEvent.TASK_COMPLETE))
+        assert await d.flush(timeout=5.0) is True
+        worker = d._worker
+        assert worker is not None, "投递协程必须已经起来（否则这条测试是空转）"
+        assert not worker.done(), "它此刻应当活着（空闲等待中）"
+
+        worker.cancel()
+        done, pending = await asyncio.wait({worker}, timeout=1.0)
+        assert worker in done and worker.cancelled() and not pending, (
+            "空闲等待必须立刻可取消：取消不掉会把关循环的收尾挂死"
+            "（py3.11 上真挂过 —— 见 automind/core/webhooks.py 的 _idle 注释）")
+
+    async def test_aclose_stops_worker_and_marks_closed(self, _offline_config):
+        """进程级 aclose：排空 + 停协程 + 之后不再收事件。"""
+        capture = _Capture()
+        webhooks.reset_for_tests(
+            settings=WebhookSettings(
+                targets=[WebhookTarget(url="https://p.example/hook")], backoff=0.0),
+            transport=capture)
+        try:
+            webhooks.emit(WebhookEvent.TASK_COMPLETE,
+                          build_payload(WebhookEvent.TASK_COMPLETE))
+            assert await webhooks.flush(timeout=5.0) is True
+            assert _live_delivery_tasks(), "先确认协程确实起来了"
+
+            await webhooks.aclose(timeout=1.0)
+            assert await _no_live_delivery_tasks(), "aclose 必须停掉后台协程"
+            assert webhooks.stats()["closed"] is True
+            # 关掉之后再发事件：必须是**零动作**（不是"先收下再说"）
+            assert webhooks.emit(WebhookEvent.TASK_COMPLETE,
+                                 build_payload(WebhookEvent.TASK_COMPLETE)) == 0
+            assert len(capture.calls) == 1, "关闭后不许再有投递"
+        finally:
+            webhooks.reset_for_tests(settings=WebhookSettings())
+
+    async def test_reset_stops_previous_worker(self, _offline_config):
+        """换投递器不能把旧的后台协程漏在循环里（换一次漏一个是真事故）。"""
+        capture = _Capture()
+        webhooks.reset_for_tests(
+            settings=WebhookSettings(
+                targets=[WebhookTarget(url="https://p.example/hook")], backoff=0.0),
+            transport=capture)
+        try:
+            webhooks.emit(WebhookEvent.TASK_COMPLETE,
+                          build_payload(WebhookEvent.TASK_COMPLETE))
+            assert await webhooks.flush(timeout=5.0) is True
+            assert _live_delivery_tasks(), "先确认协程确实起来了"
+
+            webhooks.reset_for_tests(settings=WebhookSettings())
+            assert await _no_live_delivery_tasks(), (
+                "旧投递器的后台协程必须随替换一起停掉，"
+                "否则只能等关循环时被动取消（那条路在 py3.11 上挂过）")
+        finally:
+            webhooks.reset_for_tests(settings=WebhookSettings())
+
+    async def test_dispatcher_close_stops_worker(self, _offline_config):
+        """实例级 close() 同样要停协程（不是只置一个标志位）。"""
+        capture = _Capture()
+        d = _dispatcher(capture)
+        d.emit(WebhookEvent.TASK_COMPLETE, build_payload(WebhookEvent.TASK_COMPLETE))
+        assert await d.flush(timeout=5.0) is True
+        assert _live_delivery_tasks(), "先确认协程确实起来了"
+
+        d.close()
+        assert await _no_live_delivery_tasks(), "close() 必须停掉后台协程"
+        assert d.emit(WebhookEvent.TASK_COMPLETE,
+                      build_payload(WebhookEvent.TASK_COMPLETE)) == 0
 
 
 # ═══════════════════════════════════════════════════════════════

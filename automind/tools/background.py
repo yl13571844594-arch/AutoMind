@@ -252,7 +252,14 @@ async def kill(task_id: str) -> dict[str, Any]:
             bg.task.cancel()
             try:
                 await bg.task
-            except (asyncio.CancelledError, Exception):
+            except asyncio.CancelledError:
+                # 是我们刚取消的那个读取协程 → 正常收尾。但若**当前任务**自己
+                # 也被取消了（读取协程并未 cancelled），必须继续抛出：原先这里
+                # 笼统写成 ``except (CancelledError, Exception): pass``，会把
+                # 调用方的取消一起吞掉 —— 那正是"取消不掉的任务"的来源。
+                if not bg.task.cancelled():
+                    raise
+            except Exception:
                 pass
         if bg.status != "killed":                   # 协程未及收尾时兜底
             bg.status = "killed"
