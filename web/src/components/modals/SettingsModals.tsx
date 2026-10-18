@@ -1,14 +1,19 @@
 // 设置弹窗四件套：🖥 模型配置 / 🔑 API Keys / ⚙ 通用设置 / 🔌 Agent 集成。
 import {
-  Alert, App, Button, Checkbox, Divider, Input, InputNumber, Modal, Select, Slider, Space, Tag, Typography,
+  Alert, App, AutoComplete, Button, Checkbox, Divider, Input, InputNumber, Modal, Slider, Space, Spin, Tag, Tooltip, Typography,
 } from 'antd';
+import Popconfirm from '../ui/SafePopconfirm';
+import Select from '../ui/SafeSelect';
 import { useEffect, useState, type ReactNode } from 'react';
-import { apiGet, apiPost, getAdminToken, setAdminToken } from '../../api/client';
+import { ApiError, apiGet, apiPost, errText, getAdminToken, setAdminToken } from '../../api/client';
 import { prettyCombo } from '../../lib/hotkeys';
 import { notifyPermission, notifySupported, notifyTask, requestNotifyPermission } from '../../lib/notify';
-import { MODE_LABELS, useApp } from '../../store/app';
+import { chatSid, MODE_LABELS, useApp } from '../../store/app';
 import { FONT_MARKS, FONT_MAX, FONT_MIN, usePrefs } from '../../store/prefs';
 import { useUi } from '../../store/ui';
+import { FALLBACK_FLAG, fallbackForced } from '../../lib/popupGuard';
+import DirPicker from '../ui/DirPicker';
+import BotsModal from './BotsModal';
 
 const { Text, Paragraph } = Typography;
 
@@ -30,33 +35,52 @@ function ModelModal() {
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
   const [notice, setNotice] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [loadErr, setLoadErr] = useState('');
+  const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    if (!open) return;
-    (async () => {
+  // v1.7.6：此前四个请求任一失败，弹窗就停在一片空白（提供商下拉为空），
+  // 既没有加载态也没有报错 —— 看起来就是"设置打不开"。
+  const loadAll = async () => {
+    setLoading(true);
+    setLoadErr('');
+    try {
       const [st, prov, k, mm] = await Promise.all([
-        apiGet('/status'), apiGet('/providers'), apiGet('/config/apikeys'), apiGet('/config/mode-models'),
+        apiGet('/status'), apiGet('/providers'), apiGet('/config/apikeys'),
+        apiGet('/config/mode-models').catch(() => ({ default: {}, modes: {} })),
       ]);
       setProviders(prov);
       setKeys(k);
       setNotice(st.llm_notice || '');
       setProvider(st.provider);
       setModel(st.model || '');
-      setApiBase(st.api_base || '');
+      setApiBase(st.api_base || (k[st.provider] || {}).api_base || '');
       setInteraction(st.interaction || 'chat');
       setModeModels(mm);
-      setModels(await apiGet(`/models?provider=${st.provider}`));
       setTestResult(null);
-    })();
-  }, [open]);
+      setModels(await apiGet(`/models?provider=${encodeURIComponent(st.provider)}`).catch(() => []));
+    } catch (e) {
+      setLoadErr(errText(e));
+    } finally {
+      setLoading(false);
+    }
+  };
+  useEffect(() => { if (open) loadAll(); }, [open]);
 
   const changeProvider = async (p: string) => {
     setProvider(p);
-    const ms = await apiGet(`/models?provider=${p}`);
-    setModels(ms);
+    setTestResult(null);
     const info = keys[p] || {};
-    setModel(info.model || ms[0] || '');
     setApiBase(info.api_base || '');
+    try {
+      const ms = await apiGet(`/models?provider=${encodeURIComponent(p)}`);
+      setModels(ms);
+      setModel(info.model || ms[0] || '');
+    } catch (e) {
+      setModels([]);
+      setModel(info.model || '');
+      message.warning(`读取 ${p} 的模型列表失败：${errText(e)}（可直接手动输入模型名）`);
+    }
   };
 
   const labels = providers?.labels || {};
@@ -74,41 +98,77 @@ function ModelModal() {
     const payload: any = { provider, model: model.trim() };
     if (provider === 'custom') payload.api_base = apiBase.trim();
     if (apiKey.trim()) payload.api_key = apiKey.trim();
-    // 前端兜底超时（后端 12s 会先返回，但万一请求被代理/网络吞掉，20s 后也不再空转）
-    const r = await apiPost('/config/test', payload, 20000).catch((e) => ({
-      success: false,
-      error: e?.name === 'AbortError'
-        ? '测试连接超时（20 秒无响应），请检查网络 / 代理 / api_base'
-        : String(e),
-    }));
+    // 前端兜底超时：**必须明显大于后端自己的等待上限**（端点里是 12s），
+    // 否则一旦后端慢一点，前端就先放弃，用户看到的永远是"20 秒无响应"，
+    // 而看不到后端本可以给出的具体原因（网络？Key？模型名？）。
+    // 45s = 12s 后端等待 + 启动/排队余量，保证诊断权始终在后端手里。
+    const r = await apiPost('/config/test', payload, 45000).catch((e) => {
+      // 注意：apiPost 会把浏览器的 AbortError 转成 ApiError(408)，
+      // 所以这里**不能**再判 `e?.name === 'AbortError'` —— 那个条件永远为假，
+      // 友好文案从来没显示过（实际显示的是 `String(e)` = "ApiError: 请求超时…"）。
+      const aborted = e instanceof ApiError && e.status === 408;
+      return {
+        success: false,
+        // 关键：把 stage 补上。以前这个分支不设 stage，界面渲染成
+        // 「❌ 连接失败（）」—— 括号空着，等于什么都没说。
+        stage: aborted ? 'no-response' : 'client',
+        hint: aborted
+          ? '服务端在 45 秒内没有回应（注意：不是模型慢，是后端没答）。'
+            + '常见原因：软件/服务仍在启动、被系统防火墙拦截、或代理把本机回环请求也劫持了。'
+            + '可稍等几秒重试；仍失败请查看服务端日志。'
+          : '请求未能完成，请检查本机与服务之间的网络。',
+        error: aborted
+          ? `等待 45 秒未收到后端响应（后端自身等待上限为 12 秒，说明请求可能没被处理）`
+          : String(e),
+        elapsed_s: undefined,
+      };
+    });
     setTestResult(r);
     setTesting(false);
   };
 
   const save = async () => {
+    if (!provider) { message.error('请选择提供商'); return; }
+    if (!model.trim()) { message.error('请填写模型名称'); return; }
+    if (provider === 'custom' && !/^https?:\/\//i.test(apiBase.trim())) {
+      message.error('自定义接口需要填写以 http(s):// 开头的 API 地址'); return;
+    }
     const cfg: any = { provider, model: model.trim(), interaction };
     if (provider === 'custom') cfg.api_base = apiBase.trim();
     if (apiKey.trim()) cfg.api_key = apiKey.trim();
-    const data = await apiPost('/config', cfg);
-    close();
-    await useApp.getState().loadStatus();
-    if (data.llm_ready) message.success('配置已更新并就绪');
-    else if (data.llm_error) message.error('配置已保存但连接失败: ' + String(data.llm_error).slice(0, 100));
-    else message.info('已保存，请配置该提供商的 API Key');
+    setSaving(true);
+    try {
+      const data = await apiPost('/config', cfg);
+      close();
+      setApiKey('');
+      await useApp.getState().loadStatus();
+      if (data.llm_ready) message.success('配置已更新并就绪');
+      else if (data.llm_error) message.error('配置已保存但连接失败: ' + String(data.llm_error).slice(0, 100), 6);
+      else message.info('已保存，请在「🔑 API Keys」里配置该提供商的 Key');
+    } catch (e) {
+      message.error(`保存失败：${errText(e)}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const saveModeModel = async (m: string, useDefault: boolean, prov?: string, mdl?: string) => {
-    if (useDefault) {
-      await apiPost('/config/mode-models', { mode: m, clear: true });
-      message.info(`${MODE_LABELS[m]}模式：跟随默认`);
-    } else {
-      if (!mdl) { message.error('请输入模型名'); return; }
-      const r = await apiPost('/config/mode-models', { mode: m, provider: prov, model: mdl });
-      if (r.error) { message.error(r.error); return; }
-      message.success(`${MODE_LABELS[m]}模式 → ${prov}/${mdl}`);
+    try {
+      if (useDefault) {
+        await apiPost('/config/mode-models', { mode: m, clear: true });
+        message.info(`${MODE_LABELS[m]}模式：跟随默认`);
+      } else {
+        if (!prov) { message.error('请选择提供商'); return; }
+        if (!mdl) { message.error('请输入模型名'); return; }
+        const r = await apiPost('/config/mode-models', { mode: m, provider: prov, model: mdl });
+        if (r.error) { message.error(r.error); return; }
+        message.success(`${MODE_LABELS[m]}模式 → ${prov}/${mdl}`);
+      }
+      setModeModels(await apiGet('/config/mode-models'));
+      useApp.getState().loadStatus(useApp.getState().mode);
+    } catch (e) {
+      message.error(`保存失败：${errText(e)}`);
     }
-    setModeModels(await apiGet('/config/mode-models'));
-    useApp.getState().loadStatus(useApp.getState().mode);
   };
 
   return (
@@ -117,6 +177,9 @@ function ModelModal() {
       {/* 服务端按实际配到的 Key 自动选路时，把原因摆在最显眼处 —— 此前用户只会
           看到"模型连接失败"，完全不知道该来这里换一家 */}
       {notice && <Alert type="info" showIcon message={notice} style={{ marginBottom: 12 }} />}
+      {loadErr && <Alert type="error" showIcon style={{ marginBottom: 12 }} message="读取当前配置失败"
+        description={loadErr} action={<Button size="small" onClick={loadAll}>重试</Button>} />}
+      <Spin spinning={loading} tip="正在读取配置…">
       <Space direction="vertical" style={{ width: '100%' }} size="middle">
         <div>
           <Text strong>LLM 提供商</Text>
@@ -130,20 +193,24 @@ function ModelModal() {
         <div>
           <Text strong>模型名称</Text>
           <Space.Compact style={{ width: '100%', marginTop: 4 }}>
-            <Select
-              style={{ flex: 1 }} value={model} onChange={setModel} showSearch
+            {/* v1.7.6：改用 AutoComplete —— 既能从列表里挑，也能直接输入列表里
+                没有的模型名（此前 Select 的搜索词在失焦时会被清掉，自定义模型名
+                要靠"边打字边 setModel"的变通，常常只存进去半截） */}
+            <AutoComplete
+              style={{ flex: 1 }} value={model} onChange={(v) => setModel(String(v || ''))}
               options={models.map((m) => ({ value: m, label: m }))}
-              popupMatchSelectWidth={false}
+              popupMatchSelectWidth={false} allowClear placeholder="选择或直接输入模型名"
               filterOption={(inp, opt) => (opt?.value || '').toString().toLowerCase().includes(inp.toLowerCase())}
-              onSearch={(v) => v && setModel(v)}
             />
             <Button onClick={async () => {
               if (!model.trim()) { message.error('请输入模型名'); return; }
-              const r = await apiPost('/models/add', { provider, model: model.trim() });
-              setModels(r.models || []);
-              setKeys(await apiGet('/config/apikeys'));
-              message.success(`已添加模型 ${model}`);
-            }}>➕ 添加</Button>
+              try {
+                const r = await apiPost('/models/add', { provider, model: model.trim() });
+                setModels(r.models || []);
+                setKeys(await apiGet('/config/apikeys'));
+                message.success(`已收藏模型 ${model}`);
+              } catch (e) { message.error(`添加失败：${errText(e)}`); }
+            }}>➕ 收藏</Button>
           </Space.Compact>
           {customModels.length > 0 && (
             <div style={{ marginTop: 6 }}>
@@ -208,7 +275,12 @@ function ModelModal() {
             {testResult.success
               ? <>✅ <b>连接成功</b> · {testResult.latency_ms}ms<br />
                 <span className="hint-text">{testResult.provider}/{testResult.model} · 回复: {testResult.reply_sample}</span></>
-              : <>❌ <b>连接失败</b>（{testResult.stage || ''}）<br />
+              : <>❌ <b>连接失败</b>
+                {/* stage 可能为空（老后端 / 非预期分支），此时不要渲染一个空括号 */}
+                {testResult.stage ? `（${testResult.stage}）` : ''}
+                {typeof testResult.elapsed_s === 'number'
+                  ? ` · 后端等待 ${testResult.elapsed_s}s` : ''}
+                <br />
                 <span style={{ color: 'var(--yellow)' }}>{testResult.hint || ''}</span><br />
                 <span className="hint-text mono">{String(testResult.error || '').slice(0, 260)}</span></>}
           </div>
@@ -216,9 +288,10 @@ function ModelModal() {
         <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
           <Button onClick={close}>取消</Button>
           <Button loading={testing} onClick={test}>🔌 测试连接</Button>
-          <Button type="primary" onClick={save}>保存并应用</Button>
+          <Button type="primary" loading={saving} disabled={loading || !!loadErr} onClick={save}>保存并应用</Button>
         </Space>
       </Space>
+      </Spin>
     </Modal>
   );
 }
@@ -256,21 +329,38 @@ function ApiKeysModal() {
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [custom, setCustom] = useState({ api_base: '', model: '', api_key: '' });
 
+  const [loadErr, setLoadErr] = useState('');
+  const [busy, setBusy] = useState('');
+
   const reload = async () => {
-    const [p, k, st] = await Promise.all([apiGet('/providers'), apiGet('/config/apikeys'), apiGet('/status')]);
-    setProviders(p); setKeys(k); setStatus(st);
-    const ci = k['custom'] || {};
-    setCustom({ api_base: ci.api_base || '', model: ci.model || '', api_key: '' });
+    try {
+      const [p, k, st] = await Promise.all([apiGet('/providers'), apiGet('/config/apikeys'), apiGet('/status')]);
+      setProviders(p); setKeys(k); setStatus(st); setLoadErr('');
+      const ci = k['custom'] || {};
+      setCustom({ api_base: ci.api_base || '', model: ci.model || '', api_key: '' });
+    } catch (e) {
+      setLoadErr(errText(e));
+    }
   };
   useEffect(() => { if (open) reload(); }, [open]);
 
-  const saveKey = async (p: string, key: string) => {
-    if (!key.trim() && key !== '') { message.error('请输入 API Key'); return; }
-    await apiPost('/config/apikeys', { provider: p, api_key: key });
-    message.success(key ? `${p} API Key 已保存` : `${p} 配置已删除`);
-    setInputs((s) => ({ ...s, [p]: '' }));
-    await useApp.getState().loadStatus();
-    reload();
+  // v1.7.6 修复：此前「保存」在输入框为空时会把空串发给服务端 —— 而空串的
+  // 语义是**删除**。占位符写着"留空不改"，点下去却把已配置的 Key 删了。
+  // 现在保存与删除分成两个明确的动作。
+  const saveKey = async (p: string, key: string, remove = false) => {
+    if (!remove && !key.trim()) { message.warning('请先输入 API Key（留空不会改动已保存的 Key）'); return; }
+    setBusy(p);
+    try {
+      await apiPost('/config/apikeys', { provider: p, api_key: remove ? '' : key.trim() });
+      message.success(remove ? `${labels[p] || p} 的 Key 已删除` : `${labels[p] || p} API Key 已保存`);
+      setInputs((s) => ({ ...s, [p]: '' }));
+      await useApp.getState().loadStatus();
+      await reload();
+    } catch (e) {
+      message.error(`保存失败：${errText(e)}`);
+    } finally {
+      setBusy('');
+    }
   };
 
   const labels = providers?.labels || {};
@@ -283,7 +373,10 @@ function ApiKeysModal() {
         Key 仅保存在本地 <code>.automind_config.json</code>，不会上传。当前使用：
         <b> {status?.provider}/{status?.model}</b> {status?.llm_ready ? '✓ 已就绪' : '⚠ 未就绪'}
       </Paragraph>
-      <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+      {loadErr && <Alert type="error" showIcon style={{ marginBottom: 10 }}
+        message="读取 Key 配置失败" description={loadErr}
+        action={<Button size="small" onClick={reload}>重试</Button>} />}
+      <div style={{ maxHeight: 340, overflowY: 'auto' }}>
         {order.map((p: string) => {
           const info = keys[p] || {};
           const src = info.saved ? '本地' : info.env ? '环境变量' : '';
@@ -295,9 +388,16 @@ function ApiKeysModal() {
               </Tag>
               <Input.Password size="small" style={{ flex: 1 }}
                 placeholder={info.has_key ? '●●●●●● (已设置，留空不改)' : '输入 API Key...'}
-                value={inputs[p] || ''} onChange={(e) => setInputs((s) => ({ ...s, [p]: e.target.value }))} />
-              <Button size="small" type="primary" onClick={() => saveKey(p, (inputs[p] || '').trim())}>保存</Button>
-              {info.saved && <Button size="small" danger onClick={() => saveKey(p, '')}>删除</Button>}
+                value={inputs[p] || ''} onChange={(e) => setInputs((s) => ({ ...s, [p]: e.target.value }))}
+                onPressEnter={() => saveKey(p, inputs[p] || '')} />
+              <Button size="small" type="primary" loading={busy === p}
+                disabled={!(inputs[p] || '').trim()} onClick={() => saveKey(p, inputs[p] || '')}>保存</Button>
+              {info.saved && (
+                <Popconfirm title={`删除 ${labels[p] || p} 的 Key？`} okText="删除" okButtonProps={{ danger: true }}
+                  onConfirm={() => saveKey(p, '', true)}>
+                  <Button size="small" danger>删除</Button>
+                </Popconfirm>
+              )}
             </div>
           );
         })}
@@ -316,19 +416,33 @@ function ApiKeysModal() {
             onChange={(e) => setCustom((s) => ({ ...s, api_key: e.target.value }))}
             placeholder={cinfo.has_key ? '●●●●●● (已设置，留空不改)' : 'sk-...'} />
           <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-            {cinfo.saved && <Button size="small" danger onClick={() => saveKey('custom', '')}>删除</Button>}
-            <Button size="small" type="primary" onClick={async () => {
-              if (!custom.api_base.trim()) { message.error('请填写 API 地址 (api_base)'); return; }
-              await apiPost('/config/provider', { provider: 'custom', api_base: custom.api_base.trim(), model: custom.model.trim() });
-              if (custom.api_key.trim()) {
-                await apiPost('/config/apikeys', {
-                  provider: 'custom', api_key: custom.api_key.trim(),
-                  api_base: custom.api_base.trim(), model: custom.model.trim(),
-                });
+            {cinfo.saved && (
+              <Popconfirm title="删除自定义接口的 Key？" okText="删除" okButtonProps={{ danger: true }}
+                onConfirm={() => saveKey('custom', '', true)}>
+                <Button size="small" danger>删除</Button>
+              </Popconfirm>
+            )}
+            <Button size="small" type="primary" loading={busy === 'custom'} onClick={async () => {
+              const base = custom.api_base.trim();
+              if (!base) { message.error('请填写 API 地址 (api_base)'); return; }
+              if (!/^https?:\/\//i.test(base)) { message.error('API 地址需以 http:// 或 https:// 开头'); return; }
+              setBusy('custom');
+              try {
+                await apiPost('/config/provider', { provider: 'custom', api_base: base, model: custom.model.trim() });
+                if (custom.api_key.trim()) {
+                  await apiPost('/config/apikeys', {
+                    provider: 'custom', api_key: custom.api_key.trim(),
+                    api_base: base, model: custom.model.trim(),
+                  });
+                }
+                message.success('自定义接口已保存');
+                await useApp.getState().loadStatus();
+                await reload();
+              } catch (e) {
+                message.error(`保存失败：${errText(e)}`);
+              } finally {
+                setBusy('');
               }
-              message.success('自定义接口已保存');
-              await useApp.getState().loadStatus();
-              reload();
             }}>保存自定义接口</Button>
           </Space>
         </Space>
@@ -345,6 +459,16 @@ function InterfacePrefs() {
   const notifyOnDone = usePrefs((s) => s.notifyOnDone);
   const reduceMotion = usePrefs((s) => s.reduceMotion);
   const [perm, setPerm] = useState<string>(notifyPermission());
+  const [compatOn] = useState<boolean>(fallbackForced);
+  // v1.11.8：桌面版没有地址栏，给 ?menu=simple / ?menu=antd 一个界面开关（切换后刷新生效）
+  const toggleCompat = (on: boolean) => {
+    try {
+      if (on) localStorage.setItem(FALLBACK_FLAG, '1');
+      else localStorage.removeItem(FALLBACK_FLAG);
+    } catch { /* ignore */ }
+    message.info(on ? '已开启兼容控件模式，正在刷新…' : '已恢复标准控件，正在刷新…');
+    window.setTimeout(() => location.reload(), 600);
+  };
 
   const toggleNotify = async (on: boolean) => {
     if (!on) { usePrefs.getState().setNotifyOnDone(false); return; }
@@ -398,6 +522,12 @@ function InterfacePrefs() {
             —— 关闭淡入等动画，老机器上更跟手
           </span>
         </Checkbox>
+        <Checkbox checked={compatOn} onChange={(e) => toggleCompat(e.target.checked)}>
+          兼容控件模式
+          <span className="hint-text" style={{ marginLeft: 6, fontSize: '.78em' }}>
+            —— 点「⋯」「＋」「设置」或下拉框没反应时开启：改用系统原生下拉 / 确认框（检测到问题时也会自动开启）
+          </span>
+        </Checkbox>
       </div>
     </div>
   );
@@ -410,23 +540,35 @@ function InterfacePrefs() {
 function LinkedTracePanel() {
   const { message } = App.useApp();
   const [data, setData] = useState<any>(null);
-  const [sid, setSid] = useState('default');
+  // v1.7.6：默认查**当前会话**。轨迹按会话 ID 落盘，而此前这里固定查
+  // 'default' —— 真实会话 ID 形如 s_xxx，于是永远显示"暂无落盘轨迹"。
+  const [sid, setSid] = useState(() => chatSid());
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState('');
 
   const load = async (id: string) => {
     setBusy(true);
     try {
       setData(await apiGet(`/observe/traces?session_id=${encodeURIComponent(id)}`));
+      setErr('');
+    } catch (e) {
+      setErr(errText(e));
     } finally {
       setBusy(false);
     }
   };
 
-  useEffect(() => { load('default'); }, []);
+  useEffect(() => { load(chatSid()); }, []);
 
   const stats = data?.stats || {};
   const runs: any[] = data?.runs || [];
   const kb = (n: number) => `${(n / 1024).toFixed(1)} KB`;
+
+  if (err && !data) {
+    return <Alert type="error" showIcon message="读取轨迹失败" description={err}
+      action={<Button size="small" onClick={() => load(sid.trim() || chatSid())}>重试</Button>} />;
+  }
+  if (!data) return <Spin size="small" />;
 
   return (
     <div>
@@ -442,10 +584,10 @@ function LinkedTracePanel() {
             {stats.write_errors > 0 && ` · ⚠ 写入失败 ${stats.write_errors} 次`}
           </Paragraph>
           <Space.Compact style={{ width: '100%', marginBottom: 8 }}>
-            <Input placeholder="会话 ID（默认 default）" value={sid}
+            <Input placeholder="会话 ID（默认为当前会话）" value={sid}
               onChange={(e) => setSid(e.target.value)}
-              onPressEnter={() => load(sid.trim() || 'default')} />
-            <Button loading={busy} onClick={() => load(sid.trim() || 'default')}>查询</Button>
+              onPressEnter={() => load(sid.trim() || chatSid())} />
+            <Button loading={busy} onClick={() => load(sid.trim() || chatSid())}>查询</Button>
           </Space.Compact>
           <div style={{ maxHeight: 160, overflowY: 'auto' }}>
             {runs.length === 0 && <div className="hint-text">该会话暂无落盘轨迹（跑一个任务后就会产生）</div>}
@@ -514,7 +656,49 @@ const NUMERIC_KNOBS: Array<[string, string, number, number, number, string]> = [
   ['react_no_progress_limit', '无进展收尾阈值', 0, 50, 1,
     '重复动作被拦截到该次数即提前收尾并给出部分交付清单；0 = 只拦不提前收尾'],
   ['auto_verify_max_rounds', '验收修复轮上限', 0, 10, 1, '0 = 验收不通过也不自动修复'],
+  ['max_iterations', '单任务最大步数', 1, 500, 10,
+    'ReAct / 编程模式单个任务最多执行多少步；到上限给出部分交付清单。长任务可适当调大'],
+  ['task_token_budget', '单任务 Token 预算(每窗口)', 0, 20000000, 50000,
+    '每个任务开始时重置。一个窗口用尽后按下一项自动续开新窗口（先压缩上下文）；'
+    + '续开次数用完才停下并交出部分成果。0 = 不设限。注意与「整轮任务总时长」谁先到谁先停'
+    + '（每续开一个窗口，总时长同步顺延一份）'],
+  ['budget_auto_continue', '预算窗口自动续开次数', 0, 100, 1,
+    '长任务到预算上限不再中断：压缩上下文后开新窗口接着跑。总花费上限 ≈ 预算 ×（1 + 该值）；'
+    + '0 = 关闭（用尽即收尾，1.10 及之前的行为）'],
 ];
+
+// 数值输入：本地编辑、失焦/回车才提交（并夹到合法区间）。
+// v1.7.6 修复：此前每按一个键就 POST 一次 —— 输入 600 会依次提交 6、60、600，
+// 中间值低于下限时服务端照单全收，瞬间把超时设成 6 秒。
+function NumKnob({ k, label, min, max, step, tip, value, onCommit }: {
+  k: string; label: string; min: number; max: number; step: number; tip: string;
+  value: number | undefined; onCommit: (k: string, v: number) => void;
+}) {
+  const [v, setV] = useState<number | null>(value ?? null);
+  useEffect(() => { setV(value ?? null); }, [value]);
+  // 以输入框**此刻的文本**为准：失焦时 antd 会先夹值再触发 onChange，
+  // 而闭包里的 v 还是上一次渲染的旧值 —— 用它判断会漏掉这次提交。
+  const commit = (raw: string) => {
+    const n = raw.trim() === '' ? NaN : Number(raw.replace(/,/g, ''));
+    if (Number.isNaN(n)) { setV(value ?? null); return; }
+    const c = Math.min(max, Math.max(min, n));
+    setV(c);
+    if (c !== value) onCommit(k, c);
+  };
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+        <Text style={{ fontSize: '.82em' }}>{label}</Text>
+        <Tooltip title={tip}><span className="hint-text" style={{ cursor: 'help', fontSize: '.8em' }}>ⓘ</span></Tooltip>
+      </div>
+      <InputNumber style={{ width: '100%' }} min={min} max={max} step={step}
+        value={v} placeholder={value === undefined ? '（读取中）' : ''}
+        onChange={(nv) => setV(typeof nv === 'number' ? nv : null)}
+        onBlur={(e) => commit(e.target.value)}
+        onPressEnter={(e) => commit((e.target as HTMLInputElement).value)} />
+    </div>
+  );
+}
 
 // 通用设置里的分组小节：图标标题 + 说明 + 内容，视觉统一。
 function Section({ icon, title, desc, children }: {
@@ -538,77 +722,109 @@ function GeneralModal() {
   const close = useUi((s) => s.closeModal);
   const [cfg, setCfg] = useState<any>(null);
   const [autopilot, setAutopilot] = useState<any>({});
-  const [dirs, setDirs] = useState<any>(null);
   const [showPicker, setShowPicker] = useState(false);
+  const [loadErr, setLoadErr] = useState('');
 
+  // v1.7.6：此前 /config/full 失败时弹窗永远是一个空壳（没有加载态也不报错）
+  const loadAll = async () => {
+    setLoadErr('');
+    try {
+      const [full, ap] = await Promise.all([apiGet('/config/full'), apiGet('/config/autopilot')]);
+      setCfg(full);
+      setAutopilot(ap);
+    } catch (e) {
+      setLoadErr(errText(e));
+    }
+  };
   useEffect(() => {
     if (!open) return;
-    apiGet('/config/full').then(setCfg);
-    apiGet('/config/autopilot').then(setAutopilot);
     setShowPicker(false);
+    loadAll();
   }, [open]);
 
-  const browse = async (path: string) => {
-    const r = await apiGet(`/fs/list?path=${encodeURIComponent(path)}`);
-    if (r.error) { message.error(r.error); return; }
-    setDirs(r);
+  // 以服务端返回的快照为准（它会夹值 / 拒绝非法值），不在本地"假装已保存"
+  const patchAutopilot = async (patch: Record<string, any>, okMsg?: string) => {
+    try {
+      const r: any = await apiPost('/config/autopilot', patch);
+      const { rejected, sessions_synced: _synced, ...snap } = r || {};
+      setAutopilot((cur: any) => ({ ...cur, ...snap }));
+      if (rejected && Object.keys(rejected).length) {
+        message.warning(`未保存：${Object.entries(rejected).map(([k, v]) => `${k}（${v}）`).join('；')}`, 6);
+      } else if (okMsg) {
+        message.success(okMsg);
+      }
+    } catch (e) {
+      message.error(`保存失败：${errText(e)}`);
+    }
+  };
+
+  const saveSampling = async (patch: { temperature?: number; max_tokens?: number }) => {
+    try {
+      await apiPost('/config', patch);
+      message.success('采样参数已保存', 1.5);
+    } catch (e) {
+      message.error(`保存失败：${errText(e)}`);
+    }
   };
 
   const saveProject = async (path: string) => {
-    const r = await apiPost('/config/project', { path });
-    if (r.error) { message.error(r.error); return; }
-    message.success('项目目录已设置: ' + r.project);
-    useApp.getState().loadStatus();
+    if (!path) { message.error('请填写目录路径'); return; }
+    try {
+      const r = await apiPost('/config/project', { path });
+      if (r.error) { message.error(r.error); return; }
+      message.success('项目目录已设置: ' + r.project);
+      useApp.getState().loadStatus();
+    } catch (e) {
+      message.error(`设置失败：${errText(e)}`);
+    }
   };
 
-  if (!cfg) return <Modal open={open} onCancel={close} footer={null} title="⚙ 通用设置" />;
+  if (!cfg) {
+    return (
+      <Modal open={open} onCancel={close} footer={null} title="⚙ 通用设置">
+        {loadErr
+          ? <Alert type="error" showIcon message="读取设置失败" description={loadErr}
+              action={<Button size="small" onClick={loadAll}>重试</Button>} />
+          : <div style={{ textAlign: 'center', padding: 32 }}><Spin tip="正在读取设置…" /></div>}
+      </Modal>
+    );
+  }
 
   return (
     <Modal title="⚙ 通用设置" open={open} onCancel={close} width={620} footer={null}>
       <Space direction="vertical" style={{ width: '100%' }} size={14}>
         <Section icon="📁" title="项目目录" desc="Agent 文件操作的根目录，所有读写都限定在此目录内">
           <Space.Compact style={{ width: '100%' }}>
-            <Input value={cfg.project} onChange={(e) => setCfg({ ...cfg, project: e.target.value })} />
-            <Button onClick={() => { setShowPicker(!showPicker); if (!showPicker) browse(cfg.project || ''); }}>📁 浏览</Button>
-            <Button type="primary" onClick={() => saveProject(cfg.project.trim())}>应用</Button>
+            <Input value={cfg.project || ''} onChange={(e) => setCfg({ ...cfg, project: e.target.value })}
+              onPressEnter={() => saveProject((cfg.project || '').trim())} />
+            <Button onClick={() => setShowPicker(!showPicker)}>📁 浏览</Button>
+            <Button type="primary" onClick={() => saveProject((cfg.project || '').trim())}>应用</Button>
           </Space.Compact>
-          {showPicker && dirs && (
-            <div style={{ border: '1px solid var(--border)', borderRadius: 8, marginTop: 8, overflow: 'hidden' }}>
-              <div style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 10px', borderBottom: '1px solid var(--border)', background: 'var(--bg2)' }}>
-                <Button size="small" onClick={() => browse(dirs.path.replace(/[\\/][^\\/]*$/, '') || dirs.path)}>⬆ 上级</Button>
-                <span className="mono hint-text" style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{dirs.path}</span>
-                <Button size="small" type="primary" onClick={() => {
-                  setCfg({ ...cfg, project: dirs.path }); setShowPicker(false); saveProject(dirs.path);
-                }}>✓ 选此目录</Button>
-              </div>
-              {(dirs.drives || []).length > 0 && (
-                <div style={{ padding: '4px 10px', borderBottom: '1px solid var(--border)' }}>
-                  {dirs.drives.map((d: string) => <Tag key={d} style={{ cursor: 'pointer' }} onClick={() => browse(d)}>{d}</Tag>)}
-                </div>
-              )}
-              <div style={{ maxHeight: 180, overflowY: 'auto', padding: 4 }}>
-                {(dirs.dirs || []).map((d: string) => (
-                  <div key={d} className="ft-item" onClick={() => browse((dirs.path + '/' + d).replace(/\\/g, '/'))}>📁 {d}</div>
-                ))}
-                {!(dirs.dirs || []).length && <div className="hint-text" style={{ padding: 8 }}>（无子目录）</div>}
-              </div>
+          {showPicker && (
+            <div style={{ marginTop: 8 }}>
+              <DirPicker initial={cfg.project || ''} pickLabel="✓ 设为项目目录"
+                onCancel={() => setShowPicker(false)}
+                onPick={(p) => { setCfg({ ...cfg, project: p }); setShowPicker(false); saveProject(p); }} />
             </div>
           )}
         </Section>
 
         <Divider style={{ margin: 0 }} />
 
-        <Section icon="🎛" title="采样参数" desc="影响生成随机性与单次回复长度">
+        <Section icon="🎛" title="采样参数" desc="影响生成随机性与单次回复长度（改动即保存）">
           <div style={{ display: 'flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
             <div style={{ flex: '1 1 240px' }}>
               <Text>Temperature：<b>{cfg.temperature}</b></Text>
               <Slider min={0} max={2} step={0.1} value={cfg.temperature}
-                onChange={(v) => setCfg({ ...cfg, temperature: v })} />
+                onChange={(v) => setCfg({ ...cfg, temperature: v })}
+                onChangeComplete={(v) => saveSampling({ temperature: v })} />
             </div>
             <div>
               <Text>最大输出 Token</Text>
-              <InputNumber style={{ width: 140, marginLeft: 10 }} min={256} max={32768} value={cfg.max_tokens}
-                onChange={(v) => setCfg({ ...cfg, max_tokens: v })} />
+              <InputNumber style={{ width: 140, marginLeft: 10 }} min={256} max={131072} value={cfg.max_tokens}
+                onChange={(v) => setCfg({ ...cfg, max_tokens: v })}
+                onBlur={() => cfg.max_tokens && saveSampling({ max_tokens: Math.max(256, Number(cfg.max_tokens)) })}
+                onPressEnter={() => cfg.max_tokens && saveSampling({ max_tokens: Math.max(256, Number(cfg.max_tokens)) })} />
             </div>
           </div>
         </Section>
@@ -618,11 +834,8 @@ function GeneralModal() {
         <Section icon="🚀" title="自主任务闭环" desc="任务完成后自动 多Agent审查 → Loop 语义验收 → 未达标带反馈自动修复（工作 / 编程模式，默认全开）">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
             {Object.entries(AUTOPILOT_LABELS).map(([k, [label, tip]]) => (
-              <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={async (e) => {
-                await apiPost('/config/autopilot', { [k]: e.target.checked });
-                setAutopilot({ ...autopilot, [k]: e.target.checked });
-                message.info(`${label} 已${e.target.checked ? '开启' : '关闭'}`);
-              }}>{label}</Checkbox>
+              <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={(e) => patchAutopilot(
+                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>{label}</Checkbox>
             ))}
           </div>
         </Section>
@@ -638,34 +851,22 @@ function GeneralModal() {
         <Section icon="🛡" title="执行治理" desc="超时 / 上下文体积 / 并发写冲突 / 审批等待 —— 这些是「看不见的损失」最常发生的地方">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
             {Object.entries(GOVERNANCE_LABELS).map(([k, [label, tip]]) => (
-              <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={async (e) => {
-                await apiPost('/config/autopilot', { [k]: e.target.checked });
-                setAutopilot({ ...autopilot, [k]: e.target.checked });
-                message.info(`${label} 已${e.target.checked ? '开启' : '关闭'}`);
-              }}>{label}</Checkbox>
+              <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={(e) => patchAutopilot(
+                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>{label}</Checkbox>
             ))}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px', marginTop: 12 }}>
             {NUMERIC_KNOBS.map(([k, label, min, max, step, tip]) => (
-              <div key={k} title={tip}>
-                <Text style={{ fontSize: '.82em' }}>{label}</Text>
-                <InputNumber style={{ width: '100%' }} min={min} max={max} step={step}
-                  value={autopilot[k]} onChange={async (v) => {
-                    if (v === null || v === undefined) return;
-                    await apiPost('/config/autopilot', { [k]: v });
-                    setAutopilot({ ...autopilot, [k]: v });
-                  }} />
-              </div>
+              <NumKnob key={k} k={k} label={label} min={min} max={max} step={step} tip={tip}
+                value={typeof autopilot[k] === 'number' ? autopilot[k] : undefined}
+                onCommit={(key, v) => patchAutopilot({ [key]: v }, `${label} → ${v}`)} />
             ))}
             <div title="超时后如何处置：自动拒绝更安全（fail-closed）；自动批准只适合完全可信的环境">
               <Text style={{ fontSize: '.82em' }}>审批超时处置</Text>
               <Select style={{ width: '100%' }} value={autopilot.approval_timeout_action || 'reject'}
-                onChange={async (v) => {
-                  await apiPost('/config/autopilot', { approval_timeout_action: v });
-                  setAutopilot({ ...autopilot, approval_timeout_action: v });
-                  message.info(`审批超时改为「${v === 'approve' ? '自动批准' : '自动拒绝'}」`);
-                }}
+                onChange={(v) => patchAutopilot({ approval_timeout_action: v },
+                  `审批超时改为「${v === 'approve' ? '自动批准' : '自动拒绝'}」`)}
                 options={[
                   { value: 'reject', label: '自动拒绝（推荐，fail-closed）' },
                   { value: 'approve', label: '自动批准（仅在完全可信环境使用）' },
@@ -674,11 +875,7 @@ function GeneralModal() {
             <div title="并发写冲突策略：warn 仍写入但明确提示；block 直接拒绝并回显当前内容">
               <Text style={{ fontSize: '.82em' }}>并发写冲突策略</Text>
               <Select style={{ width: '100%' }} value={autopilot.write_conflict_policy || 'warn'}
-                onChange={async (v) => {
-                  await apiPost('/config/autopilot', { write_conflict_policy: v });
-                  setAutopilot({ ...autopilot, write_conflict_policy: v });
-                  message.info(`并发写冲突策略：${v}`);
-                }}
+                onChange={(v) => patchAutopilot({ write_conflict_policy: v }, `并发写冲突策略：${v}`)}
                 options={[
                   { value: 'warn', label: 'warn — 写入并提示冲突（默认）' },
                   { value: 'block', label: 'block — 冲突即拒绝写入' },
@@ -694,12 +891,9 @@ function GeneralModal() {
 
         <Divider style={{ margin: 0 }} />
 
-        <Space style={{ justifyContent: 'flex-end', width: '100%' }}>
-          <Button onClick={close}>关闭</Button>
-          <Button type="primary" onClick={async () => {
-            await apiPost('/config', { temperature: cfg.temperature, max_tokens: cfg.max_tokens });
-            close(); message.success('设置已保存');
-          }}>保存采样参数</Button>
+        <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+          <span className="hint-text">所有设置改动即时保存并同步到正在使用的会话</span>
+          <Button type="primary" onClick={close}>完成</Button>
         </Space>
       </Space>
     </Modal>
@@ -823,5 +1017,5 @@ function AdminTokenBlock() {
 }
 
 export default function SettingsModals() {
-  return (<><ModelModal /><ApiKeysModal /><GeneralModal /><IntegrationsModal /></>);
+  return (<><ModelModal /><ApiKeysModal /><GeneralModal /><IntegrationsModal /><BotsModal /></>);
 }

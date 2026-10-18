@@ -27,6 +27,13 @@ _PRICES: dict[str, tuple[float, float]] = {
     # DeepSeek
     "deepseek-chat": (0.27, 1.10),
     "deepseek-reasoner": (0.55, 2.19),
+    # v1.7.5：补上 deepseek-flash。此前它既不在表里、前缀也匹配不上
+    # （"deepseek-flash" 不以 "deepseek-chat"/"deepseek-reasoner" 开头），
+    # 于是落到 _FALLBACK（$3/$15，Opus 档）—— 实测同一笔用量被算成
+    # $0.8357，按本表真实价率只有 $0.1290，**高估 6.48 倍**。
+    # 这会让所有成本判断（包括"预算该设多大"）系统性偏保守。
+    # ⚠️ 数值按 deepseek-reasoner 档位填写，请以服务商当前公示价率为准。
+    "deepseek-flash": (0.55, 2.19),
     # Anthropic
     "claude-3-5-haiku": (0.80, 4.00),
     "claude-3-5-sonnet": (3.00, 15.00),
@@ -96,3 +103,14 @@ def price_of(model: str) -> tuple[float, float]:
     """返回 ``(输入价, 输出价)``（美元/百万 token），供报告展示单价。"""
     (pin, pout), _, _ = _lookup(model)
     return pin, pout
+
+
+def is_known_model(model: str) -> bool:
+    """该模型是否在价格表里。
+
+    ``False`` 表示成本数字用的是**保守 fallback**（$3/$15，按 Opus 档估），
+    可能与真实账单差好几倍 —— 报告应当把这件事说出来，而不是只给一个
+    看起来很确定的美元数字。实测：``deepseek-flash`` 曾落到 fallback，
+    同一笔用量被算成 $0.8357，真实价率下只有 $0.1290。
+    """
+    return not _lookup(model)[2]

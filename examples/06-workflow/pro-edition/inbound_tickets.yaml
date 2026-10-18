@@ -1,0 +1,53 @@
+# 入站工单 —— v1.9.0 专业版样板：入站 webhook 触发 + foreach 逐项并发
+#
+# 外部系统（CI、监控、工单平台）POST 到这个触发器的地址即可发起一次运行：
+#
+#   POST /api/workflow/hooks/<触发器键>
+#   X-AutoMind-Hook-Token: <令牌>          # 在「⏰ 触发器」里生成；服务端只存摘要，只显示一次
+#   {"tickets": [{"id": "T-1", "priority": "high"}, {"id": "T-2", "priority": "low"}]}
+#
+# 请求体就是 inputs（也可以包一层 {"inputs": {...}}）；令牌缺失或错误一律 401。
+# 这个地址**不需要**平台的访问令牌 —— 凭的是这个触发器自己的令牌。
+#
+# foreach 的 max_concurrency: 4 —— 逐项并发执行，每一项有自己的 loop 与子步骤输出
+# （互相看不到）；结果仍按项的顺序汇总。专业版单次最多 1000 项。
+version: 1
+name: 入站工单归档
+description: 逐张工单写归档卡片，高优先级的另外登记
+
+inputs:
+  tickets:
+    type: array
+    required: true
+    description: 工单列表，每项至少有 id 与 priority
+  out_dir:
+    type: string
+    required: false
+    default: examples/06-workflow/out/tickets
+    description: 输出目录（相对于项目根目录）
+
+triggers:
+  - id: from_itsm
+    webhook: true
+    description: 工单平台推送
+
+steps:
+  - id: archive
+    type: foreach
+    items: "{{ inputs.tickets }}"
+    max_concurrency: 4
+    steps:
+      - id: card
+        type: tool
+        tool: file_write
+        args:
+          path: "{{ inputs.out_dir }}/{{ loop.item.id }}.md"
+          content: "# {{ loop.item.id }}\n\n优先级：{{ loop.item.priority }}\n"
+    on_failure: continue
+
+  - id: summary
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/summary.json"
+      content: '{"archived": {{ steps.archive.output }}}'

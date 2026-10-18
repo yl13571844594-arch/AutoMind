@@ -1,3 +1,5 @@
+// 必须最先导入：旧内核缺的 API 要在任何业务模块求值之前补上
+import './polyfills';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App';

@@ -1,13 +1,13 @@
 // 🧭 路由与成本：语义缓存（专业版）+ 模型智能路由（专业 2 级 / 企业 N 级）
 //               + 成本仪表盘（企业版）。社区版显示升级卡片。
-import {
-  App, Button, Card, Input, InputNumber, Select, Space, Statistic, Switch, Table, Tag, Typography,
-} from 'antd';
+import { App, Button, Card, Input, InputNumber, Space, Statistic, Switch, Table, Tag, Typography } from 'antd';
+import Select from '../ui/SafeSelect';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { useAsync } from '../../lib/useAsync';
 import { ErrorPanel } from '../ui/AsyncBoundary';
 import { useApp } from '../../store/app';
+import { ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
 
@@ -46,7 +46,7 @@ export default function RouterView() {
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
-      <h3>🧭 智能路由与成本</h3>
+      <ViewHead icon="🧭" title="智能路由与成本" sub="语义缓存秒回相似问题、按任务复杂度分级选模型，并统计成本。" />
 
       {/* 语义缓存 */}
       {!hasCache ? <UpgradeCard label="语义缓存（相似问题秒回，省 Token）" tier="专业版" />

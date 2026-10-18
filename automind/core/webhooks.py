@@ -111,6 +111,15 @@ class WebhookEvent(str, Enum):
     APPROVAL_REQUEST = "approval_request"
     APPROVAL_TIMEOUT = "approval_timeout"
     APPROVAL_RESOLVED = "approval_resolved"
+    #: v1.8.0（R-110）：工作流运行没有全绿时的出站通知。
+    #: 事件名按路线图用点号分隔（`workflow.*` 一族），接收方可按前缀订阅。
+    #: 全绿不发 —— 出站事件是给集成方做"出事了要处理"的自动化用的。
+    WORKFLOW_FAILED = "workflow.failed"
+    WORKFLOW_PARTIAL = "workflow.partial"
+    #: v1.9.0（R-208 / R-209，专业版触发器）：触发运行被中断（含服务重启），以及
+    #: 工作流在 notify.on 里显式要了 ok 时的"成功"通知。
+    WORKFLOW_INTERRUPTED = "workflow.interrupted"
+    WORKFLOW_COMPLETED = "workflow.completed"
 
 
 def event_name(event: WebhookEvent | str) -> str:

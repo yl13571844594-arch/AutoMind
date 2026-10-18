@@ -39,10 +39,12 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -67,11 +69,37 @@ SAFE_BUILTINS: frozenset[str] = frozenset({
 #   pathlib / uuid / doctest / unittest —— 都把 os 作为普通属性挂出来
 #   random —— random._os 同理（需要随机数可用 secrets？同样不给，沙箱不该碰系统熵之外的东西）
 # 保留的模块仍会被 _SafeModule 包一层，属性穿越在运行时再拦一道。
+#
+# v1.7.5 扩充：补上**纯计算**类模块。
+# 实测日志里出现的连续三次失败正是 `禁止导入 'hashlib' / 'zlib' / 'struct'` ——
+# 校验和、压缩、二进制解析是编码任务的日常动作，而这三个模块既不碰文件、
+# 也不碰网络与进程，把它们挡在外面只是把任务逼进死胡同（模型会一个个试，
+# 每次失败都消耗一轮迭代与一次熔断计数）。
+#
+# 仍然**刻意排除**的（安全姿态不变，不是遗漏）：
+#   io / codecs —— 它们把 open 以 `io.open` / `codecs.open` 的形式重新暴露出来
+#   gzip / tarfile / zipfile —— 可直接以路径打开文件，绕过 builtins 的 open 限制
+#   pathlib / uuid / random —— 持有 `_os` 之类私有别名（下划线规则会拦，但没必要冒险）
 ALLOWED_IMPORTS: frozenset[str] = frozenset({
     "math", "json", "re", "datetime", "collections", "itertools",
     "functools", "typing", "dataclasses", "enum", "copy",
     "textwrap", "string", "decimal", "fractions", "statistics",
+    # ── v1.7.5 新增：纯计算 ──
+    "hashlib", "zlib", "struct", "base64", "binascii",     # 校验和 / 压缩 / 二进制 / 编码
+    "operator", "bisect", "heapq", "array", "pprint",      # 常用算法与调试辅助
+    "abc", "contextlib", "warnings", "traceback", "unicodedata",
 })
+
+
+def import_hint() -> str:
+    """给模型看的"到底能导入什么"清单。
+
+    为什么必须回这句话：原先的错误只有 ``禁止导入 'hashlib'`` —— 说清了
+    "不行"，却没说"什么行"。模型于是只能一次猜一个模块，每次失败都白烧
+    一轮迭代、还给熔断器记上一笔（实测就是 hashlib → zlib → struct 三次）。
+    把白名单直接摆在错误里，一次纠正就能收敛。
+    """
+    return "允许导入的模块：" + "、".join(sorted(ALLOWED_IMPORTS))
 
 # 这些名字即便不在 builtins 白名单里，也要在 AST 层显式拒绝：
 # 用户代码可能通过参数默认值、闭包等方式拿到同名对象，先在语法层堵死更省心。
@@ -119,11 +147,13 @@ def validate_code(code: str, allowed_imports: frozenset[str] = ALLOWED_IMPORTS) 
             for a in node.names:
                 top = a.name.split(".")[0]
                 if top not in allowed_imports:
-                    raise SandboxViolation(f"禁止导入 '{a.name}'")
+                    raise SandboxViolation(
+                        f"禁止导入 '{a.name}'。{import_hint()}")
         if isinstance(node, ast.ImportFrom):
             top = (node.module or "").split(".")[0]
             if node.level or top not in allowed_imports:
-                raise SandboxViolation(f"禁止从 '{node.module or '.'}' 导入")
+                raise SandboxViolation(
+                    f"禁止从 '{node.module or '.'}' 导入。{import_hint()}")
 
         # with / async 之类不拦；真正的能力边界由 builtins 与模块代理决定
 
@@ -204,7 +234,11 @@ class SafeModule:
 def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
     top = name.split(".")[0]
     if level or top not in ALLOWED:
-        raise ImportError("sandbox: 禁止导入 '%s'" % name)
+        # 与静态校验同一句话术：说清"不行"之外，必须说清"什么行"，
+        # 否则模型只能一个模块一个模块地试（见 import_hint 的说明）。
+        raise ImportError(
+            "sandbox: 禁止导入 '%s'。允许导入的模块：%s"
+            % (name, "、".join(sorted(ALLOWED))))
     return SafeModule(__import__(name, globals, locals, fromlist, level))
 
 out, err = StringIO(), StringIO()
@@ -239,19 +273,69 @@ sys.__stdout__.write(json.dumps(result))
 '''
 
 
+class _ChildHolder:
+    """跨线程交接沙箱子进程句柄 —— 供"任务被取消时把它杀掉"使用。
+
+    ``_run_child`` 跑在线程池线程里，取消发生在事件循环线程，两者只能通过
+    一个共享对象交接句柄。锁是必要的：``attach`` 在工作线程、``kill`` 在
+    事件循环线程，而列表本身不是线程安全的。
+
+    还有一个必须处理的时序：**取消可能先于进程创建到达**。那时 ``attach``
+    会发现已经取消过了，于是立刻把刚起来的进程杀掉 —— 否则它会一直跑到
+    自己的超时，而调用方早已放弃等待。
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._procs: list[Any] = []
+        self._cancelled = False
+
+    def attach(self, proc: Any) -> None:
+        with self._lock:
+            if not self._cancelled:
+                self._procs.append(proc)
+                return
+        # 取消先到：进程后起，就地杀掉
+        with contextlib.suppress(Exception):
+            proc.kill()
+
+    def detach(self, proc: Any) -> None:
+        with self._lock, contextlib.suppress(ValueError):
+            self._procs.remove(proc)
+
+    def kill(self) -> None:
+        with self._lock:
+            self._cancelled = True
+            procs, self._procs = self._procs, []
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.kill()
+
+
 class PythonSandboxTool(AbstractTool):
     """Python 代码沙箱 — 独立子进程 + 静态校验 + 受限运行时。"""
 
     name = "python_sandbox"
     description = (
         "Execute Python code in an isolated subprocess sandbox. "
-        "Only pure-computation stdlib modules are importable; filesystem, "
-        "network and process APIs are unavailable. Returns stdout and errors."
+        "Only pure-computation stdlib modules are importable (see the `code` "
+        "parameter for the exact list); filesystem, network and process APIs "
+        "are unavailable. Returns stdout and errors. "
+        "Use this for computation/parsing; use `terminal` to run commands or "
+        "`file_read`/`file_write` to touch files."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "code": {"type": "string", "description": "Python code to execute."},
+            "code": {
+                "type": "string",
+                "description": (
+                    "Python code to execute. Import only from this exact list: "
+                    + ", ".join(sorted(ALLOWED_IMPORTS))
+                    + ". There is no filesystem/network/process access; "
+                      "use file_read / file_write / terminal for those."
+                ),
+            },
             "timeout": {"type": "number", "description": "Timeout in seconds (default: 30)."},
         },
         "required": ["code"],
@@ -281,13 +365,26 @@ class PythonSandboxTool(AbstractTool):
                 output={"stdout": "", "stderr": "", "violation": str(e)},
             )
 
+        # v1.7.5：取消任务时不能把沙箱子进程丢在后台。
+        # 原先直接 `await asyncio.to_thread(...)`：任务被取消时线程被丢弃，
+        # 而线程里的 Popen 继续活着直到自己的 timeout（默认 30s）——
+        # 用户以为已经停了，实际还有个 Python 进程在跑。
+        # 这里把子进程句柄登记在本次调用的 holder 上，取消时按句柄杀掉。
+        holder = _ChildHolder()
+        worker = asyncio.create_task(
+            asyncio.to_thread(self._run_child, code, timeout, holder))
         try:
-            return await asyncio.to_thread(self._run_child, code, timeout)
+            return await worker
+        except asyncio.CancelledError:
+            holder.kill()
+            raise
         except Exception as e:   # 子进程启动失败等
+            holder.kill()
             return ToolResult(tool_name=self.name, success=False,
                               error=f"{type(e).__name__}: {e}")
 
-    def _run_child(self, code: str, timeout: float) -> ToolResult:
+    def _run_child(self, code: str, timeout: float,
+                   holder: _ChildHolder | None = None) -> ToolResult:
         payload = json.dumps({
             "code": code,
             "allowed": sorted(ALLOWED_IMPORTS),
@@ -311,6 +408,8 @@ class PythonSandboxTool(AbstractTool):
             argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8",
             errors="replace", cwd=str(Path(sys.executable).parent), **kw)
+        if holder is not None:
+            holder.attach(proc)
         try:
             out, err = proc.communicate(payload, timeout=timeout)
         except subprocess.TimeoutExpired:
@@ -322,6 +421,9 @@ class PythonSandboxTool(AbstractTool):
                 error=f"代码执行超时（{timeout}s），已强制终止",
                 output={"stdout": "", "stderr": "", "timeout": True},
             )
+        finally:
+            if holder is not None:
+                holder.detach(proc)
 
         if proc.returncode != 0 and not out.strip():
             return ToolResult(

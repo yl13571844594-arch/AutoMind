@@ -7,6 +7,7 @@ import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
+from automind.core.exceptions import BudgetExhaustedError
 from automind.core.types import LLMResponse, TokenUsage
 
 
@@ -42,16 +43,39 @@ class TokenCounter:
         """追踪一次 LLM 调用的消耗。"""
         self.track_usage(response.prompt_tokens, response.completion_tokens)
 
+    @property
+    def unlimited(self) -> bool:
+        """预算 <= 0 表示不设限（v1.11.0，与其它闸门的 0 语义一致）。"""
+        return self.budget <= 0
+
     def remaining(self) -> int:
-        """剩余 token 预算。"""
+        """剩余 token 预算（不设限时返回 -1）。"""
+        if self.unlimited:
+            return -1
         return max(0, self.budget - self.tokens_used.total)
 
+    def reset(self) -> None:
+        """把已用量清零（**预算本身不变**）。
+
+        v1.7.5：预算按任务重置。此前 ``ResourceManager`` 只在 Agent 构造和
+        会话克隆时各建一次，已用量因此**跨任务累计**；而 Web 端同一会话的
+        多轮任务复用同一个克隆实例（``server.py`` 的 ``_acquire_run_agent``），
+        结果是"会话跑满预算后，之后每个新任务都在第一次模型调用就失败"。
+        实测：一个普通任务约烧 43~46k token，默认 81,920 的预算意味着
+        **一个会话大约只能跑两个任务**。
+        """
+        self.tokens_used = TokenUsage()
+
     def is_exhausted(self) -> bool:
-        """预算是否用完。"""
+        """预算是否用完（不设限时恒为 False）。"""
+        if self.unlimited:
+            return False
         return self.tokens_used.total >= self.budget
 
     def usage_fraction(self) -> float:
-        """已使用比例 (0-1)。"""
+        """已使用比例 (0-1)；不设限时恒为 0。"""
+        if self.unlimited:
+            return 0.0
         return min(1.0, self.tokens_used.total / max(1, self.budget))
 
 
@@ -129,8 +153,14 @@ class ResourceManager:
         """LLM 调用前的检查 — 速率限制 + Token 预算。"""
         await self.rate_limiter.acquire()
         if self.tokens.is_exhausted():
-            raise RuntimeError(
-                f"Token budget exhausted: {self.tokens.tokens_used.total}/{self.tokens.budget}"
+            # v1.7.5：改抛专用异常。调用方（ReAct 循环）会就地收尾并交出
+            # 部分交付清单，而不是让任务在半途丢掉全部成果。
+            raise BudgetExhaustedError(
+                f"Token 预算已用尽：{self.tokens.tokens_used.total}/{self.tokens.budget}。"
+                f"本次不再发起新的模型调用，已完成的步骤会照常交付。",
+                code="BUDGET_EXHAUSTED",
+                details={"used": self.tokens.tokens_used.total,
+                         "budget": self.tokens.budget},
             )
 
     def after_llm_call(self, response: LLMResponse) -> None:

@@ -4,10 +4,12 @@
 
     ~/.automind/plugins/
     ├── my-plugin/
-    │   ├── plugin.json      # 元信息 { name, version, description, entry_point }
+    │   ├── plugin.json      # 元信息 { name, version, description, entry_point, priority? }
     │   └── hooks.py         # 提供 get_hooks() -> AgentHooks，或 AgentHooks 实例/子类
 
 `entry_point` 形如 "hooks:get_hooks"（模块名:属性名），默认即此值。
+`priority`（可选，默认 100）：提供分派中间件的插件在链中的位置，数字越小越
+靠外层 —— 见 :meth:`PluginManager.assemble_middlewares`。
 被引用的属性可以是：
     - 返回 AgentHooks 的函数（可无参）；
     - AgentHooks 实例；
@@ -22,6 +24,7 @@ import importlib.util
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from automind.core.hooks import AgentHooks, merge_hooks
 from automind.core.logging import get_logger
@@ -39,6 +42,12 @@ class PluginMeta:
     author: str = ""
     entry_point: str = "hooks:get_hooks"
     path: str = ""  # 插件目录绝对路径
+    # v1.11.9：中间件在分派链中的位置。**数字越小越靠外层**（越先包住工具）。
+    # 不写默认 100，同优先级按插件名字典序稳定排序。为什么需要它：组装顺序
+    # 此前纯按插件名字典序 —— 插件一多，"谁包住谁"完全由名字的字母顺序决定，
+    # 交付链（delivery_manifest 外层记录 → artifact_selfcheck 校验 →
+    # fs_lock_guard 重试）的正确嵌套关系全靠巧合。
+    priority: int = 100
 
 
 def builtin_plugin_dir() -> Path:
@@ -99,6 +108,23 @@ class PluginManager:
         return found
 
     @staticmethod
+    def _read_priority(data: dict[str, Any]) -> int:
+        """读清单里的 priority；非法值（缺省/布尔/非整数/越界）一律回退默认 100。
+
+        允许范围 [-1000, 1000]：这个量级足以表达任何合理的分层，
+        又不会让一个手滑写出的巨大数字把插件顶到链的最外层。
+        注意 bool 是 int 的子类（``int(True) == 1``），要先于 int() 拦掉。
+        """
+        raw = data.get("priority")
+        if raw is None or isinstance(raw, bool):
+            return 100
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return 100
+        return value if -1000 <= value <= 1000 else 100
+
+    @staticmethod
     def _read_manifest(manifest: Path, entry: Path) -> PluginMeta | None:
         try:
             data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -112,6 +138,7 @@ class PluginManager:
             author=data.get("author", ""),
             entry_point=data.get("entry_point", "hooks:get_hooks"),
             path=str(entry.resolve()),
+            priority=PluginManager._read_priority(data),
         )
 
     # ── 加载 / 卸载 ───────────────────────────────────────
@@ -165,12 +192,57 @@ class PluginManager:
                 logger.error("plugin_entry_point_not_found", plugin=meta.name,
                              attr=attr, file=str(module_file))
                 return None
-            return PluginManager._resolve_hooks(target)
+            hooks = PluginManager._resolve_hooks(target)
+            if hooks is not None:
+                PluginManager._attach_extensions(hooks, module, meta.name)
+            return hooks
         except Exception as e:
             logger.error("plugin_load_failed", plugin=meta.name,
                          file=str(module_file),
                          error=f"{type(e).__name__}: {e}")
             return None
+
+    @staticmethod
+    def _attach_extensions(hooks: AgentHooks, module: Any, name: str) -> None:
+        """插件除钩子外还可以提供（v1.11.6）：
+
+        * ``get_tools() -> list[AbstractTool]``：新增工具（不能顶替同名内置工具）；
+        * ``get_middleware() -> async mw(tool_name, kwargs, call_next)``：包住工具分派，
+          可以重试、改写参数、补充结果说明（见 ``builtin_plugins/net_resilience``）。
+        """
+        tools: list[Any] = []
+        middleware = None
+        try:
+            if callable(getattr(module, "get_tools", None)):
+                tools = list(module.get_tools() or [])
+            if callable(getattr(module, "get_middleware", None)):
+                middleware = module.get_middleware()
+        except Exception as e:
+            logger.error("plugin_extensions_failed", plugin=name, error=f"{type(e).__name__}: {e}")
+        hooks.plugin_tools = tools               # type: ignore[attr-defined]
+        hooks.plugin_middleware = middleware     # type: ignore[attr-defined]
+
+    def assemble_tools(self) -> list[Any]:
+        out: list[Any] = []
+        for n in sorted(self._loaded):
+            out.extend(getattr(self._loaded[n], "plugin_tools", None) or [])
+        return out
+
+    def assemble_middlewares(self) -> list[Any]:
+        """汇总已加载插件的分派中间件，按 (priority, 插件名) 稳定排序。
+
+        列表顺序 = 包裹顺序：**排在前面的在外层**（先收到调用、最后拿到结果）。
+        内置交付链的既定顺序（v1.11.9）：delivery_manifest(10) 记录最终落盘
+        → artifact_selfcheck(20) 回读校验 → fs_lock_guard(30) 占用重试
+        → net_resilience(40) 网络重试。外层看到的都是内层处理完的**最终**结果。
+        """
+        items = [
+            (self._meta[n].priority if n in self._meta else 100, n,
+             getattr(self._loaded[n], "plugin_middleware", None))
+            for n in self._loaded
+        ]
+        return [m for _, _, m in sorted(items, key=lambda t: (t[0], t[1]))
+                if m is not None]
 
     @staticmethod
     def _resolve_hooks(target: object) -> AgentHooks | None:
@@ -192,8 +264,15 @@ class PluginManager:
     # ── 汇总 ──────────────────────────────────────────────
 
     def assemble_hooks(self) -> AgentHooks:
-        """合并所有已加载插件的 hooks 为一份。"""
-        return merge_hooks(list(self._loaded.values()))
+        """合并所有已加载插件的 hooks 为一份（按 priority → 名称的顺序合并）。"""
+        # 与 assemble_middlewares 同序：priority 小的先注册 —— 对 after_run 这类
+        # 钩子意味着先执行。交付链上 delivery_manifest(10) 的清单追加因此稳定
+        # 先于 task_notify(100) 的通知发出，顺序不再取决于目录的字母序。
+        order = sorted(
+            self._loaded,
+            key=lambda n: (self._meta[n].priority if n in self._meta else 100, n),
+        )
+        return merge_hooks([self._loaded[n] for n in order])
 
     def loaded_names(self) -> list[str]:
         return sorted(self._loaded.keys())

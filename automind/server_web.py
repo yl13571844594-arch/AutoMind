@@ -13,7 +13,9 @@ import re
 # jsdelivr 仅用于按需加载 Monaco Editor（📄 代码标签页）；worker 走 blob 代理。
 INDEX_CSP = (
     "default-src 'self'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+    # blob:：启动页的自愈路径（脚本被以错误类型下发时，重新拉取后从 Blob URL 加载）。
+    # 已允许 'unsafe-inline'，再放行同源生成的 blob: 不扩大攻击面。
+    "script-src 'self' 'unsafe-inline' blob: https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
     "font-src 'self' https://fonts.gstatic.com https://cdn.jsdelivr.net data:; "
     "img-src 'self' data: blob: https:; "
@@ -64,6 +66,53 @@ def cache_control_for(path: str) -> str | None:
     return None
 
 
+#: 前端资源的权威 MIME 类型（v1.11.4）。
+#:
+#: 根因：Windows 上 Python 的 ``mimetypes`` 会读注册表 ``HKCR\\.js\\Content Type``，
+#: 不少软件（旧版 IE 组件、某些编辑器 / 安全软件 / 开发工具）把它改成了 ``text/plain``。
+#: StaticFiles 据此把 ``index-*.js`` 以 ``text/plain`` 下发，再叠加我们自己的
+#: ``X-Content-Type-Options: nosniff`` —— 浏览器拒绝把它当模块脚本执行，
+#: 启动页报"页面脚本未能正常运行（HTTP 200）"，而且经典界面的脚本同样被拒，
+#: 「打开兼容版界面」也救不回来。这与浏览器新旧无关，是服务端的类型错了。
+WEB_MIME_TYPES: dict[str, str] = {
+    ".js": "text/javascript; charset=utf-8",
+    ".mjs": "text/javascript; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".json": "application/json",
+    ".map": "application/json",
+    ".svg": "image/svg+xml",
+    ".wasm": "application/wasm",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ico": "image/x-icon",
+    ".png": "image/png",
+    ".webp": "image/webp",
+}
+
+
+def ensure_web_mimetypes() -> None:
+    """把权威类型写回全局 ``mimetypes`` 表（覆盖注册表带进来的错误值）。"""
+    import mimetypes
+
+    mimetypes.init()
+    for ext, ctype in WEB_MIME_TYPES.items():
+        mimetypes.add_type(ctype.split(";")[0], ext)
+
+
+def fix_static_content_type(response, path: str) -> None:
+    """``/static/`` 下的前端资源：Content-Type 一律以 :data:`WEB_MIME_TYPES` 为准。
+
+    只改全局表还不够：别的库可能在之后再调用 ``mimetypes.init()``，把注册表的
+    错误值又读回来。在响应出口处按扩展名兜底，才是怎么都不会错的那一层。
+    """
+    if not path.startswith("/static/"):
+        return
+    dot = path.rfind(".")
+    ctype = WEB_MIME_TYPES.get(path[dot:].lower()) if dot > path.rfind("/") else None
+    if ctype and getattr(response, "status_code", 200) < 400:
+        response.headers["Content-Type"] = ctype
+
+
 def apply_security_headers(response, path: str) -> None:
     """为响应添加安全头（防 MIME 嗅探 / 点击劫持 / Referer 泄漏）+ 缓存策略。
 
@@ -71,6 +120,7 @@ def apply_security_headers(response, path: str) -> None:
     setdefault：这条策略是修复升级后加载失败的根因，不允许被上游默认值
     （如 StaticFiles）覆盖或抢先占位。
     """
+    fix_static_content_type(response, path)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "no-referrer")

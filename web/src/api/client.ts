@@ -154,6 +154,35 @@ export async function apiPost<T = any>(path: string, body?: unknown, timeoutMs?:
   return parse<T>(r, path);
 }
 
+/** 上传二进制（请求体即文件内容）—— 例如商业扩展包 .whl（v1.11.1）。 */
+export async function apiUpload<T = any>(path: string, data: Blob): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream', ...adminHeaders() },
+      body: data,
+    });
+  } catch (e: any) {
+    throw new ApiError(0, e?.message || '网络请求失败', path);
+  }
+  return parse<T>(r, path);
+}
+
+export async function apiPatch<T = any>(path: string, body?: unknown): Promise<T> {
+  let r: Response;
+  try {
+    r = await fetch(`${API}${path}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...adminHeaders() },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  } catch (e: any) {
+    throw new ApiError(0, e?.message || '网络请求失败', path);
+  }
+  return parse<T>(r, path);
+}
+
 export async function apiDelete<T = any>(path: string): Promise<T> {
   let r: Response;
   try {

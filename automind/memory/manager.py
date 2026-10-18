@@ -107,6 +107,11 @@ class MemoryManager:
     async def compress_context(self, llm: Any = None) -> str:
         """压缩短期记忆上下文。
 
+        ⚠️ v1.7.5 说明：**本方法目前没有任何调用方**（``short_term`` 实际上
+        是一个只写缓冲区，而模型看到的是 ReAct 自己维护的消息列表）。
+        保留它给脚本/库用法，但它不是长任务的上下文保护 —— 真正生效的是
+        ``ReActExecutor.compact()``（按 token 预算触发，头+尾保留折叠）。
+
         Returns:
             生成的摘要文本。
         """

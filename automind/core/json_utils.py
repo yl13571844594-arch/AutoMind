@@ -133,7 +133,11 @@ def repair_json(text: str) -> Any | None:
 
 
 def parse_tool_arguments(raw: str | None) -> dict:
-    """稳健解析 LLM 工具调用的 arguments 字段，始终返回 dict（失败返回 {}）。"""
+    """稳健解析 LLM 工具调用的 arguments 字段，始终返回 dict（失败返回 {}）。
+
+    会尽力**修补**截断的 JSON。工具调用路径请用
+    :func:`parse_tool_arguments_checked` —— 截断的参数不该被补齐后执行。
+    """
     if not raw:
         return {}
     try:
@@ -141,3 +145,32 @@ def parse_tool_arguments(raw: str | None) -> dict:
     except Exception:
         data = repair_json(raw)
     return data if isinstance(data, dict) else {}
+
+
+def parse_tool_arguments_checked(raw: str | None) -> tuple[dict, str]:
+    """同 :func:`parse_tool_arguments`，另返回"参数本身有问题"的说明（无问题为空串）。
+
+    v1.7.6：此前解析失败一律返回 ``{}``，工具于是**不带任何参数**被执行 ——
+    模型收到的是"缺少必需参数 path"，被引向错误的修法（补参数），而真正的
+    原因是它的参数 JSON 被 ``max_tokens`` 截断了（大段 file_write 最常见）。
+    更糟的是 ``repair_json`` 能把截断的 JSON **补齐成合法对象**：半截文件内容
+    会被当成完整内容写进磁盘，任务还显示成功。
+
+    因此：能直接解析（含去围栏/截取平衡片段）→ 正常；需要"补齐括号/引号"
+    才能解析 → 视为**截断**，返回说明，由调用方拒绝执行；完全解析不了同理。
+    """
+    if not raw or not str(raw).strip():
+        return {}, ""
+    try:
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            return data, ""
+    except Exception:
+        data = extract_json(raw)
+        if isinstance(data, dict):
+            return data, ""
+    size = len(str(raw))
+    if repair_json(raw) is not None:
+        return {}, (f"工具参数 JSON 不完整（共 {size} 字符，结尾被截断，多半是超出了"
+                    f"单次输出长度上限）。本次调用**未执行**。")
+    return {}, (f"工具参数不是合法的 JSON 对象（共 {size} 字符）。本次调用**未执行**。")

@@ -403,7 +403,10 @@ class TestAutopilotApi:
         # v1.6.4：新增了几个开关。其中**唯一**默认关闭的是目录级隔离
         # （它对每个会话拷一份工作副本，改变产物落点，必须是显式选择）；
         # 其余新开关（后台命令通道 / 审批让槽 / 轨迹落盘）默认开启。
-        assert all(v is True for k, v in flags.items() if k != "isolate_workspace")
+        # v1.7.6：响应里同时带上了数值/枚举参数的当前值（设置面板要显示），
+        # 这里只断言布尔开关
+        assert all(v is True for k, v in flags.items()
+                   if isinstance(v, bool) and k != "isolate_workspace")
         assert flags["isolate_workspace"] is False
 
         r = c.post("/api/config/autopilot", json={"auto_review": False}).json()

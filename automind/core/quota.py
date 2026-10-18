@@ -7,13 +7,15 @@
       跨天自动滚动（本地时区日期）。
 
 限额规则（None = 不限）：
-    ============ ============ ==========
-    版本          每日任务数     工作区数量
-    ============ ============ ==========
-    community     100          3
-    pro           不限          30
-    enterprise    不限          不限
-    ============ ============ ==========
+    ============ ============ ========== ========== ============
+    版本          每日任务数     工作区数量   工作流数量   foreach 上限
+    ============ ============ ========== ========== ============
+    community     100          3          20         20
+    pro           不限          30         200        1000
+    enterprise    不限          不限        不限        不限
+    ============ ============ ========== ========== ============
+
+    （工作流的触发器、定时间隔、历史保留见 ``QUOTA_RULES`` 注释。）
 """
 
 from __future__ import annotations
@@ -25,11 +27,30 @@ from pathlib import Path
 
 from automind.core import edition as _edition
 
-#: 版本 → {daily_tasks, workspaces}；None 表示不限
+#: 版本 → 限额；None 表示不限。
+#:
+#: 工作流相关的五项（v1.8.0，见 docs/WORKFLOW_ROADMAP.md §2.3）：
+#:   · workflows              已保存（校验通过）的工作流数；超出的**仍可列出、
+#:                            校验、dry-run**，只是不能运行
+#:   · workflow_triggers      活跃触发器数（社区版 0 = 无内置触发器，走外部 cron / CI）
+#:   · workflow_min_interval  定时触发的最小间隔（秒；社区版无触发器，不适用）
+#:   · workflow_history       运行历史保留条数（None = 按天数保留，见下一项）
+#:   · workflow_history_days  运行历史保留天数（v1.9.0：专业版 90 天；企业版 None =
+#:                            可配置，配置项 workflow_history_days，缺省 365 天）
+#:   · workflow_foreach_max   foreach 单次最大迭代数
 QUOTA_RULES: dict[str, dict[str, int | None]] = {
-    "community": {"daily_tasks": 100, "workspaces": 3},
-    "pro": {"daily_tasks": None, "workspaces": 30},
-    "enterprise": {"daily_tasks": None, "workspaces": None},
+    "community": {"daily_tasks": 100, "workspaces": 3,
+                  "workflows": 20, "workflow_triggers": 0,
+                  "workflow_min_interval": None, "workflow_history": 50,
+                  "workflow_history_days": None, "workflow_foreach_max": 20},
+    "pro": {"daily_tasks": None, "workspaces": 30,
+            "workflows": 200, "workflow_triggers": 30,
+            "workflow_min_interval": 300, "workflow_history": None,
+            "workflow_history_days": 90, "workflow_foreach_max": 1000},
+    "enterprise": {"daily_tasks": None, "workspaces": None,
+                   "workflows": None, "workflow_triggers": None,
+                   "workflow_min_interval": 60, "workflow_history": None,
+                   "workflow_history_days": None, "workflow_foreach_max": None},
 }
 
 def _legacy_quota_file() -> Path:
@@ -104,6 +125,25 @@ def workspace_limit() -> int | None:
     return rules()["workspaces"]
 
 
+def workflow_limit(key: str) -> int | None:
+    """工作流相关限额（键见 ``QUOTA_RULES`` 注释）；None = 不限。"""
+    return rules().get(key)
+
+
+def check_workflow_slot(position: int) -> tuple[bool, str]:
+    """第 ``position`` 个（1 起，按文件名排序、只数校验通过的）工作流能否运行。
+
+    为什么按"位次"而不是"总数"判：超限时不能让**全部**工作流都跑不了 ——
+    用户最早建的那 20 个照常可用，超出的那些列出来、标注原因，
+    删掉别的或升级之后自然恢复。
+    """
+    limit = workflow_limit("workflows")
+    if limit is None or position <= limit:
+        return True, ""
+    return False, (f"超出{_edition.edition_label()}上限（{limit} 个工作流），"
+                   "该工作流仍可查看、校验与试运行；升级或删除其他工作流后可运行")
+
+
 def tasks_used_today() -> int:
     with _lock:
         _load()
@@ -139,6 +179,23 @@ def refund_task() -> None:
         _save()
 
 
+def check_workflow_triggers(active_before: int) -> tuple[bool, str]:
+    """再启用一个触发器前校验活跃数上限（v1.9.0，R-203）。
+
+    ``active_before`` 为不含本次的现有活跃数。社区版上限是 0：没有内置触发器，
+    定时请用外部 cron / CI 调 ``POST /api/workflow/run``。
+    """
+    limit = workflow_limit("workflow_triggers")
+    if limit is None or active_before < limit:
+        return True, ""
+    tier = _edition.get_edition()
+    if tier == "community":
+        return False, ("社区版没有内置触发器：请用外部 cron / CI 调用 "
+                       "POST /api/workflow/run，或升级到专业版（30 个活跃触发器）")
+    return False, (f"活跃触发器已达{_edition.edition_label()}上限（{limit} 个）。"
+                   "请先停用其他触发器，或升级到企业版（不限）")
+
+
 def check_workspace(count_existing: int) -> tuple[bool, str]:
     """新增工作区前校验数量上限。``count_existing`` 为不含本次新增的现有数量。"""
     limit = workspace_limit()
@@ -160,6 +217,9 @@ def snapshot() -> dict:
         "edition": _edition.get_edition(),
         "daily_tasks": {"used": used, "limit": r["daily_tasks"]},
         "workspaces": {"limit": r["workspaces"]},
+        "workflows": {k: r.get(k) for k in (
+            "workflows", "workflow_triggers", "workflow_min_interval",
+            "workflow_history", "workflow_history_days", "workflow_foreach_max")},
     }
 
 

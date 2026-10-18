@@ -9,6 +9,10 @@ hello_hooks），文件与清单都齐全 —— 但 `PluginManager` 的默认 `
   · `status()` 曾用"plugin_dirs[0] 即内置目录"来判定 builtin，用户自定义
     plugin_dirs 时会把用户插件错标成内置；
   · 启用状态只活在内存里，一次改模型触发的 Agent 重建就悄悄失效。
+
+v1.11.9：内置插件扩到 8 个 —— 新增 delivery_manifest / artifact_selfcheck /
+fs_lock_guard（交付链三件套）与 net_resilience。升级路径用例相应更新：
+旧配置升级后这 4 个新插件必须默认开启。
 """
 
 from __future__ import annotations
@@ -20,7 +24,14 @@ import pytest
 
 from automind.core.plugin import PluginManager, builtin_plugin_dir
 
-BUILTIN = {"cost_tracker", "pii_guard", "task_notify", "hello_hooks"}
+BUILTIN = {"cost_tracker", "pii_guard", "task_notify", "hello_hooks",
+           "net_resilience", "delivery_manifest", "artifact_selfcheck", "fs_lock_guard"}
+
+#: v1.11.6 之前就存在的内置插件（无 known_plugins 记录的旧配置按"都见过"处理）
+_LEGACY = {"cost_tracker", "pii_guard", "task_notify", "hello_hooks"}
+
+#: v1.11.9 新增：升级后默认开启
+_V1119_NEW = {"delivery_manifest", "artifact_selfcheck", "fs_lock_guard"}
 
 
 class TestDiscovery:
@@ -46,12 +57,20 @@ class TestDiscovery:
 
     @pytest.mark.parametrize("name", sorted(BUILTIN))
     def test_each_builtin_loads_and_hooks_something(self, name):
+        """加载后必须"接上了点什么"：生命周期钩子、或工具、或分派中间件。
+
+        v1.11.9：交付链三件套里的 artifact_selfcheck / fs_lock_guard 只提供
+        中间件（get_hooks 返回空 AgentHooks 是**设计**），单看钩子会把它们
+        误判成"等于没装"。判定口径改为"三者有其一"。
+        """
         pm = PluginManager()
         pm.discover()
         hooks = pm.load(name)
         assert hooks is not None, f"{name} 加载失败"
         attached = [k for k in vars(hooks) if getattr(hooks, k) is not None]
-        assert attached, f"{name} 一个生命周期钩子都没挂上，等于没装"
+        assert attached or getattr(hooks, "plugin_tools", None) \
+            or getattr(hooks, "plugin_middleware", None) is not None, \
+            f"{name} 钩子 / 工具 / 中间件一个都没提供，等于没装"
 
 
 class TestBuiltinFlag:
@@ -107,6 +126,12 @@ class _FakeAgent:
         self.applied = True
 
 
+def _builtin_names() -> set[str]:
+    from automind.core.plugin import PluginManager
+    pm = PluginManager()
+    return {m.name for m in pm.discover() if pm.is_builtin(m)}
+
+
 class TestEnabledStatePersists:
     @pytest.fixture(autouse=True)
     def _isolated_config(self, tmp_path):
@@ -114,10 +139,31 @@ class TestEnabledStatePersists:
         srv._store.config_file = tmp_path / "config.json"
         return srv
 
-    def _write(self, srv, names):
+    def _write(self, srv, names, known=None):
         cfg = srv._read_config()
         cfg["enabled_plugins"] = names
+        # 默认模拟"已是新版配置"：所有内置插件用户都见过（升级路径见下面两个用例）
+        cfg["known_plugins"] = known if known is not None else sorted(_builtin_names())
         srv._write_config(cfg)
+
+    def test_new_builtin_enabled_on_upgrade(self, _isolated_config):
+        """v1.11.6 / v1.11.9：升级前保存过名单的用户，新版本带来的内置插件默认开启。"""
+        srv = _isolated_config
+        cfg = srv._read_config()
+        cfg["enabled_plugins"] = ["cost_tracker"]           # 旧配置：没有 known_plugins
+        srv._write_config(cfg)
+        agent = _FakeAgent()
+        srv._restore_plugins(agent)
+        assert set(agent.plugin_manager.loaded_names()) == {"cost_tracker"} | _V1119_NEW | {"net_resilience"}
+        assert _V1119_NEW <= set(srv._read_config()["known_plugins"])
+
+    def test_known_but_disabled_builtin_stays_off(self, _isolated_config):
+        srv = _isolated_config
+        self._write(srv, ["cost_tracker"])                 # 见过其余内置，但只启用这一个
+        agent = _FakeAgent()
+        srv._restore_plugins(agent)
+        for off in BUILTIN - {"cost_tracker"}:
+            assert off not in agent.plugin_manager.loaded_names(), off
 
     def test_enabled_plugins_survive_agent_rebuild(self, _isolated_config):
         """改一次模型就触发 Agent 重建 —— 启用的插件不能因此静默失效。"""

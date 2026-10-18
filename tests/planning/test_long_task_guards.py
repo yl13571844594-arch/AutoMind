@@ -213,8 +213,15 @@ class TestReactPerStepTimeout:
         ex = ReActExecutor(_OneCallLLM(), reg, max_iterations=3, tool_timeout=0)
         t0 = time.perf_counter()
         asyncio.run(ex.run("干活"))
-        assert time.perf_counter() - t0 >= 0.2, "tool_timeout=0 应当不限（恢复旧行为）"
+        elapsed = time.perf_counter() - t0
+        # 用一个宽松的下界：asyncio.sleep(0.2) 在 Windows 上实际可能只睡到
+        # 0.197s（定时器分辨率），卡 0.2 的精确阈值会偶发假失败。
+        # 真正要验的是"没有被超时掐掉" —— 下面两条断言才是判据。
+        assert elapsed >= 0.15, f"tool_timeout=0 应当不限（恢复旧行为），实测 {elapsed:.3f}s"
         assert ex.tool_timeouts == 0
+        assert reg.calls >= 1, "工具应当真的被执行了"
+        assert ex.actions and ex.actions[0][1].success, (
+            "tool_timeout=0 时工具结果不得是超时失败")
 
     def test_timeout_shows_up_in_the_partial_report(self):
         reg = _SlowRegistry()
@@ -452,5 +459,11 @@ class TestTaskBudget:
         assert "_task_deadline" in src and "max_task_seconds" in src
         src_react = inspect.getsource(agent_mod.AutoMindAgent._run_react)
         assert "deadline=self._task_deadline" in src_react
-        src_plan = inspect.getsource(agent_mod.AutoMindAgent._run_plan_execute)
+        # v1.7.5：计划的实际执行体从 _run_plan_execute 拆到了 _execute_plan
+        # （拆出来是为了让断点续跑能接着跑原计划，而不是重新规划一遍），
+        # 因此 deadline 的接线断言跟着挪到新方法上 —— 意图不变。
+        src_plan = inspect.getsource(agent_mod.AutoMindAgent._execute_plan)
         assert "deadline=self._task_deadline" in src_plan
+        # 两条路径都必须仍然经过同一个执行入口
+        assert "_execute_plan(" in inspect.getsource(
+            agent_mod.AutoMindAgent._run_plan_execute)

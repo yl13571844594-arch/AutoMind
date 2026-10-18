@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import inspect
 import re
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from automind.core.logging import get_logger
@@ -97,12 +99,42 @@ def resolve_name(name: str, candidates: Sequence[str]) -> tuple[str | None, list
         return name, []
     want, toks = _norm(name), _tokens(name)
     for matcher in ([c for c in cands if _norm(c) == want],
-                    [c for c in cands if toks and _tokens(c) == toks]):
+                    [c for c in cands if toks and _tokens(c) == toks],
+                    # v1.11.2：带命名空间的工具（MCP 的 mcp__服务器__工具、插件前缀）
+                    # 模型几乎从不照抄全名，而是写 github.create_issue /
+                    # github_create_issue / 只写 create_issue —— 去掉命名空间后
+                    # 唯一命中就是确定的，不该让这次调用白跑
+                    [c for c in cands if want and want in _namespace_forms(c)],
+                    [c for c in cands if want and _norm(_short_name(c)) == want]):
         if len(matcher) == 1:
             return matcher[0], []
         if len(matcher) > 1:                      # 有歧义：不替模型做主
             return None, matcher[:_SUGGEST_LIMIT]
     return None, suggest_names(name, cands)
+
+
+#: 视为"命名空间"的前缀：去掉它剩下的才是工具本名
+_NS_PREFIXES = ("mcp", "plugin", "plg", "ext", "skill", "connector")
+
+
+def _short_name(name: str) -> str:
+    """命名空间工具的本名：``mcp__github__create_issue`` → ``create_issue``，
+    ``plugin_weather`` → ``weather``；没有命名空间返回空串（不参与这一级匹配，
+    否则 ``read`` 也能"唯一命中" ``file_read``，那是在猜）。"""
+    if "__" in name:
+        return name.rsplit("__", 1)[-1]
+    head, _, rest = name.partition("_")
+    return rest if head.casefold() in _NS_PREFIXES and rest else ""
+
+
+def _namespace_forms(name: str) -> set[str]:
+    """命名空间工具的等价写法（归一化后）：去掉 ``mcp`` 前缀的 服务器+工具 组合。"""
+    if "__" not in name:
+        return set()
+    parts = [p for p in name.split("__") if p]
+    if parts and parts[0].casefold() in _NS_PREFIXES:
+        parts = parts[1:]
+    return {_norm("".join(parts))} if len(parts) >= 2 else set()
 
 
 def unknown_tool_error(name: str, candidates: Sequence[str]) -> str:
@@ -164,6 +196,306 @@ def typo_params(tool: AbstractTool, kwargs: dict[str, Any]) -> dict[str, list[st
         if tips:
             out[key] = tips
     return out
+
+
+def _schema_props(tool: AbstractTool) -> dict[str, Any]:
+    try:
+        props = (tool.parameters or {}).get("properties", {})
+    except Exception:                                     # pragma: no cover - 防御性
+        return {}
+    return props if isinstance(props, dict) else {}
+
+
+def normalize_param_names(tool: AbstractTool, kwargs: dict[str, Any]
+                          ) -> tuple[dict[str, Any], dict[str, str]]:
+    """把**可确定**写错的参数名改成真名：``filePath`` / ``file-path`` → ``file_path``。
+
+    与工具名的 :func:`resolve_name` 同一策略：只在"归一化后相同"或"词集合
+    相同"且**唯一命中**、目标参数又没被同时传入时才改；拼写相近这类"猜"的情况
+    仍交给 :func:`typo_params` 报错，让模型自己确认。返回 ``(新参数, 改名表)``。
+    """
+    valid = list(_schema_props(tool))
+    if not valid or not kwargs:
+        return kwargs, {}
+    out = dict(kwargs)
+    renamed: dict[str, str] = {}
+    for key in list(kwargs):
+        if key in valid:
+            continue
+        want, toks = _norm(key), _tokens(key)
+        hits = [v for v in valid if _norm(v) == want] or \
+               [v for v in valid if toks and _tokens(v) == toks]
+        if len(hits) == 1 and hits[0] not in out:
+            out[hits[0]] = out.pop(key)
+            renamed[key] = hits[0]
+    return out, renamed
+
+
+_TRUE = {"true", "yes", "y", "1", "on", "是"}
+_FALSE = {"false", "no", "n", "0", "off", "否", "none", "null", ""}
+
+
+#: 参数名里"这是文件系统路径"的精确名单（v1.11.13）。
+#: 之前只有 file_* 工具自己走 `_RootGuard` 解析相对路径，office/media/archive
+#: 等工具直接 `Path(str(kwargs.get("path")))` —— 相对路径按**服务进程 cwd** 落，
+#: 于是 Web 切到 A 项目、IM 机器人跑 B 项目时，产物会写进 AutoMind 自己的目录，
+#: 用户找不到、隔离副本里也没有，表现为"工具失败/工作区混淆"。这里在分派入口
+#: 统一把相对路径锚到**当前任务的工作副本/项目根**，所有工具一致。
+#:
+#: 只列**语义明确是路径**的名字：``input``/``source``/``file`` 这类在别的工具里
+#: 可能是文本或标识符（例如 skill_invoke.input 是技能输入文本），不能一律当路径。
+_PATH_KEYS = frozenset({
+    "path", "filename", "filepath", "file_path",
+    "output", "output_file", "saved_to", "dest", "destination", "dst",
+    "sources", "inputs", "input_file",
+    "database", "db", "db_path", "workdir", "cwd",
+    "csv_path", "text_path", "attachments",
+})
+#: 这些路径始终以**项目根**为基准（不是会话副本）：git 仓库必须指向真实仓库，
+#: 隔离副本里 .git 是跳过复制的。
+_PROJECT_ROOT_KEYS = frozenset({"repo", "repository"})
+
+
+def _path_base() -> Any:
+    """相对路径的基准：会话副本优先，其次项目根；都没有则不处理。"""
+    try:
+        from automind.core import session_ctx
+    except Exception:                                    # pragma: no cover - 防御
+        return None
+    try:
+        ws = session_ctx.workspace()
+        if ws:
+            return Path(ws)
+        root = session_ctx.project_root()
+        if root:
+            return Path(root)
+    except Exception:                                    # pragma: no cover - 防御
+        return None
+    return None
+
+
+def _project_base() -> Any:
+    try:
+        from automind.core import session_ctx
+        root = session_ctx.project_root()
+    except Exception:                                    # pragma: no cover - 防御
+        return None
+    return Path(root) if root else None
+
+
+def _looks_like_path(value: str) -> bool:
+    text = value.strip()
+    if not text:
+        return False
+    low = text.lower()
+    return not low.startswith(("http://", "https://", "data:", "file://", "mailto:"))
+
+
+def _as_absolute(value: Any, base: Any) -> Any:
+    """把一个路径参数变成绝对路径；非字符串/URL/空值原样返回。"""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
+        text = text[1:-1].strip()          # 模型常把整条路径再包一层引号
+    if not _looks_like_path(text) or base is None:
+        return value
+    try:
+        p = Path(text).expanduser()
+        if p.is_absolute():
+            return str(p)
+        return str((Path(base) / p).resolve())
+    except (OSError, ValueError):
+        return value
+
+
+def absolutize_paths(tool: AbstractTool, kwargs: dict[str, Any]
+                     ) -> tuple[dict[str, Any], list[str]]:
+    """把路径类参数锚到当前任务的会话副本/项目根（v1.11.13）。
+
+    只动**名字明确是路径**的参数（``path`` / ``output`` / ``sources`` …），
+    不动 ``query`` / ``command`` / ``content``；URL 与绝对路径原样保留。
+    没有绑定会话上下文（库调用、单测）时不做任何事，保持既有行为。
+    """
+    if not kwargs:
+        return kwargs, []
+    base = _path_base()
+    project_base = _project_base()
+    if base is None and project_base is None:
+        return kwargs, []
+    props = _schema_props(tool)
+    out = dict(kwargs)
+    changed: list[str] = []
+    for key, value in kwargs.items():
+        if props and key not in props:
+            # 只处理本工具 schema 里声明过的参数：避免把 skill_invoke.input
+            # 这类同名但语义完全不同的字段误当路径改写。
+            continue
+        if key in _PROJECT_ROOT_KEYS:
+            if project_base is not None and isinstance(value, str):
+                new = _as_absolute(value, project_base)
+                if new != value:
+                    out[key] = new
+                    changed.append(key)
+            continue
+        if key not in _PATH_KEYS:
+            continue
+        target_base = base or project_base
+        if isinstance(value, (list, tuple)):
+            mapped = [_as_absolute(v, target_base) for v in value]
+            if list(mapped) != list(value):
+                out[key] = mapped
+                changed.append(key)
+        elif isinstance(value, dict):
+            continue
+        else:
+            new = _as_absolute(value, target_base)
+            if new != value:
+                out[key] = new
+                changed.append(key)
+    files = kwargs.get("files")
+    if isinstance(files, list) and (not props or "files" in props):
+        mapped_files = []
+        touched = False
+        for item in files:
+            if isinstance(item, dict) and isinstance(item.get("path"), str):
+                value = item["path"]
+                new = _as_absolute(value, base or project_base)
+                if new != value:
+                    mapped_files.append({**item, "path": new})
+                    touched = True
+                    continue
+            mapped_files.append(item)
+        if touched:
+            out["files"] = mapped_files
+            changed.append("files")
+    return out, changed
+
+
+
+#: 常见"同义参数名"（v1.11.13）。模型经常把 path 写成 file_path、command
+#: 写成 cmd、max_results 写成 limit —— 这些不是拼写错误而是另一套命名习惯。
+#: 在确认目标参数存在、且未被同时传入时直接改名，省掉一次白跑的重试。
+_PARAM_ALIASES: dict[str, tuple[str, ...]] = {
+    "path": ("file_path", "filepath", "filename", "file", "target", "local_path"),
+    "command": ("cmd", "shell_command", "command_line"),
+    "content": ("text", "contents", "data", "body"),
+    "workdir": ("cwd", "working_directory", "working_dir"),
+    "query": ("q", "keyword", "search_query"),
+    "url": ("uri", "link", "target_url"),
+    "output": ("output_path", "out", "save_path", "dst"),
+    "files": ("file_list",),
+    "old_string": ("old", "old_text", "find", "search_text"),
+    "new_string": ("new", "new_text", "replace_with", "replacement"),
+    "timeout": ("timeout_s", "timeout_sec", "timeout_seconds"),
+    "max_results": ("limit", "num_results"),
+    "database": ("db", "db_path"),
+    "sql": ("statement", "query_sql"),
+}
+
+
+def apply_param_aliases(tool: AbstractTool, kwargs: dict[str, Any]
+                        ) -> tuple[dict[str, Any], dict[str, str]]:
+    """把同义参数名改成 schema 里的真名（见 ``_PARAM_ALIASES``）。"""
+    props = _schema_props(tool)
+    if not props or not kwargs:
+        return kwargs, {}
+    valid = set(props)
+    out = dict(kwargs)
+    renamed: dict[str, str] = {}
+    for target, aliases in _PARAM_ALIASES.items():
+        if target not in valid or target in out:
+            continue
+        for alias in aliases:
+            if alias in valid or alias not in out:
+                continue              # alias 本身是合法参数（如 file_read.limit）就别动
+            out[target] = out.pop(alias)
+            renamed[alias] = target
+            break
+    return out, renamed
+
+
+def _coerce_container_string(text: str) -> Any:
+    """把被"再序列化一层"的数组/对象字符串解析出来。
+
+    兼容：JSON、Python 字面量（模型有时用单引号）、外层 Markdown 代码围栏。
+    解析失败返回原字符串，由调用方保留原值。
+    """
+    import ast
+    import json as _json
+
+    body = text.strip()
+    if body.startswith("```"):
+        body = re.sub(r"^```[A-Za-z0-9_+-]*\s*", "", body)
+        body = re.sub(r"\s*```$", "", body).strip()
+    if body[:1] not in "[{":
+        return text
+    for parser in (_json.loads, ast.literal_eval):
+        try:
+            parsed = parser(body)
+        except Exception:
+            continue
+        if isinstance(parsed, (list, dict)):
+            return parsed
+    return text
+
+
+def coerce_param_types(tool: AbstractTool, kwargs: dict[str, Any]
+                       ) -> tuple[dict[str, Any], list[str]]:
+    """按 JSON Schema 声明把**明显**类型不符的参数转过来（转不了就原样保留）。
+
+    模型最常见的类型失误：数字写成字符串（``"timeout": "600"``）、布尔写成
+    字符串（``"recursive": "true"``）、数组/对象被再序列化了一层
+    （``"files": "[\"a.py\"]"`` / Python 单引号列表）、只有一个元素时忘了
+    包成数组。这些都会让工具在内部 ``int()`` / 比较 / 迭代时出错或静默走错
+    分支 —— 而意图是明确的。
+    """
+    props = _schema_props(tool)
+    if not props:
+        return kwargs, []
+    out = dict(kwargs)
+    fixed: list[str] = []
+    for key, val in kwargs.items():
+        spec = props.get(key)
+        if not isinstance(spec, dict):
+            continue
+        typ = spec.get("type")
+        if isinstance(typ, list):           # ["string", "null"] 之类：不替它做选择
+            continue
+        new = val
+        try:
+            if typ == "integer" and isinstance(val, str) and re.fullmatch(r"\s*-?\d+\s*", val) or typ == "integer" and isinstance(val, float) and val.is_integer():
+                new = int(val)
+            elif typ == "number" and isinstance(val, str) and re.fullmatch(
+                    r"\s*-?\d+(\.\d+)?\s*", val):
+                new = float(val) if "." in val else int(val)
+            elif typ == "boolean" and isinstance(val, str) and val.strip().lower() in _TRUE | _FALSE:
+                new = val.strip().lower() in _TRUE
+            elif typ == "boolean" and isinstance(val, int) and not isinstance(val, bool) and val in (0, 1):
+                new = bool(val)
+            elif typ in ("array", "object") and isinstance(val, str) and (
+                    val.strip()[:1] in "[{" or "```" in val):
+                parsed = _coerce_container_string(val)
+                if (typ == "array" and isinstance(parsed, list)) or \
+                        (typ == "object" and isinstance(parsed, dict)):
+                    new = parsed
+            elif typ == "array" and isinstance(val, (str, int, float)) and not isinstance(val, bool):
+                new = [val]
+        except Exception:
+            new = val
+        if new is not val:
+            out[key] = new
+            fixed.append(key)
+    return out, fixed
+
+
+def missing_required(tool: AbstractTool, kwargs: dict[str, Any]) -> list[str]:
+    """schema 声明为必需、但这次没传（或传了 None）的参数。"""
+    try:
+        req = (tool.parameters or {}).get("required", []) or []
+    except Exception:                                     # pragma: no cover
+        return []
+    return [r for r in req if isinstance(r, str) and kwargs.get(r) is None]
 
 
 def describe_tool_error(tool: AbstractTool, exc: BaseException) -> str:
@@ -276,6 +608,39 @@ class ToolRegistry:
 
     def __init__(self) -> None:
         self._tools: dict[str, AbstractTool] = {}
+        #: 名字不认识时的改道钩子（v1.11.2）：``fn(name, kwargs) -> (新名字, 新参数) | None``。
+        #: 典型用法：模型把技能名当工具名直接调用 → 改道到 skill_invoke。
+        self._fallbacks: list[Any] = []
+        #: 插件提供的分派中间件（v1.11.6）：``async mw(tool_name, kwargs, call_next) -> ToolResult``，
+        #: 按登记顺序由外向内包住真正的 ``tool.execute``（参数校验之后、计时之内）。
+        self._middlewares: list[Any] = []
+        #: 由插件注册的工具名（插件卸载时据此注销，不误删内置工具）
+        self._plugin_tools: set[str] = set()
+
+    def set_middlewares(self, middlewares: list[Any]) -> None:
+        """整体替换插件中间件（插件启停后由 Agent 重新同步）。"""
+        self._middlewares = [m for m in middlewares if callable(m)]
+
+    def sync_plugin_tools(self, tools: list[AbstractTool]) -> None:
+        """把插件提供的工具同步进注册表：新增的注册、已卸载插件的注销。
+
+        与内置工具同名的插件工具**不覆盖**内置实现 —— 插件只能加能力，不能顶替。
+        """
+        want = {t.name: t for t in tools if getattr(t, "name", "")}
+        for name in list(self._plugin_tools):
+            if name not in want:
+                self._tools.pop(name, None)
+                self._plugin_tools.discard(name)
+        for name, tool in want.items():
+            if name in self._tools and name not in self._plugin_tools:
+                continue
+            self._tools[name] = tool
+            self._plugin_tools.add(name)
+
+    def add_fallback(self, fn: Any) -> None:
+        """登记一个未知工具名的改道钩子（重复登记同一个函数不会叠加）。"""
+        if fn not in self._fallbacks:
+            self._fallbacks.append(fn)
 
     def register(self, tool: AbstractTool) -> None:
         """注册工具。"""
@@ -339,6 +704,16 @@ class ToolRegistry:
         """
         real, tips = resolve_name(tool_name, self.list_names())
         if real is None:
+            for fb in self._fallbacks:
+                try:
+                    hit = fb(tool_name, dict(kwargs))
+                except Exception as e:                    # 钩子出错不能拖垮分派
+                    _logger.warning("tool_fallback_failed", tool=tool_name, error=str(e))
+                    hit = None
+                if hit and hit[0] in self._tools and hit[0] != tool_name:
+                    _logger.info("tool_name_rerouted", requested=tool_name, to=hit[0])
+                    return await self.dispatch(hit[0], **hit[1])
+        if real is None:
             _logger.warning("tool_not_found", tool=tool_name, suggestions=tips)
             return ToolResult(
                 tool_name=tool_name, success=False,
@@ -350,6 +725,22 @@ class ToolRegistry:
             _logger.info("tool_name_resolved", requested=tool_name, resolved=real)
 
         tool = self._tools[real]
+        # v1.7.6：执行前的三道"可确定"修正 —— 能确定意图的就直接修好照常执行，
+        # 确定不了的给出能一次改对的报错。目的只有一个：少让一次工具调用白跑。
+        kwargs, renamed = normalize_param_names(tool, kwargs)
+        if renamed:
+            _logger.info("tool_params_renamed", tool=real, renamed=renamed)
+        kwargs, aliased = apply_param_aliases(tool, kwargs)
+        if aliased:
+            _logger.info("tool_params_aliased", tool=real, renamed=aliased)
+        kwargs, coerced = coerce_param_types(tool, kwargs)
+        if coerced:
+            _logger.info("tool_params_coerced", tool=real, params=coerced)
+        # v1.11.13：路径参数统一锚到当前会话副本/项目根 —— 修"office/media 等
+        # 工具按服务进程 cwd 解析相对路径，产物落到 AutoMind 自己目录"的混淆。
+        kwargs, absolutized = absolutize_paths(tool, kwargs)
+        if absolutized:
+            _logger.info("tool_paths_absolutized", tool=real, params=absolutized)
         typos = typo_params(tool, kwargs)
         if typos:
             # 在**执行之前**拦下来：写错的参数会被 **kwargs 类工具静默忽略，
@@ -365,9 +756,28 @@ class ToolRegistry:
                 metadata={"param_typos": typos},
             )
 
+        missing = missing_required(tool, kwargs)
+        if missing:
+            # 缺的参数多半就是模型写错名字的那个（``pathh`` 之于 ``path``）——
+            # 把"写错的名字 → 该用的名字"一并点出来，比单说"缺 path"更容易一次改对
+            valid = _valid_params(tool)
+            wrong = {k: suggest_names(k, valid) for k in kwargs if k not in valid}
+            wrong = {k: v for k, v in wrong.items() if v}
+            typo_hint = "".join(f"你传的 '{k}' 是不是想传：{'、'.join(v)}？"
+                                for k, v in wrong.items())
+            _logger.warning("tool_params_missing", tool=real, missing=missing,
+                            unknown=list(wrong))
+            return ToolResult(
+                tool_name=real, success=False,
+                error=(f"调用 {real} 缺少必需参数：{', '.join(missing)}。{typo_hint}"
+                       f"本工具支持参数：{', '.join(valid)}。"
+                       f"请补上这些参数后重试（本次未执行）。"),
+                metadata={"missing_params": missing, "param_typos": wrong},
+            )
+
         start = time.perf_counter()
         try:
-            result = await tool.execute(**kwargs)
+            result = await self._execute_with_middlewares(real, tool, kwargs)
         except Exception as e:
             duration = (time.perf_counter() - start) * 1000
             _logger.error("tool_dispatch_error", tool=real,
@@ -383,6 +793,45 @@ class ToolRegistry:
         _logger.info("tool_dispatch", tool=real, success=result.success,
                      duration_ms=round(result.duration_ms, 1))
         return result
+
+    async def _execute_with_middlewares(self, name: str, tool: AbstractTool,
+                                        kwargs: dict[str, Any]) -> ToolResult:
+        # v1.11.9：修复"重放风暴"。旧实现的 except 分支无条件 `call(i + 1, kw)`：
+        #   · 工具自己抛异常时，异常会从最内层穿出，被**每一个**外层中间件帧的
+        #     except 接住再往下重放 —— 4 个中间件插件时一个抛异常的工具会执行 3 次；
+        #   · 中间件在工具**已经执行完之后**做后处理时抛异常（重试换结果、记账、
+        #     回读校验都可能），旧代码同样把整条链重跑一遍 —— 写盘类操作被二次执行。
+        # 现在用 tool_ran 标记：工具真正跑过之后，任何一层中间件再抛异常都**不再
+        # 重放**，直接合成一条可诊断的失败结果（工具可能有副作用，重放不是无害的）。
+        state = {"tool_ran": False}
+
+        async def call(i: int, kw: dict[str, Any]) -> ToolResult:
+            if i >= len(self._middlewares):
+                state["tool_ran"] = True
+                return await tool.execute(**kw)
+            mw = self._middlewares[i]
+            try:
+                return await mw(name, kw, lambda nkw: call(i + 1, nkw))
+            except (KeyboardInterrupt, SystemExit, asyncio.CancelledError):
+                raise
+            except Exception as e:
+                if state["tool_ran"]:
+                    # 工具已执行（或已开始执行）：不能重放，合成失败结果交回模型。
+                    # 异常也可能来自工具本身（穿过了不接异常的中间件），
+                    # 所以仍走 describe_tool_error —— 参数名提示等信息不能丢。
+                    _logger.error("tool_middleware_failed_after_execution", tool=name,
+                                  middleware=i, error=f"{type(e).__name__}: {e}")
+                    return ToolResult(
+                        tool_name=name, success=False,
+                        error=(f"{describe_tool_error(tool, e)}\n"
+                               f"（该异常发生在工具已执行之后，本次产出状态未知："
+                               f"请先用只读工具核对实际结果，确认无误前不要重做有副作用的操作。）"),
+                        metadata={"middleware_failure": True, "tool_executed": True},
+                    )
+                # 工具还没跑过：跳过出错的中间件，照常执行
+                _logger.warning("tool_middleware_failed", tool=name, error=f"{type(e).__name__}: {e}")
+                return await call(i + 1, kw)
+        return await call(0, dict(kwargs))
 
     def __contains__(self, name: str) -> bool:
         return name in self._tools

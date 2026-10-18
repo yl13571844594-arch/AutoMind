@@ -383,6 +383,10 @@ async function refreshTokens() {
     document.getElementById('tok-completion').textContent = (t.completion||0).toLocaleString();
     document.getElementById('tok-total').textContent = (t.total||0).toLocaleString();
     document.getElementById('tok-tasks').textContent = t.tasks||0;
+    // v1.11.10：会话累计的缓存命中率 / 上下文占用（本轮实时值由 usage_update 覆盖）
+    const ctx = t.context || {};
+    renderUsage(t.cache_rate, t.cached, t.input, t.cache_hit_calls, t.calls,
+                ctx.used, ctx.max, ctx.pct);
     // 实时成本估算（按当前模型单价，可点击自定义）
     const costEl = document.getElementById('tok-cost');
     if (costEl) {
@@ -393,6 +397,338 @@ async function refreshTokens() {
   } catch(e) {}
 }
 async function resetTokens() { await fetch(`${API}/tokens`, {method:'DELETE'}); refreshTokens(); toast('Token 统计已重置', 'info'); }
+
+// v1.11.10：右栏「缓存命中率 / 上下文使用率」的唯一渲染口。
+// 两条数据来源（/api/tokens 的会话累计、WS usage_update 的本轮累计）都走这里，
+// 免得两边各写一套口径、迟早漂移。rate 为 null = 提供商没给缓存统计，显示「—」：
+// 写成 0% 会被读成"缓存一次都没命中"，那是另一回事。
+function renderUsage(rate, cached, input, hitCalls, calls, used, max, pct) {
+  const num = v => Number(v) || 0;
+  rate = rate == null ? null : num(rate);
+  const rateEl = document.getElementById('stat-cache');
+  if (rateEl) {
+    rateEl.textContent = rate == null ? '—' : (Math.round(rate * 10) / 10) + '%';
+    // 绿 = 省得多；黄 = 命中了一些但还能更好；默认 = 0% 或没有统计
+    rateEl.className = 'value' + (rate == null ? '' : rate >= 50 ? ' ok' : rate > 0 ? ' warn' : '');
+  }
+  const p = Math.max(0, Math.min(100, num(pct)));
+  // 没有任何调用/峰值时，上下文显示「—」而不是 0%（窗口还没用过 vs 用了 0% 不好区分）
+  const hasCtx = num(calls) > 0 || num(used) > 0;
+  const ctxEl = document.getElementById('stat-context');
+  if (ctxEl) {
+    ctxEl.textContent = hasCtx ? Math.round(p) + '%' : '—';
+    ctxEl.className = 'value' + (hasCtx && p >= 90 ? ' bad' : hasCtx && p >= 70 ? ' warn' : '');
+  }
+  const bar = document.getElementById('ctx-bar');
+  const fill = document.getElementById('ctx-bar-fill');
+  if (bar && fill) {
+    fill.style.width = (hasCtx ? p : 0) + '%';
+    bar.className = 'ctx-bar' + (hasCtx && p >= 90 ? ' bad' : hasCtx && p >= 70 ? ' warn' : '');
+  }
+  const hint = document.getElementById('stat-usage-hint');
+  if (hint) {
+    hint.textContent = `命中 ${num(cached).toLocaleString()} / 输入 ${num(input).toLocaleString()} tk · `
+      + `命中 ${num(hitCalls)} / ${num(calls)} 次调用 · `
+      + `上下文 ${num(used).toLocaleString()} / ${num(max).toLocaleString()} tk`;
+  }
+}
+// WS usage_update 的入口（ws.js 里做存在性判断后调用）：本轮任务实时累计
+function applyUsageUpdate(data) {
+  const c = data.cumulative || {}, ctx = data.context || {};
+  renderUsage(c.cache_rate, c.cached_tokens, c.input_tokens, c.cache_hit_calls, c.calls,
+              ctx.used, ctx.max, ctx.pct);
+}
+// 新任务开始先清空：任务刚跑起来的那几秒不该显示上一轮任务的命中率
+function resetLiveUsage() { renderUsage(null, 0, 0, 0, 0, 0, 0, 0); }
+
+// ═══════ v1.11.11 待办 / 提问 / 交付 / 子智能体 ═══════
+// 与 React 端同一批 WS 事件；经典界面是 /legacy 兜底路径，不能掉队。
+
+// ── 📋 待办 ──
+const TODO_ICON = { pending: '○', in_progress: '◐', completed: '✓' };
+
+// 待办渲染的唯一入口：WS 的 todo_updated 与 refreshTodo() 的 HTTP 结果都走这里
+function renderTodo(d) {
+  const todos = (d && Array.isArray(d.todos)) ? d.todos : [];
+  const counts = (d && d.counts) || {};
+  const list = document.getElementById('todo-list');
+  const cnt = document.getElementById('todo-counts');
+  const clearLink = document.getElementById('todo-clear');
+  if (cnt) {
+    cnt.textContent = todos.length
+      ? `待办 ${counts.pending || 0} · 进行中 ${counts.in_progress || 0} · 完成 ${counts.completed || 0}`
+      : '';
+  }
+  if (clearLink) clearLink.style.display = todos.length ? '' : 'none';
+  if (!list) return;
+  if (!todos.length) {
+    list.innerHTML = '<em style="color:var(--text3)">暂无待办。多步任务中模型会维护一份待办清单。</em>';
+    return;
+  }
+  list.innerHTML = todos.map(t =>
+    `<div class="todo-row ${esc(t.status)}"><span class="todo-ico">${TODO_ICON[t.status] || '○'}</span>`
+    + `<span class="todo-text">${esc(t.content)}</span></div>`).join('');
+}
+// 拉当前会话的待办（页面打开/重连/任务结束后对账；WS 事件优先，这里只是兜底）
+async function refreshTodo() {
+  try {
+    const d = await (await fetch(`${API}/todo?session_id=${encodeURIComponent(chatSid())}`)).json();
+    renderTodo(d);
+  } catch (e) { /* 待办是辅助信息：拉不到不影响主流程 */ }
+}
+async function clearTodo() {
+  try {
+    await fetch(`${API}/todo?session_id=${encodeURIComponent(chatSid())}`, { method: 'DELETE' });
+    renderTodo({ todos: [], counts: {} });
+    toast('待办已清空', 'info');
+  } catch (e) { toast('清空待办失败', 'error'); }
+}
+
+// ── 📦 交付文件 ──
+// 本会话最近声明的交付物（右栏「最近交付」）；对话区另有一张同内容的卡片。
+const _deliverables = [];
+const _DELIVER_PREVIEW_EXT = ['html', 'htm', 'svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'ico'];
+
+function _fileExt(p) {
+  const s = String(p || '');
+  const i = s.lastIndexOf('.');
+  return i >= 0 ? s.slice(i + 1).toLowerCase() : '';
+}
+// 取文件名：同时兼容 / 与 \ 分隔（项目路径可能是 Windows 绝对路径）
+function _baseName(p) {
+  const s = String(p || '');
+  let cut = -1;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 47 || c === 92) cut = i;     // '/' 或 '\'
+  }
+  return cut >= 0 ? s.slice(cut + 1) : s;
+}
+// 点击交付物：HTML/图片类走预览，其余切到「代码」标签用编辑器打开
+function openDeliverable(path) {
+  if (_DELIVER_PREVIEW_EXT.indexOf(_fileExt(path)) >= 0) previewFile(path);
+  else if (typeof openCodeFile === 'function') openCodeFile(path);
+  else previewFile(path);
+}
+function renderDeliverables() {
+  const el = document.getElementById('deliverables-list');
+  if (!el) return;
+  if (!_deliverables.length) {
+    el.innerHTML = '<em style="color:var(--text3)">任务声明的交付文件会列在这里，可点击预览或复制路径</em>';
+    return;
+  }
+  el.innerHTML = _deliverables.slice(0, 20).map(f =>
+    `<div class="dlv-row"><a class="dlv-name" title="${esc(f.path)}" onclick="openDeliverable('${jsq(f.path)}')">`
+    + `${esc(f.name || _baseName(f.path))}</a>`
+    + `<button class="ct-btn" style="margin-left:auto" title="复制路径" onclick="copyText('${jsq(f.path)}', this)">⧉</button></div>`).join('');
+}
+// presented_files 事件：对话区卡片 + 右栏「最近交付」一起更新
+function renderPresented(d) {
+  const files = (d && Array.isArray(d.files)) ? d.files : [];
+  if (!files.length) return;
+  files.forEach((f) => {
+    if (!f || !f.path) return;
+    if (!_deliverables.some(x => x.path === f.path)) _deliverables.unshift(f);
+  });
+  renderDeliverables();
+  const msgs = document.getElementById('messages');
+  if (!msgs) return;
+  const div = document.createElement('div');
+  div.className = 'msg agent';
+  div.innerHTML = '<div class="avatar">AM</div><div class="col"><div class="bubble dlv-card">'
+    + `<div class="dlv-head"><b>📦 交付文件</b><span style="color:var(--text3);font-size:.85em">${files.length} 个 · 点击打开</span></div>`
+    + files.map(f =>
+      `<div class="dlv-row"><div class="dlv-main">
+        <a class="dlv-name" onclick="openDeliverable('${jsq(f.path)}')">${esc(f.name || _baseName(f.path))}</a>
+        ${f.description ? `<span class="dlv-desc">${esc(f.description)}</span>` : ''}
+        <span class="dlv-path mono">${esc(f.path)}</span>
+      </div><button class="dlv-copy" title="复制路径" onclick="copyText('${jsq(f.path)}', this)">⧉</button></div>`).join('')
+    + '</div></div>';
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+// ── 🙋 用户提问弹窗 ──
+// 作答走 WS action=user_answer；多标签页由服务端广播 resolved（其它窗口据此关窗）。
+let _userQuestion = null;       // 当前待答问题（结构同 user_question 事件）
+let _uqTimer = null;            // 倒计时 interval
+
+function showUserQuestion(d) {
+  if (!d || !Array.isArray(d.questions) || !d.questions.length) return;
+  _userQuestion = d;
+  const title = document.getElementById('question-title');
+  if (title) {
+    title.textContent = `🙋 ${d.questions.length > 1
+      ? `模型有 ${d.questions.length} 个问题需要你确认` : '模型需要你确认'}`;
+  }
+  const box = document.getElementById('question-content');
+  if (box) {
+    box.innerHTML = d.questions.map((q, qi) => {
+      const opts = Array.isArray(q.options) ? q.options : [];
+      const optsHtml = opts.map(o => {
+        const type = q.multi ? 'checkbox' : 'radio';
+        const name = q.multi ? '' : ` name="uq-${esc(q.id)}"`;
+        return `<label class="uq-opt"><input type="${type}"${name} data-q="${esc(q.id)}" data-label="${esc(o.label)}">`
+          + `<span>${esc(o.label)}${o.description ? `<i>${esc(o.description)}</i>` : ''}</span></label>`;
+      }).join('');
+      return `<div class="uq-item">
+        ${q.header ? `<div class="uq-header">${esc(q.header)}</div>` : ''}
+        <div class="uq-question">${qi + 1}. ${esc(q.question)}${q.multi ? '<span style="color:var(--text3);font-size:.82em">（可多选）</span>' : ''}</div>
+        ${opts.length ? `<div class="uq-opts">${optsHtml}</div>` : ''}
+        <textarea class="uq-custom" data-custom="${esc(q.id)}" rows="2"
+          placeholder="${opts.length ? '或补充自定义回答（可选）' : '输入你的回答'}"></textarea>
+      </div>`;
+    }).join('');
+  }
+  const overlay = document.getElementById('question-modal');
+  if (overlay) overlay.classList.add('show');
+  startUqCountdown(d);
+}
+
+function startUqCountdown(d) {
+  stopUqCountdown();
+  const el = document.getElementById('uq-countdown');
+  if (!el) return;
+  const deadline = Date.now() + (Number(d.timeout_s) || 300) * 1000;
+  const tick = () => {
+    const left = Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    el.textContent = left >= 60
+      ? `⏳ 剩余 ${Math.floor(left / 60)} 分 ${String(left % 60).padStart(2, '0')} 秒 —— 超时不会被当成同意`
+      : `⏳ 剩余 ${left} 秒 —— 超时不会被当成同意，模型会按默认方式继续`;
+    el.style.color = left <= 30 ? 'var(--red)' : 'var(--text3)';
+    if (left <= 0) {
+      stopUqCountdown();
+      closeUserQuestion();
+      toast('问题已超时，模型会按默认方式继续（超时不会被当成同意）', 'info');
+    }
+  };
+  tick();
+  _uqTimer = setInterval(tick, 1000);
+}
+function stopUqCountdown() { if (_uqTimer) { clearInterval(_uqTimer); _uqTimer = null; } }
+function closeUserQuestion() {
+  stopUqCountdown();
+  _userQuestion = null;
+  const overlay = document.getElementById('question-modal');
+  if (overlay) overlay.classList.remove('show');
+}
+// 用户主动关掉弹窗：问题仍然有效（模型还在等），只是这边收起了；
+// 告诉用户后果，别让他以为"关掉 = 模型不问了"。
+function dismissUserQuestion() {
+  if (!_userQuestion) return;
+  closeUserQuestion();
+  toast('已收起提问。模型仍会等待到超时，超时后按默认方式继续', 'info');
+}
+
+function submitUserAnswer() {
+  const d = _userQuestion;
+  if (!d) return;
+  const box = document.getElementById('question-content');
+  const selectedMap = {}, customMap = {};
+  if (box) {
+    box.querySelectorAll('input[data-q]').forEach((el) => {
+      if (!el.checked) return;
+      const key = el.getAttribute('data-q');
+      (selectedMap[key] = selectedMap[key] || []).push(el.getAttribute('data-label'));
+    });
+    box.querySelectorAll('textarea[data-custom]').forEach((el) => {
+      customMap[el.getAttribute('data-custom')] = el.value;
+    });
+  }
+  const answers = [];
+  (d.questions || []).forEach((q) => {
+    const selected = selectedMap[q.id] || [];
+    const custom = String(customMap[q.id] || '').trim();
+    if (selected.length || custom) {
+      answers.push({ id: q.id, selected, ...(custom ? { custom } : {}) });
+    }
+  });
+  if (!answers.length) { toast('请至少选择一个选项或填写自定义回答', 'info'); return; }
+  if (typeof sendUserAnswer !== 'function' || !sendUserAnswer(d.question_id, answers)) {
+    toast('与服务器的连接已断开，回答没能送达', 'error');
+    return;
+  }
+  closeUserQuestion();
+  toast('回答已提交', 'success');
+}
+
+// ── 🤖 子智能体（专业版 multi_agent）──
+const _subagents = [];
+const SUBAGENT_LABEL = {
+  running: '执行中', pending: '排队中', queued: '排队中',
+  done: '完成', completed: '完成', ok: '完成',
+  failed: '失败', error: '失败', cancelled: '已停止', stopped: '已停止', timeout: '超时',
+};
+function _subagentTone(status) {
+  if (['running', 'pending', 'queued'].indexOf(status) >= 0) return 'running';
+  if (['done', 'completed', 'ok'].indexOf(status) >= 0) return 'done';
+  if (['failed', 'error', 'timeout'].indexOf(status) >= 0) return 'failed';
+  return 'stopped';
+}
+function renderSubagents() {
+  const sec = document.getElementById('subagents-section');
+  const list = document.getElementById('subagents-list');
+  const cnt = document.getElementById('subagents-count');
+  if (!sec || !list) return;
+  // 整块只在专业版 multi_agent 开启时显示；社区版留一个永远空的面板只会让人困惑
+  const on = typeof featureOn === 'function' && featureOn('multi_agent');
+  sec.style.display = on ? '' : 'none';
+  if (!on) return;
+  if (cnt) cnt.textContent = _subagents.length ? `${_subagents.length} 个` : '';
+  if (!_subagents.length) {
+    list.innerHTML = '<em style="color:var(--text3);font-size:.82em">协同模式或模型主动委派时，子智能体会列在这里（标题 · 状态 · 步数 · 输出尾部）。</em>';
+    return;
+  }
+  list.innerHTML = _subagents.slice(0, 20).map((a) => {
+    const tone = _subagentTone(a.status);
+    const icon = tone === 'running' ? '◐' : tone === 'done' ? '✓' : tone === 'failed' ? '✗' : '⊘';
+    const tail = a.output_tail || a.output || '';
+    const meta = `${esc(SUBAGENT_LABEL[a.status] || a.status)}`
+      + (a.steps ? ` · ${a.steps} 步` : '')
+      + (a.tokens ? ` · ${a.tokens} tk` : '');
+    return `<div class="sa-card ${tone}">
+      <div class="sa-head"><b class="sa-title" title="${esc(a.title || a.agent_id)}">${icon} ${esc(a.title || a.agent_id)}</b>
+        <span class="sa-meta">${meta}</span></div>
+      ${a.error ? `<div class="sa-err" title="${esc(a.error)}">${esc(a.error)}</div>`
+        : tail ? `<div class="sa-tail" title="${esc(tail)}">${esc(tail)}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+function onSubagentStarted(d) {
+  if (!d || !d.agent_id) return;
+  _subagents.unshift({
+    agent_id: String(d.agent_id), title: String(d.title || d.agent_id),
+    task: String(d.task || ''), status: String(d.status || 'running'),
+  });
+  if (_subagents.length > 20) _subagents.length = 20;
+  renderSubagents();
+}
+function onSubagentUpdate(d) {
+  if (!d || !d.agent_id) return;
+  let a = _subagents.find(x => x.agent_id === d.agent_id);
+  if (!a) { onSubagentStarted(d); a = _subagents.find(x => x.agent_id === d.agent_id); }
+  if (!a) return;
+  if (d.status) a.status = String(d.status);
+  a.output_tail = String(d.output_tail || '');
+  if (d.steps != null) a.steps = Number(d.steps) || 0;
+  if (d.tokens != null) a.tokens = Number(d.tokens) || 0;
+  renderSubagents();
+}
+function onSubagentDone(d) {
+  if (!d || !d.agent_id) return;
+  let a = _subagents.find(x => x.agent_id === d.agent_id);
+  if (!a) { onSubagentStarted(d); a = _subagents.find(x => x.agent_id === d.agent_id); }
+  if (!a) return;
+  a.status = String(d.status || 'done');
+  if (d.title) a.title = String(d.title);
+  a.output = d.output ? String(d.output) : '';
+  a.error = d.error ? String(d.error) : '';
+  if (d.steps != null) a.steps = Number(d.steps) || 0;
+  if (d.tokens != null) a.tokens = Number(d.tokens) || 0;
+  renderSubagents();
+}
+// 新任务开始：上一轮的子智能体不会跨任务存活，清掉避免一直挂在"执行中"
+function resetSubagents() { _subagents.length = 0; renderSubagents(); }
 
 async function refreshHtmlFiles() {
   try {

@@ -32,6 +32,8 @@ hiddenimports = (
     # "读表格"只会得到"请 pip install openpyxl"，而冻结应用没法 pip。
     # v1.5.0 实测：excel 因缺静态 import 语句，openpyxl 确实没被打进去。
     + ["openpyxl", "docx", "pypdf", "icalendar", "httpx"]
+    # v1.11.7：IM 机器人长连接在函数里按需 import websockets，同样要显式声明
+    + collect_submodules("websockets")
 )
 # 托盘后端按平台收集（win32 / AppIndicator / Cocoa）
 if IS_WIN:

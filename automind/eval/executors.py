@@ -277,7 +277,8 @@ class AutoMindExecutor:
             return EvalOutcome(
                 output="", success=False, tool_calls=calls, seconds=seconds,
                 error=f"任务超时（{ctx.timeout_seconds:g}s）", timed_out=True,
-                artifacts=list_artifacts(ctx.workspace, ctx.ignore_dirs))
+                artifacts=list_artifacts(ctx.workspace, ctx.ignore_dirs),
+                **_usage_of(agent, None))
         except Exception as e:
             # 执行器**不把异常抛给 runner**：runner 会把无法归因的异常记成
             # error 状态（"框架/环境问题"），而这里能给出更准确的原因
@@ -287,7 +288,9 @@ class AutoMindExecutor:
             return EvalOutcome(
                 output="", success=False, tool_calls=calls, seconds=seconds,
                 error=f"执行器异常 {type(e).__name__}: {e}",
-                artifacts=list_artifacts(ctx.workspace, ctx.ignore_dirs))
+                artifacts=list_artifacts(ctx.workspace, ctx.ignore_dirs),
+                # v1.7.5：失败也要记用量 —— 烧掉的 token 不会因为任务失败就退回来
+                **_usage_of(agent, None))
         finally:
             await self._close(agent)
 
@@ -319,13 +322,19 @@ def _output_of(result: Any) -> str:
 
 
 def _usage_of(agent: Any, result: Any) -> dict[str, int]:
-    """取 token 用量 —— 优先 agent 自己的累计器（含全部 LLM 调用，不只最后一次）。"""
+    """取 token 用量 —— 优先 agent 自己的累计器（含全部 LLM 调用，不只最后一次）。
+
+    ``result`` 可以为 None（任务抛异常/超时时没有结果对象）：这时仍然应当
+    从 agent 身上把已经烧掉的用量取出来 —— v1.7.5 之前异常分支直接返回空用量，
+    于是**失败任务的 token 一律记成 0**，统计页少算、成本无从归因
+    （实测 smoke 套件真实消耗约 35 万 token，报告里只显示 10.5 万）。
+    """
     prompt = completion = 0
     total = getattr(agent, "_usage_total", None)
     if isinstance(total, dict):
         prompt = int(total.get("prompt_tokens", 0) or 0)
         completion = int(total.get("completion_tokens", 0) or 0)
-    if not prompt and not completion:
+    if not prompt and not completion and result is not None:
         usage = getattr(result, "token_usage", None)
         if usage is not None:
             prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
@@ -336,5 +345,13 @@ def _usage_of(agent: Any, result: Any) -> dict[str, int]:
         if usage is not None:
             prompt = int(getattr(usage, "prompt_tokens", 0) or 0)
             completion = int(getattr(usage, "completion_tokens", 0) or 0)
+    if not prompt and not completion:
+        # 最后一道：ResourceManager 的累计器。它记的是**全部**调用，
+        # 即使 _usage_total 因为回调异常没更新，这里仍能拿到。
+        rm = getattr(agent, "resources", None)
+        used = getattr(getattr(rm, "tokens", None), "tokens_used", None)
+        if used is not None:
+            prompt = int(getattr(used, "prompt_tokens", 0) or 0)
+            completion = int(getattr(used, "completion_tokens", 0) or 0)
     return {"prompt_tokens": prompt, "completion_tokens": completion,
             "total_tokens": prompt + completion}

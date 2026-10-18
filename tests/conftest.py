@@ -9,6 +9,9 @@ import pytest
 # 确保可导入 automind 包
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# 测试里启动服务（TestClient 触发 lifespan）时不要按本机配置去连真实的 IM 平台
+os.environ.setdefault("AUTOMIND_BOTS_AUTOSTART", "0")
+
 
 # ═══════════════════════════════════════════════════════════════
 # 取消探针：async 测试"关循环"时把残留任务点名

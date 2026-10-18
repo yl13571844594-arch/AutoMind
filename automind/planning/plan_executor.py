@@ -15,6 +15,7 @@ from automind.core.types import (
 )
 from automind.planning.hierarchical_planner import HierarchicalPlanner
 from automind.planning.nonmonotonic import NonMonotonicReasoner
+from automind.reflection.retry_handler import RetryConfig, RetryHandler
 from automind.tools.base import ToolRegistry
 from automind.tools.permissions import PermissionEngine
 
@@ -77,6 +78,7 @@ class PlanExecutor:
         parallel: bool = True,
         use_cache: bool = True,
         goal_timeout: float = 900.0,
+        retry_delay: float = 2.0,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
@@ -85,6 +87,15 @@ class PlanExecutor:
         self.nonmonotonic = NonMonotonicReasoner()
         self.max_retries = max_retries
         self.auto_retry = auto_retry
+        # v1.7.5：重试之间真的退避了。
+        # 此前这个循环是"连打 max_retries 次、中间零延迟"—— 配置里的
+        # ``execution.retry_delay_seconds`` 没有任何读取方。对一个正被限流
+        # 或正忙的目标，立刻重试三次与重试一次没有区别，只是把配额烧得更快。
+        # 退避的数学（指数 + 抖动 + 上限）直接复用 RetryHandler —— 那个模块
+        # 此前全项目只有测试引用，等于一份从没生效过的文档承诺。
+        self._retry_handler = RetryHandler(
+            RetryConfig(max_retries=max(0, int(max_retries) - 1),
+                        base_delay=max(0.0, float(retry_delay or 0.0))))
         # 并行执行（§2.4）：互不依赖的就绪目标用 asyncio.gather 并发
         self.parallel = parallel
         # 子任务缓存：同一次计划执行内，相同的 SAFE 级只读调用结果复用
@@ -100,6 +111,8 @@ class PlanExecutor:
             self.goal_timeout = 900.0
         #: 超时熔断计数（供报告说明"有几个步骤是被超时掐掉的"）
         self.timed_out = 0
+        #: 墙钟截止时刻的顺延量（秒；v1.11.0 预算窗口续开时由 Agent 推入）
+        self.deadline_shift = 0.0
 
     async def execute(
         self,
@@ -147,7 +160,8 @@ class PlanExecutor:
             # v1.7.0 整轮任务预算：到点**不再开启新批次**。
             # 判据放在批次之间而不是"硬掐断"：掐断会丢掉已做完的工作，
             # 而这里能把成果完整地交出去（已完成步骤照常入账）。
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and \
+                    time.monotonic() >= deadline + getattr(self, "deadline_shift", 0.0):
                 for g in ready:
                     self.hierarchical_planner.update_goal_status(
                         plan, g.id, GoalStatus.FAILED,
@@ -443,7 +457,7 @@ class PlanExecutor:
                 goal_id=goal.id,
                 goal_description=goal.description,
                 success=False,
-                error=(f"工具「{action.tool_name}」不存在或未注册，无法执行该步骤。"),
+                error=self._unknown_tool_message(action.tool_name),
             )
         if decision.value == "ask_user":
             # 安全修复（v1.4.5）：原条件是 `ask_user and on_approval_needed` ——
@@ -474,7 +488,11 @@ class PlanExecutor:
                     reason = outcome.comment
             except Exception as e:
                 approved = False   # 审批通道异常一律视为未批准
-                reason = f"审批通道异常（{type(e).__name__}）"
+                # v1.7.5：把原始异常信息带上。只有类型名时，用户看到的
+                # "审批通道异常（ValueError）"根本无从下手 —— 而这类异常
+                # 里最常见的就是前端断开，说清楚才能自查。
+                reason = (f"审批通道异常（{type(e).__name__}: {str(e)[:160]}）；"
+                          f"已按未批准处理")
             if not approved:
                 return StepResult(
                     goal_id=goal.id,
@@ -534,9 +552,14 @@ class PlanExecutor:
 
                 last_error = str(result.error or "").strip() or \
                     f"工具 {action.tool_name} 返回失败（无错误信息）"
-                # 失败 → 如果 auto_retry，继续尝试
+                # 失败 → 如果 auto_retry，退避后再试（v1.7.5：此前是立刻重试）
                 if not self.auto_retry:
                     break
+                if attempt < self.max_retries - 1:
+                    delay = await self._retry_handler.sleep_before_retry(attempt)
+                    logger.info("plan_step_retry_backoff", goal=goal.id,
+                                tool=action.tool_name, attempt=attempt + 1,
+                                delay_s=round(delay, 2), error=last_error[:200])
 
             except Exception as e:
                 last_error = f"{type(e).__name__}: {e}"
@@ -548,6 +571,8 @@ class PlanExecutor:
                         error=last_error,
                         retries=attempt + 1,
                     )
+                if self.auto_retry:
+                    await self._retry_handler.sleep_before_retry(attempt)
 
         return StepResult(
             goal_id=goal.id,
@@ -613,8 +638,44 @@ class PlanExecutor:
             return False
 
     def _get_tool(self, name: str) -> Any:
-        """安全获取工具。"""
+        """安全获取工具。
+
+        v1.7.5：先做一次**名字归一化**再取。此前这里是精确匹配，于是模型把
+        ``file_read`` 写成 ``read_file`` 时工具被判为"不存在"，而同一个名字在
+        ``dispatch()`` 里其实是能解析并执行成功的 —— 同一次调用，两处结论相反。
+        归一化之后两处口径一致，失败消息也才谈得上"给出建议"。
+        """
         try:
             return self.tool_registry.get(name)
         except Exception:
-            return None
+            resolved = self._resolve_tool_name(name)
+            if not resolved:
+                return None
+            try:
+                return self.tool_registry.get(resolved)
+            except Exception:
+                return None
+
+    def _resolve_tool_name(self, name: str) -> str:
+        """把工具名解析成注册表里的真名（解析不了返回空串）。"""
+        try:
+            from automind.tools.base import resolve_name
+
+            resolved, _ = resolve_name(name, self.tool_registry.list_names())
+            return resolved or ""
+        except Exception:                              # pragma: no cover - 防御
+            return ""
+
+    def _unknown_tool_message(self, name: str) -> str:
+        """未知工具名 → **能照着改**的错误。
+
+        此前这里是一句 `工具「X」不存在或未注册，无法执行该步骤。` —— 既没说
+        真名可能是什么，也没给候选。而 ``tools/base.py`` 早就备好了
+        ``unknown_tool_error()``（含"你是不是想用 XXX"），只是从没被调用过。
+        """
+        try:
+            from automind.tools.base import unknown_tool_error
+
+            return unknown_tool_error(name, self.tool_registry.list_names())
+        except Exception:                              # pragma: no cover - 防御
+            return f"工具「{name}」不存在或未注册，无法执行该步骤。"

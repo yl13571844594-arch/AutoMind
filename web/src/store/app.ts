@@ -5,7 +5,7 @@ import { apiGet, apiPost, errText } from '../api/client';
 
 export type Mode = 'chat' | 'work' | 'coding' | 'multi' | 'loop';
 export type View = 'chat' | 'plan' | 'tools' | 'experts' | 'team' | 'kb'
-  | 'stats' | 'schedule' | 'history' | 'audit' | 'router' | 'observe';
+  | 'stats' | 'schedule' | 'history' | 'audit' | 'router' | 'observe' | 'workflow';
 
 export const MODE_LABELS: Record<string, string> = {
   chat: '对话', work: '工作', coding: '编程', multi: '协同', loop: '循环',
@@ -42,6 +42,8 @@ interface AppState {
   theme: 'dark' | 'light';
   wsActive: string;       // 当前工作区名（'' = 默认）
   wsSuffix: string;       // 会话隔离后缀
+  convSuffix: string;     // v1.7.6 当前会话后缀（'' = 该工作区的默认会话）
+  sidebarCollapsed: boolean;
   activeExpert: { id: string; name: string; icon: string } | null;
 
   featureOn: (key?: string) => boolean;
@@ -52,7 +54,20 @@ interface AppState {
   loadHealth: () => Promise<void>;
   toggleTheme: () => void;
   setWorkspace: (name: string, suffix: string) => void;
+  setConversation: (suffix: string) => void;
+  toggleSidebar: () => void;
   refreshExpert: () => Promise<void>;
+}
+
+// 会话后缀按工作区分别记忆（键里带工作区后缀）
+function convKey(wsSuffix: string): string {
+  return 'automind_conv' + (wsSuffix || '');
+}
+function loadConv(wsSuffix: string): string {
+  try {
+    const v = localStorage.getItem(convKey(wsSuffix)) || '';
+    return /^_c[a-z0-9]{1,16}$/.test(v) ? v : '';
+  } catch { return ''; }
 }
 
 const savedTheme = ((): 'dark' | 'light' => {
@@ -60,6 +75,17 @@ const savedTheme = ((): 'dark' | 'light' => {
   if (s === 'light' || s === 'dark') return s;
   return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
 })();
+
+/**
+ * 按一份特性表生成 featureOn。
+ *
+ * 每次特性表变化都换一个新函数：组件普遍写 `useApp((s) => s.featureOn)`，
+ * 若它是稳定引用，特性开关变化（启动后状态加载完 / v1.11.1 应用内激活许可证）
+ * 不会触发这些组件重渲染，🔒 会一直挂到下次刷新页面。
+ */
+function makeFeatureOn(features: Record<string, boolean>) {
+  return (key?: string) => !key || !!features[key];
+}
 
 export const useApp = create<AppState>((set, get) => ({
   edition: 'community',
@@ -75,9 +101,11 @@ export const useApp = create<AppState>((set, get) => ({
   theme: savedTheme,
   wsActive: localStorage.getItem('automind_ws_active') || '',
   wsSuffix: localStorage.getItem('automind_ws_suffix') || '',
+  convSuffix: loadConv(localStorage.getItem('automind_ws_suffix') || ''),
+  sidebarCollapsed: localStorage.getItem('automind_sidebar_collapsed') === '1',
   activeExpert: null,
 
-  featureOn: (key?: string) => !key || !!get().features[key],
+  featureOn: makeFeatureOn({}),
 
   setView: (v) => set({ view: v }),
 
@@ -108,6 +136,7 @@ export const useApp = create<AppState>((set, get) => ({
         status: s,
         edition: s.edition || 'community',
         features: s.features || {},
+        featureOn: makeFeatureOn(s.features || {}),
         ...(forMode ? {} : { mode: (s.interaction || 'chat') as Mode }),
       });
     } catch { /* ignore */ }
@@ -135,13 +164,25 @@ export const useApp = create<AppState>((set, get) => ({
   setWorkspace: (name, suffix) => {
     localStorage.setItem('automind_ws_active', name);
     localStorage.setItem('automind_ws_suffix', suffix);
-    set({ wsActive: name, wsSuffix: suffix });
+    // 每个工作区记住自己上次打开的会话 —— 切回来接着看，而不是跳回默认会话
+    set({ wsActive: name, wsSuffix: suffix, convSuffix: loadConv(suffix) });
+  },
+
+  setConversation: (suffix) => {
+    try { localStorage.setItem(convKey(get().wsSuffix), suffix); } catch { /* ignore */ }
+    set({ convSuffix: suffix });
+  },
+
+  toggleSidebar: () => {
+    const next = !get().sidebarCollapsed;
+    try { localStorage.setItem('automind_sidebar_collapsed', next ? '1' : '0'); } catch { /* ignore */ }
+    set({ sidebarCollapsed: next });
   },
 
   refreshExpert: async () => {
     try {
       const { SID } = await import('../api/client');
-      const d = await apiGet(`/experts?session_id=${encodeURIComponent(SID + get().wsSuffix)}`);
+      const d = await apiGet(`/experts?session_id=${encodeURIComponent(SID + get().wsSuffix)}`);  // 工作区级
       if (d.active) {
         const e = (d.installed || []).find((x: any) => x.id === d.active);
         set({ activeExpert: e ? { id: e.id, name: e.name, icon: e.icon || '🎓' } : { id: d.active, name: d.active, icon: '🎓' } });
@@ -152,7 +193,19 @@ export const useApp = create<AppState>((set, get) => ({
   },
 }));
 
-export function chatSid(): string {
+/** 工作区级会话 ID（专家、团队等"按工作区共享"的东西用它）。 */
+export function workspaceSid(): string {
   const { wsSuffix } = useApp.getState();
   return (localStorage.getItem('automind_sid') || 'default') + (wsSuffix || '');
+}
+
+/** 当前对话的会话 ID = 工作区级 ID + 会话后缀（v1.7.6 多会话）。 */
+export function chatSid(): string {
+  return workspaceSid() + (useApp.getState().convSuffix || '');
+}
+
+/** 某个 sid 是否属于本浏览器（任一工作区/会话）—— 区分"我"与"同事"。 */
+export function isMySid(sid: string): boolean {
+  const base = localStorage.getItem('automind_sid') || 'default';
+  return !!sid && sid.startsWith(base);
 }

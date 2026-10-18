@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 from typing import Any
 
+from automind.core.exceptions import BudgetExhaustedError, LLMContextTooLargeError
+from automind.core.llm import classify_llm_error, is_transient_llm_error
 from automind.core.logging import get_logger
 from automind.core.types import (
     LLMResponse,
@@ -18,6 +21,31 @@ from automind.tools.function_calling import FunctionCallHandler
 from automind.tools.output_budget import limits_from_config
 
 logger = get_logger("automind.react")
+
+
+def build_initial_messages(system_prompt: str, tool_catalog: str, context: str,
+                           memory_note: str, task: str) -> list[dict[str, Any]]:
+    """拼出 ReAct 的初始消息 —— 顺序按"稳定前缀优先"排（v1.11.10）。
+
+    DeepSeek / GLM / OpenAI 的自动提示缓存都只认**逐字节前缀**：越早的内容
+    发生变化，后面越长的部分都跟着作废。所以这里的顺序刻意固定为：
+
+        系统提示（静态） → 工具目录（任务内基本不变）
+        → 环境/项目索引（同一会话内稳定） → 记忆片段（每个任务都可能变）
+        → 用户任务
+
+    把"每次任务都可能不一样"的记忆放在稳定内容之后，多个任务之间就还能
+    复用前面那一段前缀；放在环境消息里则会把环境和项目索引一起带崩。
+    """
+    messages: list[dict[str, Any]] = [{"role": "system", "content": system_prompt}]
+    if tool_catalog:
+        messages.append({"role": "system", "content": tool_catalog})
+    if context:
+        messages.append({"role": "system", "content": f"Environment:\n{context}"})
+    if memory_note:
+        messages.append({"role": "system", "content": memory_note})
+    messages.append({"role": "user", "content": task})
+    return messages
 
 
 class ReActExecutor:
@@ -39,12 +67,35 @@ class ReActExecutor:
         "For each step, think about what you need to do, then use the "
         "appropriate tool. After getting tool results, evaluate if you're "
         "done or need to take more actions.\n\n"
+        # v1.7.5：两条约束直接写进系统提示。
+        # 实测里最大的两类工具失败就是"名字凭记忆拼写"和"路径写错范围" ——
+        # 而系统提示此前对这两件事一个字都没说（工具 schema 里也只写了
+        # "Path to the file"）。把它们说清楚，比每次失败后再纠正便宜得多。
+        "Rules:\n"
+        "* Use the EXACT tool names from the tool list. Never invent synonyms "
+        "or translations (e.g. it is `file_read`, not `read_file`; it is "
+        "`terminal`, not `shell` or `execute_command`).\n"
+        "* All file paths are resolved against the project root. Prefer paths "
+        "RELATIVE to the project root (e.g. `src/app.py`). Absolute paths "
+        "inside the project also work; paths outside it are rejected.\n"
+        "* If a tool call fails, read the error: it names the allowed values. "
+        "Fix the arguments and retry once — do not repeat the identical call.\n\n"
         "Workflow:\n"
         "1. Analyze the current state\n"
         "2. Decide what tool to use (if any)\n"
         "3. Interpret the tool result\n"
         "4. Repeat until the task is complete\n"
-        "5. Provide a final summary when done"
+        "5. Provide a final summary when done\n\n"
+        # v1.11.11：新增协作工具的用途必须写进系统提示 —— 否则它们只出现在
+        # 工具目录里，模型不知道"什么时候该用"，能力等于不存在。
+        "Collaboration tools:\n"
+        "* todo_write: for multi-step tasks, keep a short, user-visible todo list. "
+        "Always send the COMPLETE list (empty array clears it); one item in_progress at a time.\n"
+        "* ask_user_question: when a decision genuinely belongs to the user (target, "
+        "format, destructive choice, ambiguity inspection cannot resolve), ask with options "
+        "and wait. Do not guess on the user's behalf. A timeout is NOT approval.\n"
+        "* present: after producing final deliverable files, declare the 1-2 most "
+        "important with present so the user can open them directly."
     )
 
     def __init__(
@@ -65,6 +116,7 @@ class ReActExecutor:
         tool_timeout: float = 300.0,
         tool_timeout_max: float = 1800.0,
         interjection_source: Any = None,
+        prefer_tools: list[str] | None = None,
     ) -> None:
         self.llm = llm
         self.tool_registry = tool_registry
@@ -72,6 +124,9 @@ class ReActExecutor:
         self.output_limits = output_limits or limits_from_config()
         self.fn_handler = FunctionCallHandler(tool_registry, self.output_limits)
         self.max_iterations = max_iterations
+        #: v1.11.7：仍在推进时步数用完可续加的次数（0 = 不续加，到上限即收尾）
+        self.max_iteration_extensions = self.MAX_ITERATION_EXTENSIONS
+        self.iteration_extensions_used = 0
         self.stop_on_no_tools = stop_on_no_tools
         self.permissions = permissions
         self.approval_cb = approval_cb  # async (tool_name, args, tier, reason) -> bool
@@ -101,6 +156,8 @@ class ReActExecutor:
         self.tool_budget = self.TOOL_BUDGET if tool_budget is None else tool_budget
         #: 本轮实际下发 schema 的工具名（随任务展开动态增补）
         self._active_tools: set[str] = set()
+        #: 用户在输入框显式引用的工具（MCP 连接器 / 技能）：不参与打分，必下发
+        self.prefer_tools: list[str] = list(prefer_tools or [])
         #: 本次 run 的消息列表 —— **提升为实例属性**，预算吃紧时才压得到它
         self.messages: list[dict[str, Any]] = []
         #: run() 是否正在进行中（上层据此判断"现在压缩压得到实处吗"）
@@ -115,7 +172,10 @@ class ReActExecutor:
         #: 结束原因：no_more_tools（模型认为完成）| max_iterations | error
         #:          | no_progress（反复做同一件事，提前收尾）
         #:          | task_budget（整轮任务总时长预算到点）
+        #:          | llm_unavailable（模型长时间连不上，v1.7.6）
         self.stop_reason = ""
+        #: 墙钟截止时刻的顺延量（秒；v1.11.0 预算窗口续开时由 Agent 推入）
+        self.deadline_shift = 0.0
         #: 已完成的迭代数（增量进度，上限耗尽时用于交代"跑到第几步"）
         self.iterations_used = 0
         #: 中途异常的说明（非空表示被中断而非正常收尾）
@@ -283,6 +343,12 @@ class ReActExecutor:
         "notify": ("通知", "提醒我", "弹窗", "notify"),
         "im_integration": ("钉钉", "企业微信", "飞书", "slack", "群机器人", "推送到群"),
         "file_multi_edit": ("批量修改", "多个文件", "重构"),
+        # v1.11.11 协作/补充工具：命中任务文本时才完整下发，避免每步白付 schema
+        "todo_write": ("待办", "清单", "步骤", "计划一下", "多步", "todo", "checklist"),
+        "ask_user_question": ("询问", "确认一下", "让我选", "哪个", "是否", "选择", "选项",
+                              "偏好", "确认", "ask user"),
+        "present": ("交付", "产物", "最终文件", "报告", "导出", "生成的文件", "deliverable"),
+        "pwsh": ("powershell", "pwsh", "$env", "get-childitem", "windows"),
     }
 
     def _select_tools(self, task: str, context: str) -> None:
@@ -297,6 +363,9 @@ class ReActExecutor:
 
         text = f"{task}\n{context}".lower()
         picked = {n for n in self.CORE_TOOLS if n in names}
+        # v1.11.0：用户引用的工具不看关键词打分 —— "我点名要用这个连接器"
+        # 却因为任务描述里没出现它的关键词而没下发，是最让人困惑的一种失效
+        picked |= {n for n in self.prefer_tools if n in names}
         scored: list[tuple[int, str]] = []
         for n in names:
             if n in picked:
@@ -311,6 +380,11 @@ class ReActExecutor:
             for part in n.split("_"):
                 if len(part) > 3 and part in text:
                     score += 2
+            if n not in self.TOOL_HINTS:
+                # v1.11.2：MCP / 插件 / 连接器工具没有内置中文别名，此前只能靠
+                # 英文名碰运气 ——"在 GitHub 上建个 issue"选不中 mcp__github__create_issue。
+                # 补两条线索：点名了服务器 / 插件名，以及工具描述与任务的词面重合。
+                score += self._extra_tool_score(n, text)
             if score:
                 scored.append((score, n))
         scored.sort(key=lambda x: (-x[0], x[1]))
@@ -329,6 +403,36 @@ class ReActExecutor:
         self._active_tools = picked
         self.token_savings["tools_sent"] = len(picked)
         logger.info("react_tool_budget", total=len(names), sent=len(picked))
+
+    def _extra_tool_score(self, name: str, text: str) -> int:
+        """非内置工具的相关度：命名空间（MCP 服务器 / 插件名）+ 描述词面重合。"""
+        import re
+        score = 0
+        if name.startswith("mcp__"):
+            server = name.split("__")[1] if name.count("__") >= 2 else ""
+            if len(server) >= 2 and server.lower() in text:
+                score += 6
+        try:
+            desc = (self.tool_registry.get(name).description or "").lower()
+        except Exception:
+            return score
+        hits = 0
+        for w in set(re.findall(r"[a-z][a-z0-9]{3,}", desc)):
+            if w not in self._STOP_WORDS and w in text:
+                hits += 1
+        for run in re.findall(r"[一-鿿]{2,}", desc):
+            for i in range(len(run) - 1):
+                if run[i:i + 2] in text:
+                    hits += 1
+                    break
+        return score + min(hits, 4)
+
+    #: 描述里太常见、没有区分度的英文词
+    _STOP_WORDS = frozenset({
+        "tool", "tools", "with", "from", "that", "this", "file", "files", "data", "into",
+        "will", "your", "when", "used", "uses", "using", "return", "returns", "given",
+        "list", "name", "path", "value", "string", "true", "false", "optional", "default",
+    })
 
     def _schemas(self) -> list[dict[str, Any]]:
         """当前活跃工具的 schema（顺序稳定，便于提示缓存命中）。"""
@@ -355,8 +459,21 @@ class ReActExecutor:
         """模型在思考里点名了某个未下发的工具 → 下一轮补发它的完整 schema。"""
         if not text:
             return []
-        added = [n for n in self.tool_registry.list_names()
-                 if n not in self._active_tools and n in text]
+        from automind.tools.base import _norm, _short_name
+        flat = _norm(text)
+        added = []
+        for n in self.tool_registry.list_names():
+            if n in self._active_tools:
+                continue
+            if n in text:
+                added.append(n)
+                continue
+            # v1.11.2：命名空间工具模型几乎不写全名 —— "github.create_issue" /
+            # "create_issue" 也算点名（本名足够长才认，避免 "read" 这种误伤）
+            short = _short_name(n)
+            if short and len(short) >= 6 and (short in text or (
+                    n.startswith("mcp__") and _norm("".join(n.split("__")[1:])) in flat)):
+                added.append(n)
         if added:
             self._active_tools.update(added)
             self.token_savings["tools_expanded"].extend(added)
@@ -369,6 +486,10 @@ class ReActExecutor:
 
     #: 折叠旧观察时，每条最多保留的字符数
     OBS_KEEP_CHARS = 240
+    #: 其中留给**尾部**的字符数（v1.7.5：改成头+尾保留）
+    #: 工具输出里最有价值的信息常在结尾 —— 测试失败汇总、编译器报错行、
+    #: 非零退出的原因、大文件读取的最后几行。只留头部会把这些全丢掉。
+    FOLD_TAIL_CHARS = 80
     #: 折叠标记 —— 靠它认出"这条已经折过了"，避免反复压缩连说明一起再折一遍
     FOLD_MARK = "…[早前的观察结果已折叠"
     #: 最近这么多条消息不动（模型正靠它们判断"下一步做什么"）
@@ -405,13 +526,22 @@ class ReActExecutor:
                 continue
             if self.FOLD_MARK in content:
                 continue                       # 已经折过了，别再折一次
-            head = content[: keep_chars]
-            dropped = len(content) - len(head)
+            # v1.7.5：改成**头 + 尾**保留，与"当前轮裁剪"的口径一致。
+            # 此前只留头部 —— 而工具输出里最有价值的信息经常在结尾：
+            # pytest 的 FAILED 汇总、编译器的错误行、命令的非零退出原因、
+            # 大文件读取的末尾几行。只留头部等于每次折叠都把这些扔掉，
+            # 模型于是"记得自己读过，却不记得读出了什么"，只能重读一遍。
+            head_chars = keep_chars - self.FOLD_TAIL_CHARS
+            head = content[: max(0, head_chars)]
+            tail = content[-self.FOLD_TAIL_CHARS:] if self.FOLD_TAIL_CHARS else ""
+            kept = len(head) + len(tail)
+            dropped = len(content) - kept
             reclaimed += dropped
             folded += 1
             m["content"] = (
-                f"{head}\n{self.FOLD_MARK}，省略 {dropped} 字符。"
-                f"如仍需要完整内容，请重新调用相应工具。]"
+                f"{head}\n{self.FOLD_MARK}，中间省略 {dropped} 字符"
+                f"（已保留开头与结尾）。"
+                f"如仍需要完整内容，请重新调用相应工具。]\n{tail}"
             )
         after_chars = sum(len(m.get("content") or "") for m in msgs
                           if isinstance(m.get("content"), str))
@@ -471,12 +601,14 @@ class ReActExecutor:
         deadline: float | None = None,
         on_timeout: Any = None,
         on_interjection: Any = None,
+        on_reconnect: Any = None,
+        memory_note: str = "",
     ) -> str:
         """执行 ReAct 循环。
 
         Args:
             task: 用户任务。
-            context: 额外上下文。
+            context: 额外上下文（环境 / 项目索引；同一会话内尽量稳定）。
             on_thought: 思考回调 (可选)。
             on_action: 动作回调 (可选)。
             on_no_progress: 无进展事件回调 ``(dict) -> None`` (可选)。
@@ -488,6 +620,10 @@ class ReActExecutor:
             on_interjection: 用户中途补充被并入时的回调 ``(dict) -> None``
                 (可选) —— 补的那句话**真的交给模型了**才会触发，用户据此
                 知道"我插的话生效了"，而不是插完只能猜。
+            on_reconnect: 模型连接中断、正在等待重连时的回调
+                ``(dict) -> None`` (可选，v1.7.6)。
+            memory_note: 每个任务都可能变化的记忆片段（v1.11.10）。单独作为
+                一条 system 消息放在环境之后，避免它把稳定的前缀缓存一起作废。
 
         Returns:
             最终答案文本。**上限耗尽 / 无进展提前收尾 / 超时 / 被中断时**
@@ -500,6 +636,12 @@ class ReActExecutor:
         self.iterations_used = 0
         self.tool_timeouts = 0
         self.interjections_merged = []
+        #: v1.11.11 上下文溢出后的"压缩 + 重试"是否已用掉（每轮任务最多一次）
+        self.context_retry_used = False
+        #: 连续"整轮没有任何成功工具调用"的轮数（见 NO_SUCCESS_LIMIT）
+        self._rounds_without_success = 0
+        #: 连续"空回复/被截断回复"的轮数（见 EMPTY_RESPONSE_LIMIT）
+        self._empty_response_streak = 0
         # 无进展记账与只读缓存都按"本轮任务"重置 —— 上一轮 task 的重复判定
         # 与结果缓存对新任务是噪声（文件可能已经变了）
         try:
@@ -509,7 +651,8 @@ class ReActExecutor:
         try:
             return await self._run(task, context, on_thought, on_action,
                                    on_no_progress, deadline, on_timeout,
-                                   on_interjection)
+                                   on_interjection, on_reconnect,
+                                   memory_note=memory_note)
         except asyncio.CancelledError:
             # 被取消（用户停止 / 会话关闭 / 超时）—— 同样要留下结构化进度，
             # 否则用户只看到"任务没了"，不知道已经做成了什么。
@@ -645,7 +788,13 @@ class ReActExecutor:
         stop_note = {
             "max_iterations": "；即已达到最大迭代步数上限，任务可能尚未完成。",
             "no_progress": "；即在原地重复同一步动作（无进展），已提前收尾以免继续烧预算。",
-            "task_budget": "；即整轮任务的总时长预算已到点，已停止开启新步骤（已完成的工作全部保留）。",
+            "empty_response": "；即连续多轮没有产生任何可用内容（多为输出被 max_tokens "
+                              "截断，或模型只输出了推理而没有正文）。",
+            "task_budget": "；即本轮任务的总时长预算或 token 预算已到点"
+                           "（具体是哪一种见上方括号里的原因），"
+                           "已停止开启新步骤（已完成的工作全部保留）。",
+            "llm_unavailable": "；即模型服务长时间连不上（已多次自动重连），"
+                               "已完成的工作全部保留，网络恢复后说「继续」即可接着做。",
             "cancelled": "；即被用户/会话中断。",
             "error": "；即中途抛错被中断。",
         }.get(stop, "")
@@ -711,20 +860,15 @@ class ReActExecutor:
         deadline: float | None = None,
         on_timeout: Any = None,
         on_interjection: Any = None,
+        on_reconnect: Any = None,
+        memory_note: str = "",
     ) -> str:
         # 只挑与本任务相关的工具完整下发，其余留一份一行式目录（见 _select_tools）
         self._select_tools(task, context)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": self.SYSTEM_PROMPT},
-        ]
         catalog = self._dormant_catalog()
-        catalog_at = -1          # 目录消息在 messages 里的下标（-1 = 没有目录）
-        if catalog:
-            catalog_at = len(messages)
-            messages.append({"role": "system", "content": catalog})
-        if context:
-            messages.append({"role": "system", "content": f"Environment:\n{context}"})
-        messages.append({"role": "user", "content": task})
+        # v1.11.10：顺序固定为"稳定前缀在前、易变内容在后"（见 build_initial_messages）
+        messages: list[dict[str, Any]] = build_initial_messages(
+            self.SYSTEM_PROMPT, catalog, context, memory_note, task)
         # 暴露给上层：预算吃紧时 compact() 压的就是这个列表
         self.messages = messages
 
@@ -732,7 +876,23 @@ class ReActExecutor:
         tool_schemas = self._schemas()
         trunc_before = self.fn_handler.savings_report()["truncated_results"]
 
-        for iteration in range(self.max_iterations):
+        limit = self.max_iterations
+        self.iteration_extensions_used = 0
+        for iteration in itertools.count():
+            if iteration >= limit:
+                # v1.11.7：步数用完但任务仍在推进（最近几轮有工具调用成功）→ 续开一个步数窗口，
+                # 而不是把做到一半的长任务交成"部分完成"。没在推进就照常收尾。
+                if not self._should_extend_iterations():
+                    break
+                limit += self.max_iterations
+                self.iteration_extensions_used += 1
+                logger.info("react_iterations_extended", window=self.iteration_extensions_used,
+                            new_limit=limit)
+                messages.append({"role": "user", "content": (
+                    f"[系统提示] 已执行 {iteration} 步，任务仍在推进，已为你续加 {self.max_iterations} 步"
+                    f"（第 {self.iteration_extensions_used}/{self.max_iteration_extensions} 次续加）。"
+                    "请先回顾还没完成的交付项，优先完成它们，不要重复已经做过的步骤；"
+                    "全部完成后直接给出最终总结。")})
             self.iterations_used = iteration + 1
             # 用户中途补充（v1.7.2）：在下一次思考**之前**并进消息列表。
             # 放在这里而不是流式回调里，是因为 ReAct 的"步与步之间"才是唯一
@@ -742,21 +902,57 @@ class ReActExecutor:
             # v1.7.0 整轮任务预算：到点**不再开新步骤**。
             # 判据放在这里而不是"硬掐断"：掐断会丢掉已经做完的工作，
             # 而这里能把成果完整地交出去（部分交付清单）。
-            if deadline is not None and time.monotonic() >= deadline:
+            if deadline is not None and time.monotonic() >= deadline + self.deadline_shift:
                 self.stop_reason = "task_budget"
                 logger.warning("react_task_budget_exhausted",
                                iterations=self.iterations_used,
                                max_iterations=self.max_iterations)
                 break
-            # 活跃工具集变了（模型点名要了某个休眠工具）→ 重建 schema 与目录
+            # 活跃工具集变了（模型点名要了某个休眠工具）→ 重建 schema
             if frozenset(self._active_tools) != active_sig:
+                prev_sig = active_sig
                 active_sig = frozenset(self._active_tools)
                 tool_schemas = self._schemas()
-                if catalog_at >= 0:
-                    # 目录里少了刚补发的那几个（它们现在有完整 schema 了）
-                    messages[catalog_at]["content"] = self._dormant_catalog()
+                added = sorted(active_sig - prev_sig)
+                if added and catalog:
+                    # v1.11.10：**只追加、不改写**。
+                    # 旧实现会改写第 2 条 system 消息（工具目录），而 DeepSeek /
+                    # GLM / OpenAI 的提示缓存按逐字节前缀命中 —— 开头改一个字，
+                    # 后面几千 token 的缓存全部作废，且这一步往往发生在任务
+                    # 中段（缓存已经攒得很厚的时候）。追加一条增量说明即可，
+                    # 模型知道"这些工具现在能直接调了"，前缀保持不变。
+                    messages.append({"role": "system", "content": (
+                        "[工具目录更新] 以下工具已加载完整 schema，现在可以直接调用："
+                        + "、".join(added)
+                        + "。上方目录中它们的一行式简表可以忽略。")})
             # THINK
-            response = await self.llm.generate(messages, tools=tool_schemas)
+            # v1.7.5：预算耗尽**不再让任务裸崩**。此前这里没有任何 try，
+            # ResourceManager 抛出的 RuntimeError 会一路上浮成 HTTP 500 /
+            # task_error，而**已经做完的工作全部丢失**（下面的
+            # partial_report() 根本轮不到执行）。实测默认预算下，一个每步
+            # 2.7k token 的长任务会在第 22~31 步被掐死，输出为空。
+            # 现在改成"到点不再开新步骤"，复用既有的部分交付路径。
+            try:
+                response = await self._generate_resilient(
+                    messages, tool_schemas, on_reconnect, deadline)
+            except BudgetExhaustedError as e:
+                self.stop_reason = "task_budget"
+                self.interrupted_reason = str(e)
+                logger.warning("react_token_budget_exhausted",
+                               iterations=self.iterations_used,
+                               error=str(e))
+                break
+            except Exception as e:
+                # v1.7.6：模型长时间连不上（provider 层 + 任务层重连都用尽）。
+                # 已经做过实事 → 交部分交付清单（成果不丢，用户可"接着做"）；
+                # 一步都没做 → 照常抛出，让用户看到明确的错误与排障提示。
+                if not (is_transient_llm_error(e) and self.actions):
+                    raise
+                self.stop_reason = "llm_unavailable"
+                self.interrupted_reason = str(e)[:300]
+                logger.warning("react_llm_unavailable",
+                               iterations=self.iterations_used, error=str(e)[:200])
+                break
 
             if response.text:
                 self.thoughts.append(response.text)
@@ -765,13 +961,44 @@ class ReActExecutor:
                 if on_thought:
                     await on_thought(response.text)
 
-            # 没有工具调用 → 任务完成
+            # 没有工具调用 → 通常意味着任务完成
             if not response.tool_calls:
+                text = (response.text or "").strip()
+                # v1.7.5：空回复 / 被 max_tokens 截断**不是完成**。
+                #
+                # 判据此前只有"没有 tool_calls"，于是下面这条路径会直接 return ——
+                # 哪怕 text 是空串。对推理模型尤其致命：deepseek-flash 这类模型
+                # 的 reasoning 与 content 共用 max_tokens，实测最坏一轮 reasoning
+                # 吃掉 69.6% 的预算；一旦预算被 reasoning 用光，content 就是空、
+                # finish_reason 是 "length"，而任务会被记成**成功但输出为空**。
+                truncated = str(getattr(response, "finish_reason", "") or "") == "length"
+                if text and not truncated:
+                    if self.stop_on_no_tools:
+                        self.stop_reason = "no_more_tools"
+                        await self._report_truncations(trunc_before)
+                        return response.text
+                    messages.append({"role": "assistant", "content": response.text})
+                    continue
                 if self.stop_on_no_tools:
-                    self.stop_reason = "no_more_tools"
-                    await self._report_truncations(trunc_before)
-                    return response.text
-                # 否则添加 assistant 消息并继续
+                    self._empty_response_streak += 1
+                    if self._empty_response_streak >= self.EMPTY_RESPONSE_LIMIT:
+                        self.stop_reason = "empty_response"
+                        self.interrupted_reason = (
+                            f"连续 {self._empty_response_streak} 次收到空回复"
+                            + ("（finish_reason=length，输出被 max_tokens 截断）"
+                               if truncated else "")
+                            + "，已停止以免空转")
+                        logger.warning("react_empty_response",
+                                       streak=self._empty_response_streak,
+                                       truncated=truncated,
+                                       iterations=self.iterations_used)
+                        break
+                    messages.append({"role": "user", "content": (
+                        "上一轮没有产生任何内容"
+                        + ("（输出被 max_tokens 截断，请直接给结论，不要长篇推理）"
+                           if truncated else "（既没有正文也没有工具调用）")
+                        + "。请立刻给出**简短**的结论或下一步动作。")})
+                    continue
                 messages.append({"role": "assistant", "content": response.text})
                 continue
 
@@ -779,6 +1006,22 @@ class ReActExecutor:
             messages.append(self._assistant_message(response))
             results = []
             for tc in response.tool_calls:
+                # v1.7.5：**先归一化工具名，再做任何判断**。
+                # 放在这里而不是 _gate 里，是因为归一化不该依赖"有没有配权限引擎"：
+                # 未配权限引擎时 _gate 会提前返回，名字就保持原样流到熔断记账与
+                # 事件推送里 —— 于是 `read_file` 与 `file_read` 变成两条独立的
+                # 失败记录，各自计数，熔断永远攒不到阈值。
+                self._normalize_tool_call(tc)
+                # v1.7.6：参数 JSON 残缺/被截断 → 不执行，直接告诉模型真正的原因
+                # 与修法。放在门控之前：残缺参数既不该弹审批，也不该被执行。
+                arg_err = getattr(tc, "arguments_error", "")
+                if arg_err:
+                    note = self._broken_args_note(tc.name, arg_err)
+                    self._record_tool_outcome(tc.name, False, note)
+                    results.append(ToolResult(
+                        tool_name=tc.name, success=False, error=note,
+                        metadata={"arguments_error": True}))
+                    continue
                 allowed, deny_reason = await self._gate(tc)
                 if not allowed:
                     results.append(ToolResult(
@@ -791,6 +1034,8 @@ class ReActExecutor:
                 # 此前模型会对着同一个坏工具反复调用直到迭代上限耗尽 ——
                 # 既烧 token 又拖时间，而失败原因从头到尾没人看见。
                 tripped = self._breaker_reason(tc.name)
+                if tripped and await self._network_half_open(tc.name):
+                    tripped = ""            # v1.11.6：网络已恢复 → 半开放行，不再整轮封死
                 if tripped:
                     results.append(ToolResult(
                         tool_name=tc.name, success=False, error=tripped))
@@ -823,7 +1068,8 @@ class ReActExecutor:
                     result = self._auto_validate_result(tc, result)
                     self._remember_result(tc, result)
                     self._record_tool_outcome(tc.name, result.success,
-                                              result.error or "")
+                                              result.error or "",
+                                              network=self._is_network_failure(result))
                     results.append(self._with_advice(result, advice))
                 except TimeoutError:
                     # 超时不是"工具失败"，但**必须**走同一条熔断与反馈链路：
@@ -861,13 +1107,148 @@ class ReActExecutor:
                 self.stop_reason = "no_progress"
                 break
 
-        if self.stop_reason not in ("no_progress", "task_budget"):
+            # v1.7.5：连续多轮**一个工具都没成功**也提前收尾。
+            # 上面那条看的是"动作重不重复"，熔断看的是"同一个工具失败几次"，
+            # 而两者都能被"每步换个名字/参数"绕开。这条看的是结果。
+            self._note_round_outcome(results)
+            if self._no_success_exhausted():
+                self.stop_reason = "no_progress"
+                self.interrupted_reason = (
+                    f"连续 {self._rounds_without_success} 轮没有任何工具调用成功"
+                    f"（多为权限被拒、参数不合法或工具名不存在），已提前收尾")
+                logger.warning("react_no_successful_tool_call",
+                               rounds=self._rounds_without_success,
+                               iterations=self.iterations_used)
+                break
+
+        if self.stop_reason not in ("no_progress", "task_budget", "empty_response",
+                                    "llm_unavailable"):
             # 达到迭代上限：**给出部分交付清单**，而不是把已完成的工作丢掉只留一句提示
             self.stop_reason = "max_iterations"
         await self._report_truncations(trunc_before)
         rep = self.partial_report(task)
         head = rep["last_thought"] or "（本轮没有产生可用的思考内容）"
         return head + "\n" + self.render_manifest(rep)
+
+    @staticmethod
+    def _broken_args_note(name: str, arg_err: str) -> str:
+        """参数残缺时喂回模型的说明 —— 要讲清"为什么"和"下一步怎么改"。"""
+        return (f"{arg_err}\n建议：调用「{name}」时把大段内容拆小 —— "
+                f"先写入文件的前一部分，再用追加/编辑方式分几次补全；"
+                f"或只传必要参数、避免在参数里内嵌超长文本。不要原样重试同一次调用。")
+
+    # ── v1.7.6 任务层重连 ──────────────────────────────────
+
+    #: provider 层自己的退避重试（约半分钟）用尽后，任务层再按这些间隔等待
+    #: 重连。合计约 100 秒 —— 覆盖"代理切节点 / Wi-Fi 重连 / 中转重启"这类
+    #: 常见的分钟级中断，又不会让一个真的配错了的地址把任务挂上十几分钟。
+    LLM_RECONNECT_DELAYS: tuple[float, ...] = (10.0, 30.0, 60.0)
+
+    async def _generate_resilient(self, messages: list[dict[str, Any]],
+                                  tool_schemas: Any, on_reconnect: Any,
+                                  deadline: float | None) -> Any:
+        """``llm.generate`` + 任务层重连。
+
+        用户报告"任务跑一段时间就 Connection error."：长任务动辄几十次模型
+        调用，只要其中**一次**碰上中转抖动，此前整轮就作废。这里在 provider
+        层重试之外再兜一层：等一等、推一条"正在重连"事件给界面，再原样重发
+        同一组消息 —— 消息列表没动，模型看到的上下文与断线前完全一致。
+        """
+        delays = tuple(getattr(self, "llm_reconnect_delays", self.LLM_RECONNECT_DELAYS))
+        attempt = 0
+        offline_waits = 0
+        while True:
+            try:
+                resp = await self.llm.generate(messages, tools=tool_schemas)
+                if attempt:
+                    await self._emit_reconnect(on_reconnect, {
+                        "type": "llm_reconnect", "state": "recovered",
+                        "attempt": attempt})
+                    logger.info("react_llm_reconnected", attempts=attempt)
+                return resp
+            except (BudgetExhaustedError, asyncio.CancelledError):
+                raise
+            except LLMContextTooLargeError as e:
+                # v1.11.11：上下文溢出不再直接让任务失败 —— 先折叠一次旧观察，
+                # 再原样重发。只重试一次：压缩救不了的单条超大消息（一次塞进
+                # 几十万字符的工具结果）继续重试也只是再烧一次调用。
+                if getattr(self, "context_retry_used", False):
+                    raise
+                self.context_retry_used = True
+                stat = self.compact()
+                logger.warning("react_context_overflow_retry",
+                               folded=stat.get("folded", 0),
+                               chars_reclaimed=stat.get("chars_reclaimed", 0),
+                               error=str(e)[:200])
+                await self._emit_reconnect(on_reconnect, {
+                    "type": "context_retry", "folded": stat.get("folded", 0),
+                    "chars_reclaimed": stat.get("chars_reclaimed", 0),
+                    "est_tokens_saved": stat.get("est_tokens_saved", 0),
+                })
+                continue
+            except Exception as e:
+                if not is_transient_llm_error(e):
+                    raise
+                if attempt >= len(delays):
+                    # v1.11.7：重连间隔用完时先看看是不是"本机断网了"。断网（Wi-Fi 掉线、
+                    # 云电脑网络重置）常常持续几分钟 —— 此前 100 秒后整轮任务作废，做了一半的
+                    # 长任务全部白跑。断网就等网络回来（有上限、尊重整轮时长预算），回来后再重试。
+                    if offline_waits >= self.LLM_OFFLINE_WAITS or not await self._wait_offline(
+                            on_reconnect, deadline, e):
+                        raise
+                    offline_waits += 1
+                    attempt = len(delays) - 1           # 恢复后再给一次完整的最后一档重试
+                    continue
+                wait = float(delays[attempt])
+                # 整轮时长预算快到了：别为了重连把预算睡过去
+                if deadline is not None and \
+                        time.monotonic() + wait >= deadline + getattr(self, "deadline_shift", 0.0):
+                    raise
+                attempt += 1
+                logger.warning("react_llm_reconnect_wait", attempt=attempt,
+                               wait_s=wait, error=str(e)[:200])
+                await self._emit_reconnect(on_reconnect, {
+                    "type": "llm_reconnect", "state": "waiting",
+                    "attempt": attempt, "max_attempts": len(delays),
+                    "wait_s": wait, "kind": classify_llm_error(e),
+                    "error": str(e)[:240]})
+                await asyncio.sleep(wait)
+
+    #: 断网时最多等几次网络恢复（每次最长 LLM_OFFLINE_MAX_WAIT 秒）
+    LLM_OFFLINE_WAITS = 2
+    LLM_OFFLINE_MAX_WAIT = 600.0
+
+    async def _wait_offline(self, on_reconnect: Any, deadline: float | None, err: Exception) -> bool:
+        """本机断网 → 等网络恢复；网络本来就通（是服务端的问题）或等不到 → False。"""
+        try:
+            from automind.core.netresilience import network_up, wait_for_network
+            ok, detail = await network_up(fresh=True)
+        except Exception:                             # pragma: no cover - 探测失败按"不是断网"
+            return False
+        if ok:
+            return False
+        budget = self.LLM_OFFLINE_MAX_WAIT
+        if deadline is not None:
+            budget = min(budget, deadline + getattr(self, "deadline_shift", 0.0) - time.monotonic())
+        if budget <= 5:
+            return False
+        logger.warning("react_llm_offline_wait", max_wait_s=round(budget), detail=detail)
+        await self._emit_reconnect(on_reconnect, {
+            "type": "llm_reconnect", "state": "offline", "wait_s": round(budget),
+            "error": f"本机网络不可用（{detail}），等待恢复后继续：{str(err)[:160]}"})
+        recovered, waited = await wait_for_network(budget, interval=5.0)
+        if recovered:
+            logger.info("react_llm_network_back", waited_s=round(waited))
+        return recovered
+
+    @staticmethod
+    async def _emit_reconnect(cb: Any, event: dict[str, Any]) -> None:
+        if cb is None:
+            return
+        try:
+            await cb(event)
+        except Exception as e:          # pragma: no cover - 纯观测
+            logger.warning("react_reconnect_emit_failed", error=str(e))
 
     # ── v1.7.0 单步超时 ────────────────────────────────────
 
@@ -1043,13 +1424,79 @@ class ReActExecutor:
     #: 同一工具连续失败达到此次数即熔断，本轮任务内不再调用
     FAILURE_THRESHOLD = 3
 
-    def _record_tool_outcome(self, name: str, success: bool, error: str) -> None:
-        """记录一次工具调用结果；连续失败到阈值即熔断并留痕。"""
+    #: 连续这么多**轮**没有任何一次工具调用成功，即判定无进展并提前收尾。
+    #: 为什么需要这条：熔断按工具名计数、无进展按动作指纹计数 —— 两个都能被
+    #: "每一步换一个工具名/参数"绕开（实测：terminal → cmd /c →
+    #: execute_shell_command → python_sandbox，熔断确实触发了，但任务没有停，
+    #: 一路烧到 token 预算耗尽）。这条护栏看的是**结果**（有没有真的成事），
+    #: 与模型换了多少种花样无关。
+    NO_SUCCESS_LIMIT = 5
+
+    #: 连续这么多轮收到"空回复/被截断的回复"即收尾。
+    #: 判据是"没有正文且没有工具调用"—— 推理模型把 max_tokens 全花在
+    #: reasoning 上时就是这个形态（见 _run 里的说明）。
+    EMPTY_RESPONSE_LIMIT = 3
+
+    #: v1.11.6：网络类失败（DNS / 连接重置 / 超时……）单独计数的熔断阈值。
+    #: 网络抖动不代表工具坏了：按普通失败算，断网 30 秒就足以让 terminal 整轮作废。
+    NET_FAILURE_THRESHOLD = 6
+    #: 一轮任务里网络类失败的总上限：探测说"网通了"但命令仍报网络错（例如只有某个
+    #: 境外源不通）时，半开放行不能无限循环
+    NET_FAILURE_CAP = 12
+
+    @staticmethod
+    def _is_network_failure(result: Any) -> bool:
+        if getattr(result, "success", False):
+            return False
+        md = getattr(result, "metadata", None) or {}
+        if "network_error" in md:
+            return bool(md["network_error"])
+        from automind.core.netresilience import is_network_error, result_text
+        return is_network_error(result_text(result))
+
+    async def _network_half_open(self, name: str) -> bool:
+        """熔断是网络类失败攒出来的、且网络现在已恢复 → 清零并放行一次（半开）。"""
+        st = self._tool_failures.get(name) or {}
+        if not st.get("network") or st.get("net_total", 0) >= self.NET_FAILURE_CAP:
+            return False
+        try:
+            from automind.core.netresilience import network_up
+            ok, _ = await network_up(timeout=2.0, fresh=True)
+        except Exception:                          # pragma: no cover - 探测失败按未恢复
+            return False
+        if ok:
+            st["streak"] = 0
+            st["net_streak"] = 0
+            logger.info("tool_circuit_half_open", tool=name, reason="network_recovered")
+        return ok
+
+    def _record_tool_outcome(self, name: str, success: bool, error: str,
+                             network: bool = False) -> None:
+        """记录一次工具调用结果；连续失败到阈值即熔断并留痕。
+
+        网络类失败（``network=True``）记在 ``net_streak`` 上、阈值更高；熔断后只要
+        网络恢复就半开放行（见 ``_network_half_open``）。普通失败照旧 3 次熔断。
+        """
         st = self._tool_failures.setdefault(name, {"streak": 0, "last": ""})
         if success:
             st["streak"] = 0
+            st["net_streak"] = 0
+            st["network"] = False
             st["last"] = ""
             return
+        if network:
+            st["net_streak"] = st.get("net_streak", 0) + 1
+            st["net_total"] = st.get("net_total", 0) + 1
+            st["network"] = True
+            st["last"] = (error or "")[:300]
+            logger.warning("tool_call_network_failed", tool=name,
+                           net_streak=st["net_streak"], error=st["last"])
+            if st["net_streak"] >= self.NET_FAILURE_THRESHOLD or st["net_total"] >= self.NET_FAILURE_CAP:
+                st["streak"] = max(st["streak"], self.FAILURE_THRESHOLD)
+                logger.error("tool_circuit_open", tool=name, reason="network",
+                             last_error=st["last"])
+            return
+        st["network"] = False
         st["streak"] += 1
         st["last"] = (error or "")[:300]
         logger.warning("tool_call_failed", tool=name,
@@ -1058,11 +1505,44 @@ class ReActExecutor:
             logger.error("tool_circuit_open", tool=name,
                          threshold=self.FAILURE_THRESHOLD, last_error=st["last"])
 
+    def _note_round_outcome(self, results: list[Any]) -> None:
+        """记一轮（一次 THINK+ACT）里是否有任何工具调用成功。
+
+        被权限拒绝、被无进展拦截、被熔断挡下、工具抛异常 —— 这些都不算成功。
+        连续 ``NO_SUCCESS_LIMIT`` 轮毫无成功即认为任务在原地烧钱。
+        """
+        if any(getattr(r, "success", False) for r in results):
+            self._rounds_without_success = 0
+            return
+        self._rounds_without_success = getattr(self, "_rounds_without_success", 0) + 1
+
+    #: v1.11.7 步数窗口：步数用完但仍在推进时最多续加几次（每次 = max_iterations 步）
+    MAX_ITERATION_EXTENSIONS = 2
+    #: 判定"仍在推进"：最近这么多轮里至少有一轮有工具调用成功
+    PROGRESS_WINDOW = 3
+
+    def _should_extend_iterations(self) -> bool:
+        if getattr(self, "iteration_extensions_used", 0) >= getattr(
+                self, "max_iteration_extensions", self.MAX_ITERATION_EXTENSIONS):
+            return False
+        if getattr(self, "_rounds_without_success", 0) >= self.PROGRESS_WINDOW:
+            return False
+        # 有工具调用过才谈得上"在推进"；一直在空想的不续
+        return bool(getattr(self, "actions", None))
+
+    def _no_success_exhausted(self) -> bool:
+        return getattr(self, "_rounds_without_success", 0) >= self.NO_SUCCESS_LIMIT
+
     def _breaker_reason(self, name: str) -> str:
         """熔断已触发时返回给模型看的说明，否则返回空串。"""
         st = self._tool_failures.get(name)
         if not st or st["streak"] < self.FAILURE_THRESHOLD:
             return ""
+        if st.get("network"):
+            return (f"工具「{name}」因网络中断已失败 {st.get('net_streak', 0)} 次，网络仍未恢复，"
+                    f"暂停调用。最后一次的失败原因：{st['last']}。"
+                    f"请先调用 wait_for_network 等网络恢复（恢复后会自动重新放行），"
+                    f"或先完成不需要联网的步骤。")
         return (f"工具「{name}」已连续失败 {st['streak']} 次，已停止调用以免空转。"
                 f"最后一次的失败原因：{st['last']}。"
                 f"请改用其它方式完成该步骤，或先修复该工具的配置。")
@@ -1071,16 +1551,59 @@ class ReActExecutor:
         """本轮各工具的失败情况（供上层推送给前端标红）。"""
         return {k: dict(v) for k, v in self._tool_failures.items() if v["streak"]}
 
+    def _normalize_tool_call(self, tc: ToolCall) -> str:
+        """把 ``tc.name`` 就地改写成注册表里的真名；返回解析结果（可能为空串）。
+
+        改的是 ``tc`` 本身：后续的门控、熔断记账、事件推送读的都是同一个
+        名字，这样同一个工具的两种拼写才不会被记成两条独立记录。
+        """
+        try:
+            if self.tool_registry.get(tc.name) is not None:
+                return tc.name                 # 本来就是真名
+        except Exception:
+            pass
+        resolved = self._resolve_tool_name(tc.name)
+        if resolved and resolved != tc.name:
+            logger.info("tool_name_normalized", requested=tc.name, resolved=resolved)
+            tc.name = resolved
+        return resolved
+
+    def _resolve_tool_name(self, name: str) -> str:
+        """把模型写的工具名解析成注册表里的**真名**（解析不了返回空串）。
+
+        复用 ``tools/base.py`` 已有的 ``resolve_name``：它按"归一化名 → 词序 →
+        相似度"三层匹配，且只在唯一命中时才替模型做主（有歧义就报错让它自己选）。
+        """
+        try:
+            from automind.tools.base import resolve_name
+
+            resolved, _suggestions = resolve_name(name, self.tool_registry.list_names())
+            return resolved or ""
+        except Exception as e:                        # pragma: no cover - 防御
+            logger.warning("tool_name_resolve_failed", tool=name, error=str(e))
+            return ""
+
     async def _gate(self, tc: ToolCall) -> tuple[bool, str]:
         """工具调用前的权限门控。返回 (是否允许, 原因)。"""
         if self.permissions is None:
             return True, ""
+        from automind.core.types import PermissionTier
+
+        # v1.7.5：工具名已在 `_normalize_tool_call` 里归一化过（在主循环里、
+        # 先于任何判断执行），这里直接按真名取权限等级即可。
         try:
             tool = self.tool_registry.get(tc.name)
-            tier = tool.permission_tier
         except Exception:
-            from automind.core.types import PermissionTier
-            tier = PermissionTier.SENSITIVE
+            tool = None
+
+        if tool is None:
+            # 解析不出来 = 真的没有这个工具。按**最高风险**处理（DANGEROUS），
+            # 而不是原先的 SENSITIVE —— 一个来路不明的名字不该比 terminal
+            # 更"温和"；plan_executor 对同一情形用的也是 DANGEROUS。
+            tier = PermissionTier.DANGEROUS
+        else:
+            tier = tool.permission_tier
+
         decision, reason = self.permissions.check(tc.name, tier, tc.arguments)
         if decision.value == "allow":
             return True, reason

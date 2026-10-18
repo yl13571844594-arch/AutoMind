@@ -138,6 +138,9 @@ class ToolCall(BaseModel):
     id: str
     name: str
     arguments: dict[str, Any]
+    #: 参数解析失败/被截断时的说明（v1.7.6）。非空 = 这次调用**不能执行**：
+    #: 参数是残缺的，执行只会得到"缺参数"的误导性报错，或把半截内容写进文件。
+    arguments_error: str = ""
 
 
 class ToolResult(BaseModel):
@@ -168,18 +171,38 @@ class LLMResponse(BaseModel):
     provider: str = ""
     model: str = ""
     raw: dict[str, Any] = Field(default_factory=dict)
-    # 缓存命中度量（DeepSeek / OpenAI 兼容提供商返回 usage 时填充）
-    cache_hit: bool = False
+    # ── 提示缓存度量（v1.11.10）──
+    # 各家 usage 的口径不同，这里先归一化，别让上层去猜：
+    #   · DeepSeek：prompt_cache_hit_tokens / prompt_cache_miss_tokens
+    #   · OpenAI / GLM(智谱) / Kimi / 通义 / 豆包：prompt_tokens_details.cached_tokens
+    #   · Anthropic：cache_read_input_tokens / cache_creation_input_tokens
+    #: 本次输入中命中缓存（无需重新计算）的 token 数
     cached_tokens: int = 0
+    #: 写入缓存的新 token 数（目前只有 Anthropic 显式返回）
+    cache_creation_tokens: int = 0
+    #: 本次调用的**总输入** token 数（含命中部分）。OpenAI 兼容口径就是
+    #: prompt_tokens；Anthropic 的 prompt_tokens 不含缓存读取，必须补上
+    #: read+creation 才是真实输入量 —— 命中率的分母要的是后者。
+    input_tokens: int = 0
+    #: 是否命中缓存（旧字段，保留兼容：有命中即为 True）
+    cache_hit: bool = False
+    #: 提供商是否**上报了**缓存口径。False = 压根不报（如 Ollama），
+    #: 界面应显示"—"；True 且 cached=0 才是"报了，这次确实没命中"。
+    cache_reported: bool = False
 
     @property
     def total_tokens(self) -> int:
         return self.prompt_tokens + self.completion_tokens
 
     @property
+    def total_input_tokens(self) -> int:
+        """总输入 token：优先用提供商明确给出的口径，否则退回 prompt。"""
+        return self.input_tokens or self.prompt_tokens
+
+    @property
     def cache_savings_pct(self) -> float:
-        """缓存节省占比：缓存命中 token / 总输入 token。"""
-        total_input = self.prompt_tokens + self.cached_tokens
+        """缓存命中占比：命中 token / 总输入 token（0~100）。"""
+        total_input = self.total_input_tokens
         if total_input <= 0:
             return 0.0
         return round(self.cached_tokens / total_input * 100, 1)
@@ -317,18 +340,50 @@ class Relation(BaseModel):
 
 
 class TokenUsage(BaseModel):
-    """Token 消耗统计。"""
+    """Token 消耗统计（v1.11.10 起同时记录提示缓存命中）。"""
 
     prompt_tokens: int = 0
     completion_tokens: int = 0
+    #: 命中提示缓存的输入 token 数
+    cached_tokens: int = 0
+    #: 写入提示缓存的 token 数（Anthropic 专用，其余提供商恒为 0）
+    cache_creation_tokens: int = 0
+    #: 总输入 token（含命中）。OpenAI 兼容口径 = prompt_tokens；Anthropic 的
+    #: prompt_tokens 只含未命中部分，这里才是真实输入量，命中率按它算分母。
+    input_tokens: int = 0
+    #: LLM 调用次数 —— 命中率之外，还要能说"几次调用里命中几次"
+    calls: int = 0
+    cache_hit_calls: int = 0
+    #: 其中**上报了**缓存口径的调用次数（0 = 该模型不提供缓存统计）
+    cache_reported_calls: int = 0
+    #: 单次请求输入 token 的**峰值**。上下文占用看的是它；累加的
+    #: ``input_tokens`` 是"总花销"，两者语义不同，不能混用。
+    peak_prompt_tokens: int = 0
 
     @property
     def total(self) -> int:
         return self.prompt_tokens + self.completion_tokens
 
+    @property
+    def cache_hit_rate(self) -> float | None:
+        """提示缓存命中率（%）；提供商没给缓存用量时返回 None（不是 0）。"""
+        if self.input_tokens <= 0 or self.cache_reported_calls <= 0:
+            return None
+        return round(self.cached_tokens / self.input_tokens * 100, 1)
+
     def add(self, response: LLMResponse) -> None:
+        call_input = response.total_input_tokens
         self.prompt_tokens += response.prompt_tokens
         self.completion_tokens += response.completion_tokens
+        self.cached_tokens += response.cached_tokens
+        self.cache_creation_tokens += response.cache_creation_tokens
+        self.input_tokens += call_input
+        self.calls += 1
+        if response.cached_tokens > 0:
+            self.cache_hit_calls += 1
+        if response.cache_reported:
+            self.cache_reported_calls += 1
+        self.peak_prompt_tokens = max(self.peak_prompt_tokens, call_input)
 
 
 class AgentState(BaseModel):

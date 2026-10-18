@@ -3,6 +3,7 @@ import { App } from 'antd';
 import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../../api/client';
 import { useApp } from '../../store/app';
+import { usePanel } from '../../store/panel';
 
 const MONACO_CDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
 const LANG_BY_EXT: Record<string, string> = {
@@ -16,6 +17,8 @@ const FILE_ICON: Record<string, string> = {
   py: '🐍', js: '🟨', ts: '🟦', html: '🌐', htm: '🌐', css: '🎨', md: '📝', json: '🧾',
   yml: '🧾', yaml: '🧾', toml: '🧾', png: '🖼️', jpg: '🖼️', gif: '🖼️', svg: '🖼️',
 };
+/** 已处理到第几个「在代码标签打开」请求（模块级：跨组件重挂载保留） */
+let handledCodeReq = 0;
 const codeLang = (p: string) => LANG_BY_EXT[(p.split('.').pop() || '').toLowerCase()] || 'plaintext';
 
 let monacoState: 'idle' | 'loading' | 'ready' | 'failed' = 'idle';
@@ -125,6 +128,16 @@ export default function CodeTab() {
     openedContent.current = r.content;
     mountEditor(r.content, codeLang(path));
   };
+
+  // 「摘要」标签里点了产物文件 → 在这里打开（按 n 触发，同一文件点两次也会再打开）
+  const codeReq = usePanel((s) => s.codeRequest);
+  useEffect(() => {
+    // 标签切走再切回会重新挂载：已处理过的请求不能再打开一次
+    if (!codeReq?.path || codeReq.n <= handledCodeReq) return;
+    handledCodeReq = codeReq.n;
+    openFile(codeReq.path).catch((e) => message.error(`打开失败：${e?.message || e}`));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [codeReq?.n]);
 
   const save = async () => {
     const content = editorValue();
@@ -238,7 +251,7 @@ export default function CodeTab() {
             }} />
           ) : null}
           <div ref={wrapRef} style={{
-            position: 'absolute', inset: 0,
+            position: 'absolute', top: 0, right: 0, bottom: 0, left: 0,
             display: openedPath && monacoOk !== false ? 'block' : 'none',
           }} />
         </div>

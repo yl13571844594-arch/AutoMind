@@ -445,7 +445,9 @@ class TestBranch:
         'condition: "{{ steps.first.output.value }} = ok"',      # 单等号笔误
         'condition: "{{ inputs.mode }} equals ok"',
         'condition: "{{ steps.first.output.value }}"',           # 没有算子
-        'condition: "{{ inputs.mode }} > 3"',
+        # v1.9.0（R-206）起 `>` 是合法算子；但右侧写成非数字字面量仍要在加载期拦下
+        'condition: "{{ inputs.mode }} > abc"',
+        'condition: "{{ inputs.mode }} matches ok"',              # 不在白名单的算子
     ])
     def test_bad_condition_rejected(self, condition: str) -> None:
         base = textwrap.dedent(self.BASE)

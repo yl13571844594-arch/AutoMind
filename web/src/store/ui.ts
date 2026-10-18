@@ -3,10 +3,14 @@ import { create } from 'zustand';
 
 export type ModalName =
   | 'model' | 'apikeys' | 'general' | 'integrations'
-  | 'workspaces' | 'templates' | 'tour' | 'update' | 'shortcuts' | null;
+  | 'workspaces' | 'templates' | 'tour' | 'update' | 'shortcuts' | 'runWorkflow' | 'goals'
+  | 'license' | 'schedule' | 'bots' | null;
 
 interface UiState {
   modal: ModalName;
+  /** 「新建定时任务」弹窗的预填内容（从输入框带过来） */
+  scheduleDraft: string;
+  openSchedule: (draft?: string) => void;
   preview: { html?: string; url?: string; label: string } | null;
   openModal: (m: ModalName) => void;
   closeModal: () => void;
@@ -16,6 +20,8 @@ interface UiState {
 
 export const useUi = create<UiState>((set) => ({
   modal: null,
+  scheduleDraft: '',
+  openSchedule: (draft = '') => set({ modal: 'schedule', scheduleDraft: draft }),
   preview: null,
   openModal: (m) => set({ modal: m }),
   closeModal: () => set({ modal: null }),

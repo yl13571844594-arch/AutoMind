@@ -85,7 +85,18 @@ class ContextManager:
         return total
 
     def should_compress(self) -> bool:
-        """是否应该触发上下文压缩。"""
+        """是否应该触发上下文压缩。
+
+        ⚠️ v1.7.5 说明：**本方法目前没有任何调用方**，它不会自己触发压缩。
+        真正在跑的长任务治理是 ``ReActExecutor.compact()`` —— 折叠的是每轮
+        重发的 mesessages 列表，那才是真正进请求体的东西；而本类存的是
+        "用户说了什么、Agent 答了什么"的流水账，``get_messages_for_llm()``
+        在 ReAct 路径上从未被调用过（见 ``agent._compress_context`` 的注释）。
+
+        保留这个方法是为了给非 ReAct 的调用方（脚本/库用法）留一个入口，
+        并在 ``compress()`` 里提供实现；**但它不是长任务的保护机制**，
+        不要以为它"在后台自动压缩"。
+        """
         return self.token_count() > int(self.max_tokens * self.summary_threshold)
 
     # ── 摘要压缩 ──────────────────────────────────────────

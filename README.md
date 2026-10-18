@@ -29,12 +29,24 @@
 > **数据不出本机。** 模型 API Key 存在本地配置文件，任务历史存在本地 SQLite，
 > 知识库向量索引存在本地目录 —— 除了你自己配置的模型服务商，不向任何第三方发送数据。
 
+## ✨ v1.11.13 更新亮点
+
+- 🛠 **工具调用成功率系统性提升**：参数同义名/类型自动归一、相对路径统一锚到会话工作副本、
+  文件读取自动兼容 GBK、终端链式命令自动换壳 —— `file_read` / `file_write` / `file_edit` /
+  `terminal` / `pwsh` 等工具"一次做对"的概率显著提高。
+- 🔍 **`web_search` 开箱即用**：配过 DeepSeek Key 就自动走官方搜索 API（不消耗模型轮次），
+  没配 Key 也有免密钥网页检索兜底；也支持显式接 Tavily / Serper / Brave / 自建 SearXNG。
+- 🤖 **飞书 / 企业微信 / 钉钉机器人更稳**：机器人会话使用独立 `bot-…` 命名空间与独立工作副本，
+  与 Web 工作区互不混淆；写文件不再被自检插件误判，任务过程与结果稳定回传聊天。
+- 📋 **协作能力**：待办清单、向用户提问、交付声明、上下文自动压缩与 `/compact`；
+  专业版另有子智能体委派（并发 4、嵌套 1 层、默认只读工具）。
+
 ## 界面一览
 
 <table>
 <tr>
 <td width="50%"><img src="docs/images/tools.png" alt="工具面板"><br>
-<b>🔧 工具面板</b> —— 31 个内置工具、技能、MCP 与插件，按来源标注，可搜索可开关</td>
+<b>🔧 工具面板</b> —— 40 个内置工具（含待办 / 提问 / 交付 / 文件批量编辑等新能力）、技能、MCP 与插件，按来源标注，可搜索可开关</td>
 <td width="50%"><img src="docs/images/observe.png" alt="观测中心"><br>
 <b>📈 观测中心</b> —— 当前任务的实时执行 DAG，看得见每一步在干什么</td>
 </tr>
@@ -130,7 +142,7 @@ pip install "automind-agent[web]"     # Web + OpenAI 兼容后端
 # 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
 ```
 
-> ✅ **PyPI 已同步至最新版**：`pip install -U "automind-agent[web]"` 拿到的就是本仓库
+> ✅ **PyPI 已同步至 v1.11.13**：`pip install -U "automind-agent[web]"` 拿到的就是本仓库
 > 当前版本。桌面安装包见 [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > （Windows `.exe` 已代码签名 · macOS `.dmg` 通用二进制 · Linux `.deb`），
 > 三平台包的 `SHA256SUMS` 随 Release 一并提供，可直接 `sha256sum -c` 校验。
@@ -220,6 +232,21 @@ docker compose up --build
   右栏「HTML 预览」列出项目目录中的 `.html` 文件，点击即可预览（`/api/preview/file`，限定项目目录防穿越）。
 - **🎤 语音输入**：点击麦克风按钮用 Web Speech API 语音转文字（Chrome/Edge）。
 - **📎 多模态**：可附加图片发送给视觉模型；输出中的图片/链接/表格自动渲染展示。
+
+## 🤖 IM 机器人（飞书 / 企业微信 / 钉钉）
+
+在「设置 → 机器人」里添加机器人，填好平台凭据 / Webhook 后，直接在那个聊天窗口里
+发消息就能驱动本机 Agent 干活，执行过程与结果会回传到同一个聊天：
+
+- **一个聊天 = 一个会话**：飞书、企业微信、钉钉、通用 Webhook 均支持；`/new` 开新会话，
+  `/stop` 停止，`/mode` 切换对话 / 工作 / 编程，`/apply` 把隔离副本产物应用回项目。
+- **审批在聊天里完成**：危险操作会发一条带编号的审批消息，回复「同意 / 拒绝」即可；
+  超时按拒绝处理（fail-closed），不会悄悄放行。
+- **工作区不混淆（v1.11.13）**：机器人会话固定使用 `bot-…` 会话命名空间与独立工作副本，
+  与 Web 工作区、其它群聊/机器人互不可见；相对路径统一锚定到当前会话副本，
+  写文件不再被写后自检误判。
+- 详细配置与各平台回调说明见 [docs/IM_BOTS.md](docs/IM_BOTS.md) 与
+  [docs/FEISHU.md](docs/FEISHU.md)。
 
 ## 安全审计
 

@@ -1,0 +1,74 @@
+# 分流 —— v1.9.0 branch 条件扩展的样板（离线、不需要凭据，社区版可用）
+#
+# branch 的条件仍然是**白名单比较、不求值**，v1.9.0 起多了 6 个算子：
+#   >  <  >=  <=   数值比较（两侧必须都能解析成数字；不是数字时该步骤判失败，不会静默走 else）
+#   in             左侧是右侧列表中的一项：右侧写字面量列表 [a, b]，或渲染成列表的模板
+#   exists         左侧变量取得到且不为空值（只写左侧，且必须是单个占位符）
+#
+# branch 之后是两个互斥区间：then 区间从 then 起、到 else 之前；else 区间从 else 起、
+# 到文件末尾。所以 then 必须排在 else 前面（写反了加载期就报错）。
+#
+# 怎么跑：
+#   python -m automind.workflow run examples/06-workflow/triage.yaml --input score=82
+version: 1
+name: 告警分流
+description: 按级别与分数决定写"立即处理"还是"排队处理"的记录
+
+inputs:
+  score:
+    type: number
+    required: false
+    default: 60
+    description: 告警分数（0–100）
+  level:
+    type: string
+    required: false
+    default: warning
+    description: 告警级别
+  out_dir:
+    type: string
+    required: false
+    default: examples/06-workflow/out
+    description: 输出目录（相对于项目根目录）
+
+steps:
+  - id: note
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/triage-input.txt"
+      content: "score={{ inputs.score }} level={{ inputs.level }}"
+
+  # 级别属于"严重"那几类 → 直接升级；否则再看分数
+  - id: by_level
+    type: branch
+    condition: "{{ inputs.level }} in [critical, fatal, page]"
+    then: urgent_by_level
+    else: by_score
+
+  - id: urgent_by_level
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/triage-result.txt"
+      content: "立即处理：级别 {{ inputs.level }}"
+
+  - id: by_score
+    type: branch
+    condition: "{{ inputs.score }} >= 80"
+    then: urgent_by_score
+    else: queued
+
+  - id: urgent_by_score
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/triage-result.txt"
+      content: "立即处理：分数 {{ inputs.score }}"
+
+  - id: queued
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/triage-result.txt"
+      content: "排队处理（级别 {{ inputs.level }}，分数 {{ inputs.score }}）"

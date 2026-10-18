@@ -4,7 +4,7 @@ import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
-import { chatSid } from '../../store/app';
+import { isMySid, workspaceSid } from '../../store/app';
 import { usePanel } from '../../store/panel';
 import { ErrorPanel } from '../ui/AsyncBoundary';
 import { Badge, EmptyState, EntityCard, Tile, ViewHead } from '../ui/Panel';
@@ -63,7 +63,7 @@ export default function TeamView() {
                  value={assignee} onChange={(e) => setAssignee(e.target.value)} />
           <Button type="primary" onClick={async () => {
             if (!title.trim()) { message.error('任务标题必填'); return; }
-            const r = await apiPost('/team/tasks', { title: title.trim(), assignee: assignee.trim(), session_id: chatSid() });
+            const r = await apiPost('/team/tasks', { title: title.trim(), assignee: assignee.trim(), session_id: workspaceSid() });
             if (r.error) { message.error(r.error); return; }
             message.success('任务已分配');
             setTitle(''); setAssignee('');
@@ -128,7 +128,7 @@ export default function TeamView() {
               <span className="mono feed-time">{d.time || ''}</span>
               <span className="feed-body">
                 {d.kind === 'task_done'
-                  ? <><b>{d.sid === chatSid() ? '我' : '同事'}</b> 完成任务「{d.task || ''}」
+                  ? <><b>{isMySid(d.sid) ? '我' : '同事'}</b> 完成任务「{d.task || ''}」
                     {d.success ? <span style={{ color: 'var(--green)' }}> ✓</span>
                       : <span style={{ color: 'var(--red)' }}> ✗</span>}
                     {d.changed_files ? ` · ${d.changed_files} 个文件改动` : ''}</>

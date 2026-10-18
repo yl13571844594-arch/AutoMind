@@ -282,8 +282,16 @@ class TestReactPartialDelivery:
         return ReActExecutor(llm=LLM(), tool_registry=reg, max_iterations=max_iter,
                              tool_budget=0)
 
+    def test_iterations_extended_while_progressing(self):
+        """v1.11.7：步数用完但每步都在成功推进 → 自动续加步数窗口（最多 2 次）。"""
+        ex = self._executor(max_iter=3)
+        out = asyncio.run(ex.run("做事"))
+        assert ex.iterations_used == 9 and ex.iteration_extensions_used == 2
+        assert ex.stop_reason == "max_iterations" and "out9.txt" in out
+
     def test_manifest_lists_artifacts_and_progress(self):
         ex = self._executor(max_iter=3)
+        ex.max_iteration_extensions = 0          # 只看"到上限交部分清单"这条路径
         out = asyncio.run(ex.run("做事"))
         assert "部分交付清单" in out
         assert "out1.txt" in out and "out3.txt" in out

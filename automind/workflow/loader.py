@@ -52,6 +52,9 @@ from automind.workflow.schema import (
 YAML_SUFFIXES = (".yaml", ".yml")
 JSON_SUFFIXES = (".json",)
 
+#: "按当前版本自动取"的哨兵（与显式传 None = 不限 区分开）
+_AUTO: Any = object()
+
 
 # ═══════════════════════════════════════════════════════════════
 # YAML → (Python 对象, 位置表)
@@ -195,12 +198,50 @@ class WorkflowLoader:
     """
 
     def __init__(self, *, tool_names: list[str] | None = None,
-                 unknown_fields: str = UNKNOWN_FIELD_ERROR) -> None:
+                 unknown_fields: str = UNKNOWN_FIELD_ERROR,
+                 foreach_max: Any = _AUTO,
+                 features: Any = _AUTO,
+                 min_interval: Any = _AUTO) -> None:
         if unknown_fields not in (UNKNOWN_FIELD_ERROR, UNKNOWN_FIELD_WARNING):
             raise ValueError(f"unknown_fields 只能是 {UNKNOWN_FIELD_ERROR!r} 或 "
                              f"{UNKNOWN_FIELD_WARNING!r}，实际是 {unknown_fields!r}")
         self.tool_names = list(tool_names) if tool_names else None
         self.unknown_fields = unknown_fields
+        #: 版本限额与特性（v1.8.0，R-110）。缺省按**当前生效的版本**取 ——
+        #: CLI、服务端、测试都走同一套口径，不存在"命令行能过、界面上不能跑"。
+        #: 显式传 None 表示不限 / 不做版本拦截（单元测试与离线工具用）。
+        self._foreach_max = foreach_max
+        self._features = features
+        #: 定时触发最小间隔（v1.9.0）；缺省按当前版本限额取
+        self._min_interval = min_interval
+
+    def limits(self) -> dict[str, Any]:
+        """本加载器实际使用的限额与特性（供报错文案与接口回显）。"""
+        foreach_max = self._foreach_max
+        features = self._features
+        min_interval = self._min_interval
+        label = ""
+        edition_name = ""
+        if _AUTO in (foreach_max, features, min_interval):
+            try:
+                from automind.core import edition, quota
+
+                if foreach_max is _AUTO:
+                    foreach_max = quota.workflow_limit("workflow_foreach_max")
+                if features is _AUTO:
+                    features = {k for k, on in edition.feature_flags().items() if on}
+                if min_interval is _AUTO:
+                    min_interval = quota.workflow_limit("workflow_min_interval")
+                label = edition.edition_label()
+                edition_name = edition.get_edition()
+            except Exception:                    # pragma: no cover - 版本模块不可用时不拦
+                foreach_max = None if foreach_max is _AUTO else foreach_max
+                features = None if features is _AUTO else features
+                min_interval = None if min_interval is _AUTO else min_interval
+        return {"foreach_max": foreach_max,
+                "features": set(features) if features is not None else None,
+                "edition_label": label, "edition": edition_name,
+                "min_interval": min_interval}
 
     # ── 文件入口 ──────────────────────────────────────
 
@@ -284,7 +325,8 @@ class WorkflowLoader:
 
         schema, errors, warnings = collect_issues(
             document, positions=positions, source=source, source_digest=digest,
-            tool_names=self.tool_names, unknown_fields=self.unknown_fields)
+            tool_names=self.tool_names, unknown_fields=self.unknown_fields,
+            **self.limits())
 
         for issue in errors + warnings:
             issue.file = source

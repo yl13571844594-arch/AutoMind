@@ -21,7 +21,12 @@
 配置（``ExecutionConfig``）：
   ``tool_output_max_chars`` / ``tool_output_head_chars`` /
   ``tool_output_tail_chars`` / ``tool_output_max_tokens``。
-  把 ``tool_output_max_chars`` 设为 0 即恢复旧行为（原样下发）。
+
+  ⚠️ v1.7.5 更正：把 ``tool_output_max_chars`` 设为 0 **并不等于"原样下发"**。
+  ``tool_output_max_tokens`` 那道夹取仍然生效（6000 token ≈ 21000 字符），
+  即最坏情况下输出仍会被截到 21000 字符。要真正恢复旧行为，两个都要设 0。
+  原先这句"设为 0 即原样下发"的描述与代码不符 —— 而按它去调参的人会以为
+  自己关掉了截断，实际只关掉了一半。
 """
 
 from __future__ import annotations
@@ -82,6 +87,44 @@ def clip_text(text: str, max_chars: int, head: int, tail: int) -> tuple[str, dic
     }
 
 
+#: 二进制载荷（截图 / 文件内容的 base64）：模型读不懂，进上下文只是几千 token 的噪声
+_BINARY_KEYS = ("screenshot_base64", "base64", "image_base64", "data_base64", "content_base64")
+_B64_MIN_CHARS = 2000
+
+
+def _looks_base64(v: str) -> bool:
+    if v.startswith("data:") and ";base64," in v[:80]:
+        return True
+    head = v[:400]
+    if len(v) < _B64_MIN_CHARS or not all(c.isalnum() or c in "+/=_-" for c in head):
+        return False
+    # 真正的 base64 字符分布很杂：大小写、数字混排。"aaaa…"、长哈希这类
+    # 单调串不算 —— 那是正常输出，被换成一句说明就丢信息了
+    return (len(set(head)) > 20 and any(c.isupper() for c in head)
+            and any(c.islower() for c in head) and any(c.isdigit() for c in head))
+
+
+def scrub_binary(content: Any, _depth: int = 0) -> Any:
+    """把输出里的 base64 大字段换成一句说明（v1.11.1）。
+
+    此前浏览器截图的 base64 原样 ``json.dumps`` 进上下文，再被夹成头 7000 + 尾 3000
+    字符的乱码 —— 每截一次图白烧三四千 token，还挤掉了真正有用的上下文。
+    """
+    if _depth > 4:
+        return content
+    if isinstance(content, dict):
+        out: dict[Any, Any] = {}
+        for k, v in content.items():
+            if isinstance(v, str) and (k in _BINARY_KEYS or len(v) >= _B64_MIN_CHARS)                     and _looks_base64(v):
+                out[k] = f"<二进制数据 {len(v)} 字符，已省略；图片已展示给用户>"
+            else:
+                out[k] = scrub_binary(v, _depth + 1)
+        return out
+    if isinstance(content, list):
+        return [scrub_binary(v, _depth + 1) for v in content]
+    return content
+
+
 def limited_tool_content(content: Any, limits: dict[str, int] | None = None,
                          tool: str = "") -> tuple[str, dict[str, Any]]:
     """把任意工具输出转成"可安全进上下文"的字符串，并返回截断账目。
@@ -89,6 +132,8 @@ def limited_tool_content(content: Any, limits: dict[str, int] | None = None,
     账目字段：``truncated`` / ``original_chars`` / ``kept_chars`` /
     ``dropped_chars`` / ``tool`` / ``est_tokens_saved``。
     """
+    if isinstance(content, (dict, list)):
+        content = scrub_binary(content)
     if isinstance(content, dict):
         import json
         try:

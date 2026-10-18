@@ -5,7 +5,16 @@ function connectWS() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   try { ws = new WebSocket(`${proto}://${location.host}/ws`); }
   catch(_) { return scheduleReconnect(); }
-  ws.onopen = () => { _wsRetry = 0; updateStatus('connected'); };
+  // 连上/重连上后把会话级面板数据对一次账：待办（按会话存服务端）与子智能体列表。
+  // 两个渲染函数定义在 chat.js，做存在性判断（两静态资源可能版本错配，参见下方说明）。
+  ws.onopen = () => {
+    _wsRetry = 0;
+    updateStatus('connected');
+    try {
+      if (typeof refreshTodo === 'function') refreshTodo();
+      if (typeof renderSubagents === 'function') renderSubagents();
+    } catch (_) { /* 面板数据拉不到不影响连接本身 */ }
+  };
   ws.onclose = () => { updateStatus('disconnected'); scheduleReconnect(); };
   ws.onerror = () => { try { ws.close(); } catch(_){} };
   ws.onmessage = e => { try { handleWS(JSON.parse(e.data)); } catch(_){} };
@@ -35,12 +44,29 @@ function settleInterjectionsSafe(reason, sid) {
     try { toast('有插入补充未能确认是否纳入本轮：' + (err && err.message ? err.message : err), 'error'); } catch (_) {}
   }
 }
+// v1.11.11 任务终态的面板对账：待办可能已被最后一步改写（再拉一次 HTTP 兜底），
+// 还在等待回答的提问弹窗随任务结束一起收起（服务端那边问题已取消，再答只会收到 stale）。
+// 两个函数都在 chat.js，存在性判断的理由同 settleInterjectionsSafe。
+function settleSessionPanels() {
+  try {
+    if (typeof closeUserQuestion === 'function') closeUserQuestion();
+    if (typeof refreshTodo === 'function') refreshTodo();
+  } catch (_) { /* 面板对账失败不影响终态处理 */ }
+}
 function handleWS(data) {
   const taskMode = _taskMode || data.interaction || currentMode;
   switch (data.type) {
     case 'task_start':
       removeTyping();
       _taskMode = taskMode;  // 确保 taskMode 被记录
+      // v1.11.10：新一轮任务从零累计；resetLiveUsage 在 chat.js，存在性判断同下方说明
+      if (typeof resetLiveUsage === 'function') resetLiveUsage();
+      // v1.11.11：上一轮的面板状态不该带进新任务（提问弹窗、子智能体列表）
+      try {
+        if (typeof closeUserQuestion === 'function') closeUserQuestion();
+        if (typeof resetSubagents === 'function') resetSubagents();
+        if (typeof refreshTodo === 'function') refreshTodo();
+      } catch (_) { /* 面板清理失败不影响任务启动 */ }
       if (data.interaction === 'chat') startStreamBubble();
       else if (data.interaction === 'multi') startMultiPanel();
       else if (data.interaction === 'loop') startLoopPanel();
@@ -56,6 +82,53 @@ function handleWS(data) {
     case 'loop_done': break;
     case 'approval_request': showApprovalDialog(data); break;
     case 'team_activity': onTeamActivity(data); break;
+    // ── v1.11.10 实时缓存命中率 / 上下文占用 ──
+    // 每次 LLM 调用结束推一条。applyUsageUpdate 定义在 chat.js，而两个 js 是各自
+    // 独立的静态资源，浏览器可能只刷新到其中一个（新 ws.js + 旧 chat.js）——
+    // 直接调用会抛错，把这条事件后续处理一并带走，故降级为跳过。
+    case 'usage_update':
+      if (typeof applyUsageUpdate === 'function') applyUsageUpdate(data);
+      break;
+    // ── v1.11.11 待办 / 提问 / 交付 / 压缩 / 子智能体 ──
+    // 全部是新增旁路信息：渲染函数在 chat.js（同上面 usage_update 的版本错配说明），
+    // 缺失时跳过即可，绝不能让一条统计事件打断后面的事件处理链。
+    case 'todo_updated':
+      if (typeof renderTodo === 'function') renderTodo(data);
+      break;
+    case 'user_question':
+      if (typeof showUserQuestion === 'function') showUserQuestion(data);
+      break;
+    case 'user_question_resolved':
+      // 可能是本窗口提交的，也可能是同会话其它标签页答的 —— 都关掉弹窗
+      if (typeof closeUserQuestion === 'function') closeUserQuestion();
+      break;
+    case 'user_question_stale':
+      if (typeof closeUserQuestion === 'function') closeUserQuestion();
+      toast(String(data.message || '该问题已结束或不存在，本次回答不再生效'), 'error');
+      break;
+    case 'presented_files':
+      if (typeof renderPresented === 'function') renderPresented(data);
+      break;
+    case 'compact_result':
+      // 经典界面没有 /compact 入口，但结果事件仍要处理：可能是别的窗口发起的
+      if (data.ok) {
+        const bits = [`折叠 ${data.folded || 0} 条消息`];
+        if (data.chars_reclaimed) bits.push(`回收 ${Number(data.chars_reclaimed).toLocaleString()} 字`);
+        if (data.est_tokens_saved) bits.push(`≈ 省 ${Number(data.est_tokens_saved).toLocaleString()} tk`);
+        toast(`🧹 已压缩上下文：${bits.join('，')}`, 'success');
+      } else {
+        toast(`压缩未完成：${String(data.error || '未知原因')}`, 'error');
+      }
+      break;
+    case 'subagent_started':
+      if (typeof onSubagentStarted === 'function') onSubagentStarted(data);
+      break;
+    case 'subagent_update':
+      if (typeof onSubagentUpdate === 'function') onSubagentUpdate(data);
+      break;
+    case 'subagent_done':
+      if (typeof onSubagentDone === 'function') onSubagentDone(data);
+      break;
     // ── 中途插入补充要求的回执 ──
     // 五种回执都必须落到界面上：用户最怕的是"我那句到底算不算数"没有答案，
     // 所以「已纳入/未纳入/被拒」全部显式回填气泡标记 + toast（见 chat.js）。
@@ -89,6 +162,7 @@ function handleWS(data) {
       updateStats(data);
       // 终态兜底：必须排在 setRunning 之前 —— 它还要靠 _taskMode 收窄范围
       settleInterjectionsSafe('本轮任务在你补充之前就结束了', data.session_id);
+      settleSessionPanels();
       setRunning(false);
       refreshTokens();
       break;
@@ -100,6 +174,7 @@ function handleWS(data) {
       refreshAuditMini(); refreshHtmlFiles(); refreshChanges();
       window._lastTask = null;   // 任务正常完成，清除续跑候选
       settleInterjectionsSafe('本轮任务在你补充之前就结束了', data.session_id);
+      settleSessionPanels();
       setRunning(false);
       break;
     case 'task_error':
@@ -108,6 +183,7 @@ function handleWS(data) {
       offerResume(taskMode, '出错');
       refreshChanges();
       settleInterjectionsSafe('本轮任务出错结束，这条没有交给模型', data.session_id);
+      settleSessionPanels();
       setRunning(false);
       break;
     case 'task_cancelled':
@@ -118,6 +194,7 @@ function handleWS(data) {
       // 用户点「停止」时服务端的 interjection_dropped 可能来不及发出，
       // 这条兜底就是把那批气泡如实降级为"未纳入本轮"
       settleInterjectionsSafe('任务已中断，这条没有交给模型', data.session_id);
+      settleSessionPanels();
       setRunning(false);
       break;
   }
@@ -463,4 +540,19 @@ function respondApproval(id, approved, withEdits) {
   closeModal();
   toast(approved ? (withEdits ? '已按修改后的参数批准' : '已批准') : '已拒绝',
         approved ? 'success' : 'info');
+}
+
+// 回答模型提问（v1.11.11 WS action=user_answer）。返回是否送达；
+// 送达失败时调用方（chat.js 的 submitUserAnswer）保留弹窗并提示，不能假装答完了。
+function sendUserAnswer(questionId, answers) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+  try {
+    ws.send(JSON.stringify({
+      action: 'user_answer',
+      session_id: chatSid(),
+      question_id: questionId,
+      answers: answers,
+    }));
+    return true;
+  } catch (_) { return false; }
 }

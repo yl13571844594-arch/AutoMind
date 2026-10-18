@@ -3,8 +3,9 @@
 // 引用溯源 / 定时重嵌入 / 外部向量后端；企业版：+ 混合检索 / 热度统计 /
 // 检索审计日志 / 目录批量导入 / 总量不限。
 import {
-  App, Button, Card, Input, Modal, Progress, Select, Space, Switch, Table, Tabs, Tag, Typography, Upload,
+  App, Button, Card, Input, Modal, Progress, Space, Switch, Table, Tabs, Tag, Typography, Upload,
 } from 'antd';
+import Select from '../ui/SafeSelect';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { writeAction } from '../../lib/writeAction';

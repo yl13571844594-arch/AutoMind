@@ -16,6 +16,7 @@ import { apiGet } from '../../api/client';
 import { SID } from '../../api/client';
 import { useApp } from '../../store/app';
 import { type DagNode, useObserve } from '../../store/observe';
+import { ViewHead } from '../ui/Panel';
 
 const { Text, Paragraph } = Typography;
 
@@ -429,12 +430,12 @@ export default function ObserveView() {
 
   return (
     <Space direction="vertical" style={{ width: '100%' }} size="middle">
-      <Space align="center" style={{ justifyContent: 'space-between', width: '100%' }}>
-        <h3 style={{ margin: 0 }}>📈 观测中心</h3>
-        <Tooltip title={hasPro ? '专业版：含历史与看板' : '社区版：仅当前任务的只读实时 DAG'}>
-          <Tag color={hasPro ? 'blue' : undefined}>{hasPro ? '专业版' : '社区版 · 简化'}</Tag>
-        </Tooltip>
-      </Space>
+      <ViewHead icon="📈" title="观测中心" sub="实时查看任务的执行流程、步骤耗时与 Token 消耗。"
+        extra={(
+          <Tooltip title={hasPro ? '专业版：含历史与看板' : '社区版：仅当前任务的只读实时 DAG'}>
+            <Tag color={hasPro ? 'blue' : undefined}>{hasPro ? '专业版' : '社区版 · 简化'}</Tag>
+          </Tooltip>
+        )} />
       <Segmented value={tab} onChange={(v) => setTab(String(v))}
         options={[
           { label: '实时流程', value: 'live' },

@@ -170,8 +170,9 @@ def _clip(text: str, limit: int = 120) -> str:
 
 
 def validate_template(text: str, *, inputs: set[str], step_ids: set[str],
-                      order: dict[str, int] | None = None,
-                      current_index: int | None = None) -> list[TemplateProblem]:
+                      order: dict[str, float] | None = None,
+                      current_index: float | None = None,
+                      allow_loop: bool = False) -> list[TemplateProblem]:
     """静态检查一个模板串；返回全部问题（空列表 = 没问题）。
 
     能查的都在这儿查掉：变量名拼错、引用不存在的步骤、`env` 名字写错、
@@ -181,6 +182,9 @@ def validate_template(text: str, *, inputs: set[str], step_ids: set[str],
     传入 `order`（步骤 id → 声明下标）与 `current_index` 时，还会区分出
     "引用了排在自己**后面**的步骤"（`forward_reference`）—— 它结构合法，
     只是当前执行路径上多半还没跑，因此由调用方降级成 warning 而不是拒绝加载。
+
+    `allow_loop=True` 表示这段模板位于 foreach 的子步骤里，此时多一个根变量
+    `loop`（`{{ loop.item }}` 当前项、`{{ loop.index }}` 从 0 开始的序号）。
     """
     problems: list[TemplateProblem] = []
     try:
@@ -252,18 +256,55 @@ def validate_template(text: str, *, inputs: set[str], step_ids: set[str],
                              "（如 {{ env.ITSM_TOKEN }}）。环境变量是工作流能读到的"
                              "宿主信息，故刻意收紧格式"),
                     path=token.render_path(), kind="bad_env"))
+        elif root == "secrets":
+            # v1.10.0（企业版凭据保管，R-305）：{{ secrets.NAME }}。只做语法检查；
+            # "只能用在 tool 步骤的 args 里"与"需要企业版"由 schema 按位置判定
+            if len(token.path) != 2 or not ENV_NAME.match(token.path[1]):
+                problems.append(TemplateProblem(
+                    message=("凭据引用写法应为 {{ secrets.NAME }}：NAME 只允许大写字母、数字与"
+                             "下划线，且不能再往下取值（凭据是一整个字符串）"),
+                    path=token.render_path(), kind="bad_secret"))
+        elif root == "loop":
+            if not allow_loop:
+                problems.append(TemplateProblem(
+                    message=("loop 只能在 foreach 的子步骤里使用（{{ loop.item }} 是当前项、"
+                             "{{ loop.index }} 是从 0 开始的序号）"),
+                    path=token.render_path(), kind="syntax"))
+            elif len(token.path) < 2 or token.path[1] not in ("item", "index"):
+                problems.append(TemplateProblem(
+                    message="loop 只暴露 item（当前项）与 index（序号），写法如 {{ loop.item }}",
+                    path=token.render_path(), kind="syntax",
+                    suggestions=suggest(token.path[1] if len(token.path) > 1 else "",
+                                        ["item", "index"])))
+            elif token.path[1] == "index" and len(token.path) > 2:
+                problems.append(TemplateProblem(
+                    message="loop.index 是整数，不能再往下取值",
+                    path=token.render_path(), kind="syntax"))
         else:
             # 根写错最常见的形态是"把变量名当根用"：`{{ ticket_id }}` 而不是
             # `{{ inputs.ticket_id }}`。光报"未知根变量"没用，得指出它**本该**
             # 挂在哪个根下面 —— 命中了就直说，没命中才给通用候选。
             anchored = _guess_root(root, inputs=inputs, step_ids=step_ids)
             hint = f"，它看起来是 {'、'.join(anchored)} 下的变量" if anchored else ""
+            roots = ["inputs", "steps", "env"] + (["loop"] if allow_loop else [])
             problems.append(TemplateProblem(
-                message=(f"未知的模板根变量 '{root}'{hint}。可用的根变量只有三个："
-                         "inputs（入参）、steps（步骤结果）、env（环境变量）"),
+                message=(f"未知的模板根变量 '{root}'{hint}。可用的根变量只有："
+                         "inputs（入参）、steps（步骤结果）、env（环境变量）、"
+                         "secrets（凭据，企业版）"
+                         + ("、loop（foreach 当前项）" if allow_loop else "")),
                 path=token.render_path(), kind="syntax",
-                suggestions=anchored or ["inputs", "steps", "env"]))
+                suggestions=anchored or roots))
     return problems
+
+
+def secret_refs(text: str) -> list[str]:
+    """一段模板里引用的凭据名（``{{ secrets.NAME }}``，v1.10.0）。"""
+    try:
+        tokens = find_placeholders(text)
+    except TemplateError:
+        return []
+    return [t.path[1] for t in tokens
+            if t.is_valid and len(t.path) == 2 and t.path[0] == "secrets"]
 
 
 def _guess_root(root: str, *, inputs: set[str], step_ids: set[str]) -> list[str]:
@@ -488,5 +529,6 @@ __all__ = [
     "find_placeholders",
     "render",
     "render_structure",
+    "secret_refs",
     "validate_template",
 ]

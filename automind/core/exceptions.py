@@ -39,6 +39,15 @@ class LLMProviderNotFoundError(LLMError):
     """未知的 LLM 提供商。"""
 
 
+class LLMConnectionError(LLMError):
+    """网络/中转层不可达，或服务端暂时不可用（5xx）—— 典型瞬时错误。
+
+    v1.7.6 新增。此前 SDK 抛出的 ``APIConnectionError``（``str()`` 恰好是
+    ``"Connection error."``）不命中任何重试关键字，被原样上抛，长任务跑到
+    一半遇到一次中转抖动就整轮失败。单独成类，上层才能据此"等一等再接着做"。
+    """
+
+
 # ── 工具异常 ──────────────────────────────────────────────
 
 
@@ -113,6 +122,27 @@ class ContextError(AutoMindError):
 
 class InputParseError(ContextError):
     """输入解析失败。"""
+
+
+# ── 资源异常 ──────────────────────────────────────────────
+
+
+class ResourceError(AutoMindError):
+    """资源管理异常基类（Token 预算 / 速率 / 超时）。"""
+
+
+class BudgetExhaustedError(ResourceError):
+    """Token 预算耗尽。
+
+    **这是可恢复的**：调用方应当就地收尾并把已完成的工作交出去，
+    而不是让它一路上浮成 HTTP 500。此前预算耗尽抛的是裸 ``RuntimeError``，
+    ReAct 循环没有任何地方接得住 —— 长任务因此在跑到一半时丢掉全部成果
+    （实测：默认 81,920 预算下，每步 2.7k token 的任务在第 22~31 步被掐死）。
+
+    之所以专门做一个类型而不是继续用 ``RuntimeError("Token budget exhausted")``：
+    判据靠子串匹配时，任何措辞改动都会让捕获静默失效，而失效的表现恰恰是
+    "任务又被掐死了" —— 这类错误最难在测试里发现。
+    """
 
 
 # ── 状态异常 ──────────────────────────────────────────────

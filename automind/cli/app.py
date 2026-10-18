@@ -45,6 +45,7 @@ Examples:
   automind --config project.yaml "Refactor the database module"
   automind --list-tools
   automind --list-skills
+  automind doctor [--fix]      # 依赖自检（--fix 一键补齐缺失的 Python 库）
   automind --restore ckpt_session_1234
         """,
     )
@@ -216,6 +217,13 @@ def main() -> None:
         from automind.workflow.__main__ import main as _workflow_main
 
         sys.exit(_workflow_main(sys.argv[2:]))
+
+    # v1.11.9：`automind doctor` / `automind doctor --fix`。
+    # 与 workflow 同理单列：doctor 不需要任务参数、也不进 REPL。
+    if sys.argv[1:2] == ["doctor"]:
+        from automind.core.dep_preflight import main as _preflight_main
+
+        sys.exit(_preflight_main(sys.argv[2:]))
 
     parser = create_parser()
     args = parser.parse_args()

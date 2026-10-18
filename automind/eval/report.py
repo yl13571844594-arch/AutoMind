@@ -189,6 +189,18 @@ class EvalReport:
                      f"completion {self.total_completion_tokens}）　"
                      f"估算成本 ${self.estimated_cost_usd:.4f}")
         lines.append(f"（成本为估算值，价格表口径 {AS_OF}，仅供成本控制参考）")
+        # v1.7.5：模型不在价格表时必须说出来。否则那个美元数字看起来是
+        # 实测值，实际是按 fallback（Opus 档）估的，可能差好几倍。
+        try:
+            from automind.eval.pricing import is_known_model
+
+            if self.model and not is_known_model(self.model):
+                lines.append(
+                    f"⚠️ 模型「{self.model}」不在价格表里，上面的成本按保守 fallback "
+                    f"（$3/$15 每百万 token）估算，**可能与真实账单相差数倍**。"
+                    f"请在 automind/eval/pricing.py 的 _PRICES 中补上它的价率。")
+        except Exception:                              # pragma: no cover - 纯展示
+            pass
         if self.aborted:
             lines.append(f"!! 评测中止：{self.abort_reason}")
         for note in self.notes:

@@ -30,53 +30,114 @@
   <style>
     /* 首屏占位 + 白屏兜底（React 挂载成功后其内容被替换）。
        任何原因（脚本加载失败 / 运行时异常 / 内核过旧）导致 React 未挂载时，
-       用户看到可读的提示与操作，而非纯空白页。 */
+       用户看到可读的提示与操作，而非纯空白页。
+       v1.11.4：这里的样式**不经过构建降级**，必须只用旧内核也认识的写法 ——
+       不用 inset（Chrome < 87 整条忽略，启动页会失去定位）、不用 flex gap
+       （Chrome < 84）、不用 :where / :is / 逻辑属性。 */
     html, body { height: 100%; margin: 0; }
     body {
       background: var(--boot-bg, #060913); color: var(--boot-fg, #e8ecf7);
-      font-family: 'Segoe UI', 'Microsoft YaHei', system-ui, sans-serif;
+      font-family: 'Inter', 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
-    /* 浅色主题下启动画面的辅助文字与代码块也要跟着换，否则白底白字 */
+    #boot {
+      position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 1;
+      display: -webkit-box; display: -webkit-flex; display: flex;
+      -webkit-flex-direction: column; flex-direction: column;
+      -webkit-align-items: center; align-items: center;
+      -webkit-justify-content: center; justify-content: center;
+      padding: 0 32px; text-align: center; overflow: hidden;
+    }
+    /* 背景光晕：两团缓慢漂移的渐变，不抢眼，但比纯色底更有质感 */
+    #boot:before, #boot:after {
+      content: ''; position: absolute; width: 520px; height: 520px; border-radius: 50%;
+      -webkit-filter: blur(70px); filter: blur(70px); opacity: .55; z-index: -1;
+      -webkit-animation: bdrift 9s ease-in-out infinite alternate; animation: bdrift 9s ease-in-out infinite alternate;
+    }
+    #boot:before { top: 50%; left: 50%; margin: -360px 0 0 -420px; background: rgba(123, 159, 255, .28); }
+    #boot:after { top: 50%; left: 50%; margin: -160px 0 0 -100px; background: rgba(181, 148, 255, .22);
+      -webkit-animation-delay: -4s; animation-delay: -4s; }
+    @-webkit-keyframes bdrift { to { -webkit-transform: translate(40px, -30px) scale(1.08); } }
+    @keyframes bdrift { to { transform: translate(40px, -30px) scale(1.08); } }
+    #boot .logo {
+      position: relative; width: 64px; height: 64px; margin-bottom: 22px; border-radius: 20px;
+      background: linear-gradient(135deg, #7b9fff, #b594ff);
+      box-shadow: 0 14px 40px -8px rgba(123, 159, 255, .65), inset 0 1px 0 rgba(255, 255, 255, .35);
+      -webkit-animation: bfloat 2.4s ease-in-out infinite; animation: bfloat 2.4s ease-in-out infinite;
+    }
+    #boot .logo:before {           /* 中心的"神经元"高光点 */
+      content: ''; position: absolute; top: 50%; left: 50%; width: 22px; height: 22px; margin: -11px 0 0 -11px;
+      border-radius: 50%; background: rgba(255, 255, 255, .92);
+      box-shadow: 0 0 0 7px rgba(255, 255, 255, .18), 0 0 24px rgba(255, 255, 255, .7);
+    }
+    @-webkit-keyframes bfloat { 50% { -webkit-transform: translateY(-6px); } }
+    @keyframes bfloat { 50% { transform: translateY(-6px); } }
+    #boot h1 { margin: 0 0 8px; font-size: 1.3em; font-weight: 700; letter-spacing: -.02em; }
+    #boot h1 b {
+      background: linear-gradient(135deg, #9fb6ff, #c9b0ff); -webkit-background-clip: text; background-clip: text;
+      color: transparent;
+    }
+    #boot p { margin: 0 0 6px; color: #8e9abb; font-size: .86em; line-height: 1.8; max-width: 560px; }
+    #boot .bar {
+      position: relative; width: 180px; height: 3px; margin: 18px auto 0; overflow: hidden;
+      border-radius: 3px; background: rgba(142, 154, 187, .18);
+    }
+    #boot .bar:after {
+      content: ''; position: absolute; top: 0; left: -40%; width: 40%; height: 100%; border-radius: 3px;
+      background: linear-gradient(90deg, transparent, #7b9fff, #b594ff, transparent);
+      -webkit-animation: bslide 1.3s ease-in-out infinite; animation: bslide 1.3s ease-in-out infinite;
+    }
+    @-webkit-keyframes bslide { to { left: 100%; } }
+    @keyframes bslide { to { left: 100%; } }
+    #boot .tip { margin-top: 14px; font-size: .76em; color: #5e6b8c; }
+    /* 出错时的卡片 */
+    #boot .card {
+      max-width: 560px; padding: 26px 28px 22px; border-radius: 18px; text-align: center;
+      background: rgba(20, 26, 44, .82); border: 1px solid #262f47;
+      box-shadow: 0 24px 60px -20px rgba(0, 0, 0, .6);
+    }
+    #boot .card .ico { font-size: 34px; margin-bottom: 8px; }
+    #boot .err { color: #ff8a8a; }
+    #boot code {
+      display: inline-block; max-width: 100%; overflow-wrap: break-word; word-wrap: break-word; word-break: break-all;
+      background: #1f2740; border-radius: 6px; padding: 3px 9px; font-size: .8em; color: #c8d2ee;
+      font-family: 'Cascadia Code', Consolas, monospace;
+    }
+    #boot .acts { margin-top: 14px; }
+    #boot button {
+      margin: 5px; padding: 9px 20px; border: 0; border-radius: 10px; cursor: pointer;
+      color: #fff; font-size: .88em; font-family: inherit; background: linear-gradient(135deg, #7b9fff, #b594ff);
+      box-shadow: 0 6px 18px -6px rgba(123, 159, 255, .7);
+    }
+    #boot button.ghost { background: #1f2740; color: #c8d2ee; box-shadow: none; }
+    /* 浅色主题 */
     .pre-light #boot p { color: #5a6485; }
+    .pre-light #boot .tip { color: #8a94ab; }
+    .pre-light #boot .card { background: rgba(255, 255, 255, .9); border-color: #d5dcea;
+      box-shadow: 0 24px 60px -24px rgba(30, 45, 90, .3); }
     .pre-light #boot code { background: #e6e9f5; color: #1b2136; }
     .pre-light #boot button.ghost { background: #e6e9f5; color: #333c5c; }
-    #boot {
-      position: fixed; inset: 0; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; gap: 16px; padding: 0 40px;
-      text-align: center;
+    .pre-light #boot h1 b { background: linear-gradient(135deg, #4a6fe8, #8b5fe0); -webkit-background-clip: text; background-clip: text; }
+    .pre-light #boot:before { background: rgba(74, 111, 232, .16); }
+    .pre-light #boot:after { background: rgba(139, 95, 224, .12); }
+    @media (prefers-reduced-motion: reduce) {
+      #boot .logo, #boot .bar:after, #boot:before, #boot:after { -webkit-animation: none; animation: none; }
     }
-    #boot .dot {
-      width: 48px; height: 48px; border-radius: 50%;
-      background: linear-gradient(135deg, #7b9fff, #b594ff);
-      box-shadow: 0 0 40px rgba(123,159,255,.5); animation: bp 1.6s ease infinite;
-    }
-    @keyframes bp { 50% { transform: scale(.85); box-shadow: 0 0 18px rgba(123,159,255,.35); } }
-    #boot h1 { font-size: 1.15em; font-weight: 600; margin: 0; }
-    #boot p { color: #8e9abb; font-size: .86em; margin: 0; line-height: 1.8; }
-    #boot .err { color: #ff6b6b; }
-    #boot code {
-      display: inline-block; max-width: 90vw; overflow-wrap: break-word;
-      background: #1f2740; border-radius: 6px; padding: 2px 8px; font-size: .82em;
-    }
-    #boot .acts { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin-top: 4px; }
-    #boot button {
-      padding: 8px 20px; border: 0; border-radius: 8px; cursor: pointer;
-      color: #fff; font-size: .9em; background: linear-gradient(135deg, #7b9fff, #b594ff);
-    }
-    #boot button.ghost { background: #1f2740; color: #c8d2ee; }
   </style>
 </head>
 <body>
   <div id="root">
     <!-- React 未接管前的占位；挂载成功即被清除 -->
     <div id="boot">
-      <div class="dot"></div>
-      <h1>AutoMind 正在加载…</h1>
-      <p>正在初始化工作台界面</p>
+      <div class="logo"></div>
+      <h1><b>AutoMind</b> 正在启动</h1>
+      <p>正在加载工作台界面…</p>
+      <div class="bar"></div>
+      <div class="tip">本地运行 · 数据不上传</div>
     </div>
   </div>
   <noscript>
-    <div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    <div style="position:fixed;top:0;right:0;bottom:0;left:0;display:flex;align-items:center;justify-content:center;
                 padding:0 40px;text-align:center;color:#ff6b6b;font-size:1em">
       本应用需要启用 JavaScript 才能运行，请在浏览器设置中开启后重试。
     </div>
@@ -172,7 +233,9 @@
           'url: ' + location.href,
         ].join('\n');
         boot.innerHTML =
-          '<h1 class="err">⚠ 界面未能加载</h1>' +
+          '<div class="card">' +
+          '<div class="ico">⚠️</div>' +
+          '<h1 class="err">界面未能加载</h1>' +
           '<p>' + esc(reason) + '</p>' +
           (detail ? '<p><code>' + esc(String(detail).slice(0, 300)) + '</code></p>' : '') +
           '<p>可先点「打开兼容版界面」继续使用，功能与主界面一致。</p>' +
@@ -180,7 +243,7 @@
           '<button id="bt-reload">刷新重试</button>' +
           '<button class="ghost" id="bt-legacy">打开兼容版界面</button>' +
           '<button class="ghost" id="bt-copy">复制诊断信息</button>' +
-          '</div>';
+          '</div></div>';
         document.getElementById('bt-reload').onclick = function () {
           clearReloadMark();
           location.replace('/?_cb=' + Date.now());
@@ -203,10 +266,73 @@
 
       // 资源加载失败：区分「产物 404（陈旧缓存）」与「解析/运行时错误」。
       // 前者可自愈，后者只能提示 —— 分开处理才能给出对的话术和对的动作。
+      // ── v1.11.4 自愈：资源能下载（HTTP 200）却被浏览器拒绝执行 / 应用 ──
+      // 典型原因是**服务端下发的 Content-Type 不对**（Windows 注册表把 .js 改成了
+      // text/plain、或中间代理改写了类型），叠加 nosniff 后浏览器拒绝执行模块脚本。
+      // 这与浏览器新旧无关。产物是单个自包含的模块（无 import.meta / 动态 import），
+      // 可以重新拉取正文、按正确类型从 Blob URL 加载；CSS 则直接注入 <style>。
+      var healed = {};
+      function healResource(url, isCss, onFail) {
+        if (healed[url]) { onFail('自愈后仍失败'); return; }
+        healed[url] = true;
+        fetch(url, { cache: 'reload' }).then(function (r) { return r.text(); }).then(function (text) {
+          if (isCss) {
+            var st = document.createElement('style');
+            st.setAttribute('data-healed', url);
+            st.textContent = text;
+            document.head.appendChild(st);
+            return;
+          }
+          var blobUrl = URL.createObjectURL(new Blob([text], { type: 'text/javascript' }));
+          var s = document.createElement('script');
+          s.type = 'module';
+          s.src = blobUrl;
+          s.setAttribute('data-healed', url);
+          s.onerror = function () { onFail('Blob 方式加载同样失败'); };
+          document.body.appendChild(s);
+        }, function () { onFail('重新下载失败'); });
+      }
+
+      // 样式表被以错误类型下发时，Chrome 直接不应用、**也不触发 error 事件**（实测），
+      // 上面的事件路径接不住 —— 页面加载完后主动检查：构建产物的样式表没生效就自愈。
+      function sheetBroken(link) {
+        try {
+          if (!link.sheet) return true;
+          return !link.sheet.cssRules || link.sheet.cssRules.length === 0;
+        } catch (e) {
+          // 读 cssRules 抛 SecurityError：真跨域的样式表本来就读不了；但**同源**的也抛，
+          // 说明它被浏览器拒绝了（带 crossorigin 属性且类型不对时实测如此）
+          return link.href.indexOf(location.origin + '/') === 0;
+        }
+      }
+      function appCssMissing() {
+        // 与具体内核行为无关的判据：主样式表在 :root 上定义了 --bg0，没有它就是没生效
+        try {
+          return !getComputedStyle(document.documentElement).getPropertyValue('--bg0').trim();
+        } catch (e) {
+          return false;
+        }
+      }
+      function checkStylesheets() {
+        var missing = appCssMissing();
+        var links = document.querySelectorAll('link[rel="stylesheet"]');
+        for (var i = 0; i < links.length; i++) {
+          var href = links[i].href || '';
+          if (href.indexOf('/static/dist/') < 0 || healed[href]) continue;
+          if (missing || sheetBroken(links[i])) healResource(href, true, function () { /* 样式缺失不阻塞使用 */ });
+        }
+      }
+      window.addEventListener('load', function () { setTimeout(checkStylesheets, 50); });
+
+      // 资源加载失败：区分「产物 404（陈旧缓存）」「类型不对（可自愈）」与「真不兼容」。
+      // 各自对症处理才能给出对的话术和对的动作。
       function onResourceError(url) {
-        if (shown || rootMounted()) return;
+        if (shown || rootMounted() || !url) return;
+        var isCss = /\.css(\?|$)/.test(url);
+        if (/^blob:/.test(url)) return;          // 自愈脚本自己的失败由 onFail 汇报
         var fallback = function (e) {
-          showError('页面脚本未能正常运行，通常是浏览器/内核版本过旧。', url + (e ? ' (' + e + ')' : ''));
+          showError('页面脚本已下载，但浏览器没能执行它。可能是浏览器内核过旧，' +
+                    '或被安全软件 / 浏览器插件拦截。', url + (e ? ' (' + e + ')' : ''));
         };
         try {
           fetch(url, { cache: 'reload' }).then(function (res) {
@@ -215,6 +341,23 @@
               if (hardReloadOnce('stale-html')) return;
               showError('检测到浏览器缓存了旧版页面，自动刷新后仍未恢复。' +
                         '请清除浏览器缓存，或点「打开兼容版界面」。', url + ' → 404');
+              return;
+            }
+            var ctype = (res.headers.get('content-type') || '').toLowerCase();
+            var typeOk = isCss ? ctype.indexOf('text/css') === 0
+              : /javascript|ecmascript/.test(ctype);
+            if (res.ok) {
+              // 不论类型对不对都试一次自愈：类型不对时这正是解药；类型对时
+              // 也可能是被插件 / 安全软件按 URL 拦截，Blob 方式常能绕开
+              healResource(url, isCss, function (why) {
+                if (!typeOk) {
+                  showError('服务器返回的文件类型不正确（' + (ctype || '未声明') + '），浏览器拒绝执行。' +
+                            '请升级 AutoMind 到 1.11.4 及以上（已在服务端修正），或检查代理 / 安全软件设置。',
+                            url + ' → ' + (ctype || '无 Content-Type') + '；' + why);
+                } else {
+                  fallback('HTTP ' + res.status + '，' + ctype + '；' + why);
+                }
+              });
               return;
             }
             fallback('HTTP ' + res.status);

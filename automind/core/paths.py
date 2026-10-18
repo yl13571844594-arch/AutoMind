@@ -103,6 +103,25 @@ def session_workspaces_dir() -> Path:
     return data_dir() / "workspaces"
 
 
+def workflow_runs_dir() -> Path:
+    """工作流运行记录（v1.8.0）：每次运行一个 JSON，按步落盘，供续跑与"最近运行"。"""
+    return data_dir() / "workflow_runs"
+
+
+def workflow_triggers_file() -> Path:
+    """工作流触发器状态（v1.9.0，专业版）：启停、webhook 令牌摘要、最近一次触发。
+
+    触发器的**声明**在工作流文件里（进版本库、可评审）；这里只存运行时状态 ——
+    尤其是 webhook 令牌，它绝不能写进会进版本库的工作流文件。
+    """
+    return data_dir() / "workflow_triggers.json"
+
+
+def goals_file() -> Path:
+    """长期目标清单（v1.11.0「目标交付模式」）：目标、交付物、验收标准与推进记录。"""
+    return data_dir() / "goals.json"
+
+
 def describe() -> dict:
     """诊断信息（/api/health 与桌面「打开数据目录」用）。"""
     return {

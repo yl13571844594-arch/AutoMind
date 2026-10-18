@@ -140,6 +140,25 @@ class RetryHandler:
         self._failure_count = 0
         self._half_open_count = 0
 
+    async def sleep_before_retry(self, attempt: int) -> float:
+        """第 ``attempt`` 次失败后等待多久再重试（返回实际等待秒数）。
+
+        v1.7.5 新增：**这是让本模块真正被用上的那个入口**。
+        在此之前 ``RetryHandler`` 全项目只有测试引用 —— 它那套"指数退避 +
+        抖动 + 熔断"的文档承诺，在实际任务路径上一次都没生效过；真实重试是
+        ``plan_executor`` 里连打三次、中间零延迟，而配置项
+        ``execution.retry_delay_seconds`` **没有任何读取方**。
+
+        这里不把 ``execute()`` 硬塞进重试循环，是因为那个循环的重试条件是
+        "工具返回了 success=False"（不是抛异常），而 ``execute()`` 只对异常
+        重试 —— 生搬会把语义拧成两套。退避的数学与抖动复用同一份实现即可。
+        """
+        delay = self._compute_delay(attempt)
+        if delay > 0:
+            await asyncio.sleep(delay)
+        self.stats.total_retries += 1
+        return delay
+
     @property
     def circuit_state(self) -> CircuitState:
         return self._circuit_state

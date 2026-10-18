@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AutoMind 使用手册 — v1.7.4</title>
+<title>AutoMind 使用手册 — v1.11.13</title>
 <style>
 :root{
   --bg0:#060913; --bg1:rgba(14,18,32,.72); --bg2:rgba(22,28,46,.65); --bg3:rgba(31,39,64,.8);
@@ -184,7 +184,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
 <!-- ═══════ 目录 ═══════ -->
 <nav id="toc">
   <div class="logo">⬢ AutoMind</div>
-  <div class="ver">使用手册 · v1.7.4</div>
+  <div class="ver">使用手册 · v1.11.13</div>
   <input id="toc-search" type="search" placeholder="🔍 搜索目录…" autocomplete="off"
     style="width:100%;margin:0 0 10px;padding:7px 10px;border:1px solid var(--border);
     border-radius:8px;background:rgba(255,255,255,.04);color:var(--text,#e8ecf6);
@@ -222,7 +222,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
   <h1>AutoMind 使用手册</h1>
   <div class="sub">会自己动手干活的 AI 智能体平台 — 零基础入门 · 功能深度解读 · 场景指南</div>
   <div class="chips">
-    <span class="chip">版本 <b>v1.7.4</b></span>
+    <span class="chip">版本 <b>v1.11.13</b></span>
     <span class="chip" style="border-color:#c9a22766;color:#c9a227">🏷 社区版 / 专业版 / 企业版</span>
     <span class="chip">🖥 本地运行 · 数据不上传</span>
     <span class="chip">🛡 全程审批与审计</span>
@@ -393,7 +393,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <text x="572" y="43" text-anchor="middle" fill="#3ce68a" font-size="10">deepseek/chat ●</text>
     <!-- 顶栏按钮 -->
     <g fill="#a7b0c8" font-size="10.5">
-      <text x="644" y="43">📚模板 ❓引导 🔄新会话</text>
+      <text x="644" y="43">📚模板 ❓引导 🧹清空</text>
     </g>
     <!-- 聊天区 -->
     <rect x="170" y="66" width="460" height="290" rx="12" fill="#0a0f20"/>
@@ -462,7 +462,7 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <tr><th>快捷键</th><th>功能</th></tr>
     <tr><td><span class="kbd">Enter</span> / <span class="kbd">Shift+Enter</span></td><td>发送 / 换行</td></tr>
     <tr><td><span class="kbd">Esc</span> 或 <span class="kbd">Ctrl + .</span></td><td>停止当前任务；有弹窗时先关弹窗</td></tr>
-    <tr><td><span class="kbd">Ctrl + N</span> 或 <span class="kbd">Ctrl + L</span></td><td>新会话（清空当前模式对话，会二次确认）</td></tr>
+    <tr><td><span class="kbd">Ctrl + N</span> 或 <span class="kbd">Ctrl + L</span></td><td>新建会话（旧会话保留在左侧列表，可随时切回）</td></tr>
     <tr><td><span class="kbd">Ctrl + K</span></td><td>打开模板库</td></tr>
     <tr><td><span class="kbd">Ctrl + ,</span></td><td>打开通用设置</td></tr>
     <tr><td><span class="kbd">Ctrl + Shift + W</span></td><td>切换工作区</td></tr>
@@ -769,8 +769,10 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
     <tr><td><code>file_read</code></td><td><span class="tag safe">安全</span></td><td>读取文件内容</td></tr>
     <tr><td><code>file_write</code></td><td><span class="tag sen">敏感</span></td><td>创建 / 覆盖文件</td></tr>
     <tr><td><code>file_edit</code></td><td><span class="tag sen">敏感</span></td><td>精确字符串替换编辑（带 diff 与回滚）</td></tr>
+    <tr><td><code>file_multi_edit</code></td><td><span class="tag sen">敏感</span></td><td>一次修改多个文件（批量编辑；v1.11.12 修复注册）</td></tr>
     <tr><td><code>python_sandbox</code></td><td><span class="tag sen">敏感</span></td><td>沙箱执行 Python 片段（计算 / 数据处理）</td></tr>
     <tr><td><code>web_fetch</code></td><td><span class="tag safe">安全</span></td><td>抓网页提取正文与链接</td></tr>
+    <tr><td><code>web_search</code></td><td><span class="tag safe">安全</span></td><td>联网搜索：开箱即用（已配置 DeepSeek Key 时自动走官方搜索 API，无 Key 时免密钥检索兜底；也可配 Tavily/Serper/Brave/SearXNG）</td></tr>
     <tr><td><code>browser</code></td><td><span class="tag sen">敏感</span></td><td>Playwright 浏览器自动化</td></tr>
     <tr><td><code>screenshot_tool</code> / <code>ocr_tool</code></td><td><span class="tag sen">敏感</span></td><td>截屏 / 图片文字识别</td></tr>
     <tr><td><code>ppt_tool</code></td><td><span class="tag sen">敏感</span></td><td>PowerPoint 生成 / 读取 / 追加</td></tr>
@@ -893,6 +895,18 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
       <p>四个命中率圆环（工具/计划/任务/自我修正 + 综合平均）、上下文使用率发光条、
       最近 50 次趋势折线、Token 效率、记忆系统指标。<br><br>
       <b>用途：</b>评估模型效果、监控 Token 花销、发现异常任务。</p></div>
+    <div class="tile"><div class="ic">⚡</div><b>缓存命中率 · 上下文使用率 <span style="color:#3ce68a;font-size:.78em">v1.11.10 · 社区版起</span></b>
+      <p>右栏「📊 面板」实时显示：缓存命中率 = 命中缓存的输入 token ÷ 本次输入 token；
+      上下文使用率 = 最近一次请求输入 ÷ 短期记忆上限（默认 128000）。≥70% 变黄、≥90% 变红。<br><br>
+      <b>口径：</b>模型不提供缓存统计时显示「—」，0% 才表示确实没命中；DeepSeek / GLM / OpenAI /
+      Kimi / 通义 / 豆包 / Anthropic / Gemini 均会上报。</p></div>
+    <div class="tile"><div class="ic">📋</div><b>待办 · 提问 · 交付 · 子智能体 <span style="color:#3ce68a;font-size:.78em">v1.11.11 · 社区版起 / 子智能体专业版</span></b>
+      <p><b>📋 待办</b>：模型用 <code>todo_write</code> 维护用户可见的短清单，右栏实时显示、可一键清空。
+      <b>❓ 提问</b>：<code>ask_user_question</code> 带选项/自定义输入地问用户并等待回答，超时不等于同意。
+      <b>📎 交付</b>：<code>present</code> 声明最终交付物，对话区生成可点开的交付卡片。
+      <b>🪟 pwsh</b>（Windows）：原生 PowerShell 语义执行。<br><br>
+      <b>🤖 子智能体（专业版）</b>：<code>subagent / subagent_list / subagent_send / subagent_stop</code>，
+      并发 4、嵌套 1 层、默认只读工具；右栏实时显示进度。</p></div>
     <div class="tile"><div class="ic">🌐</div><b>HTML 预览</b>
       <p>Agent 生成的 HTML（报告/图表/页面）出现在右栏列表，点击即在弹窗内直接渲染，免去手动找文件。</p></div>
     <div class="tile"><div class="ic">📎🎤</div><b>多模态输入</b>
@@ -915,8 +929,29 @@ footer{margin-top:80px;padding-top:26px;border-top:1px solid var(--border);
       <b>社区版</b>可看当前任务的实时 DAG（只读、仅当前任务）；
       <b>专业版</b>加实时看板（成功率 / P50·P95 耗时 / 工具热度 / 失败归因）、200 次运行历史回看与 JSON 导出；
       <b>企业版</b>历史扩到 2000 次并按会话维度分组。全程本机内存构建，不额外消耗 Token。</p></div>
+    <div class="tile"><div class="ic">🔀</div><b>工作流 <span style="color:#3ce68a;font-size:.78em">v1.8 · 社区版起</span></b>
+      <p>侧栏「🔀 工作流」：一份写死每一步的 YAML（放在项目 <code>workflows/</code> 下），可评审、可复现。
+      在线编辑并实时校验（错误定位到行）→ 按 <code>inputs</code> 生成表单 → 🧪 试运行（不调工具不调模型）→ ▶ 运行，
+      <code>human</code> 步骤弹窗审批，失败后 ↻ <b>从断点续跑</b>（已成功步骤不重复执行）。
+      步骤类型：tool / llm / human / branch（v1.9 起支持 &gt; &lt; in exists）/ 🤖 agent（工具白名单 + 步数 + token 三道边界）/ 🔁 foreach。
+      输入框「＋ → ▶ 运行工作流」可在对话里直接发起。社区版 20 个工作流、foreach ≤ 20 项。</p></div>
+    <div class="tile"><div class="ic">⏰</div><b>工作流无人值守 <span style="color:#7aa2ff;font-size:.78em">v1.9 · 专业版</span></b>
+      <p>工作流顶层 <code>triggers</code> 声明定时（cron）或入站 webhook，「⏰ 触发器」页启停、看下次运行、生成令牌；
+      没全绿按 <code>retry</code> <b>从断点自动续跑</b>，按 <code>notify</code> 发出站事件 / 群机器人通知，
+      服务重启按 <code>on_restart</code> 续跑或只通知。<code>parallel</code> 并行组同时跑互不依赖的步骤，
+      foreach 可逐项并发（≤ 1000 项）；「📊 看板」按工作流统计成功率、耗时、Token，运行记录保留 90 天。
+      活跃触发器 30 个、定时最小间隔 5 分钟（企业版不限 / 1 分钟）。</p></div>
+    <div class="tile"><div class="ic">🛡</div><b>工作流治理 <span style="color:#c39bff;font-size:.78em">v1.10 · 企业版</span></b>
+      <p><b>发布审批</b>：提交 → 审批人批准，触发器只运行已发布版本（改一个字就要重新审批，不能自己批自己）；
+      <b>按工作流权限</b>（查看 / 编辑 / 运行 / 触发器 / 批准）；<code>human</code> 步骤 <code>approvers</code> 逐级按角色审批；
+      每次运行一键导出<b>审计</b>（JSON / PDF）；<code>{{ secrets.NAME }}</code> 凭据不进报告与日志；按团队<b>并发配额</b>，超出排队。
+      专业版另有<b>模板库</b>与<b>从执行轨迹生成工作流</b>。</p></div>
+    <div class="tile"><div class="ic">🎯</div><b>长任务 · 目标 · 计划 <span style="color:#c39bff;font-size:.78em">v1.11</span></b>
+      <p><b>预算窗口自动续开</b>：50 万 token 用满先压缩上下文再接着跑，不再中断；<b>目标交付模式</b>：长期目标挂在输入框上，
+      每轮带着交付物与进度推进、结束记入时间线；<b>计划模式</b>：先出计划，批准 / 修改 / 放弃后才执行；
+      「＋」菜单可像专家一样<b>引用 MCP 连接器与技能</b>（工具必下发、指令注入、<code>skill_invoke</code>）。</p></div>
     <div class="tile"><div class="ic">📏</div><b>版本限额 <span style="color:#7b9fff;font-size:.78em">v1.0</span></b>
-      <p>社区版每日任务 100 次、工作区 3 个；专业版任务不限、工作区 30 个；企业版全部不限。
+      <p>社区版每日任务 100 次、工作区 3 个、工作流 20 个；专业版任务不限、工作区 30 个、工作流 200 个、活跃触发器 30 个、运行记录 90 天；企业版全部不限。
       顶栏 📅 徽标实时显示当日用量，超限给出友好升级提示（跨天自动清零）。</p></div>
     <div class="tile"><div class="ic">⧉</div><b>输出便捷操作</b>
       <p>每条 AI 消息悬浮「⧉ 复制」；每个代码块带语言标签和独立复制按钮。</p></div>
@@ -942,7 +977,7 @@ automind --list-skills    automind --list-providers</code></pre>
   <p>不带参数运行 <code>automind</code> 进入：</p>
   <div class="card" style="font-family:var(--mono);font-size:.84em;background:#0a0e1c">
     <span style="color:#7b9fff">┌──────────────── REPL ────────────────┐</span><br>
-    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.7.4</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
+    <span style="color:#7b9fff">│</span> <b style="color:#7b9fff">AutoMind</b> <span style="color:#6b7591">v1.11.13</span>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 模式: <span style="color:#f5c542">plan_and_execute</span> · 模型: <span style="color:#3ce68a">deepseek/…</span> <span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">│</span> 输入任务开始，<b>/help</b> 查看命令&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;<span style="color:#7b9fff">│</span><br>
     <span style="color:#7b9fff">└──────────────────────────────────────┘</span><br>
@@ -1061,9 +1096,402 @@ automind --list-skills    automind --list-providers</code></pre>
   <p class="lead">每次升级带来了什么，按版本倒序。完整记录见仓库 <code>CHANGELOG.md</code>。</p>
 
 <div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.13</span><span class="cl-date">2026-10-18</span>
+    <span class="cl-badge">当前版本</span>
+  </div>
+  <div class="cl-sum">系统性提升工具调用成功率；修复隔离工作区里写文件被插件误判失败、产物写错目录（Web / IM 机器人工作区混淆）；办公套件依赖确认齐备</div>
+  <ul>
+      <li><b>🛠 参数与格式容错</b>：参数同义名（file_path→path、cmd→command、limit→max_results…）
+        自动改名；Python 单引号列表、代码围栏、字符串布尔/数字自动解析。</li>
+      <li><b>📖 file_read / file_write / file_edit</b>：GBK 文本自动回退；文件不存在给出相近文件名；
+        传目录提示改用 file_search；dict/list 内容自动序列化；旧/新文本非字符串自动转文本。</li>
+      <li><b>💻 terminal / pwsh</b>：链式命令里的 Unix 写法自动替换为 cmd 等价写法，或改用
+        Git Bash / PowerShell 重跑；失败点前有写操作时不重跑，避免副作用；中文输出正确解码。</li>
+      <li><b>🧩 工作区不混淆</b>：所有工具相对路径统一锚到当前会话隔离副本/项目根；
+        写后自检与交付清单按真实产物路径回读；file_search 只看本会话副本并隐藏 .automind。</li>
+      <li><b>🤖 IM 机器人</b>：会话固定 <code>bot-…</code> 命名空间，与浏览器会话/工作副本隔离；
+        Web 与飞书/钉钉/企业微信各写各的工作区。</li>
+      <li><b>🧰 办公依赖</b>：openpyxl / python-docx / python-pptx / pypdf / Pillow / matplotlib /
+        win32com 等逐项验证可用，Excel/Word/PPT/PDF/CSV/图片/图表/OCR/音视频实跑通过。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.12</span><span class="cl-date">2026-10-17</span>
+  </div>
+  <div class="cl-sum">修复 web_search 不可用：配过 DeepSeek Key 即自动联网搜索，无 Key 免密钥检索兜底；依赖自检补齐浏览器/MCP/ffprobe</div>
+  <ul>
+      <li><b>🔍 web_search 三层降级</b>：显式配置（Tavily/Serper/Brave/SearXNG）→ DeepSeek 官方搜索 API
+        （复用「设置 → API Keys」里的 DeepSeek Key，不消耗模型轮次）→ 免密钥 Bing 检索兜底；
+        三层全失败才报错，并逐条说明原因与修复办法。</li>
+      <li><b>🧰 全量工具实跑审计</b>：文件/终端/网络/浏览器/截屏/进程/剪贴板/git/数据库/CSV/压缩/
+        图表/OCR/音视频/Office/PDF/插件/技能均验证可用；顺带修复 <code>file_multi_edit</code>
+        从未注册的问题；邮件/IM/专业版 PDF 水印等需要账号或授权的能力保持明确提示。</li>
+      <li><b>🩺 依赖自检补强</b>：新增「浏览器 / MCP 扩展」分组（playwright / mcp），
+        外部程序补查 <code>ffprobe</code>；缺依赖时 <code>automind doctor</code> 不再显示"全部通过"。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.11</span><span class="cl-date">2026-10-17</span>
+  </div>
+  <div class="cl-sum">新增待办清单 / 向用户提问 / 交付声明 / 原生 PowerShell；上下文溢出可压缩重试；专业版新增子智能体委派（均为增量补充）</div>
+  <ul>
+      <li><b>📋 待办清单</b>：<code>todo_write</code> 让模型维护一份用户可见的短清单，右栏实时显示、可一键清空；
+        与「计划树」分工互补（计划按步推进，待办可随时改）。</li>
+      <li><b>❓ 向用户提问</b>：<code>ask_user_question</code> 带选项/自定义输入提问并等待回答（倒计时，超时不等于同意）；
+        子智能体不能向用户提问。</li>
+      <li><b>📎 交付声明</b>：<code>present</code> 显式声明最终交付物，对话区渲染成可点开的交付卡片（只记路径、不复制内容）。</li>
+      <li><b>🪟 原生 PowerShell</b>：<code>pwsh</code>（仅 Windows）按 PowerShell 语义执行，不再靠 terminal 换壳兜底。</li>
+      <li><b>🧹 上下文压缩补强</b>：接近窗口 80% 自动压一次（带防抖）、上下文溢出后压缩重试一次；
+        Web/CLI 新增 <code>/compact</code> 手动压缩。</li>
+      <li><b>🤖 子智能体（专业版）</b>：<code>subagent / subagent_list / subagent_send / subagent_stop</code>，
+        并发 4、嵌套 1 层、默认只读工具、右栏实时进度；fork/可续跑留待后续版本。</li>
+      <li><b>🔌 接口</b>：新增 <code>GET/DELETE /api/todo</code> 与 WS 动作 <code>user_answer</code> / <code>compact</code>，
+        其余为新增事件，旧客户端无感。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.10</span><span class="cl-date">2026-10-17</span>
+  </div>
+  <div class="cl-sum">右栏新增实时缓存命中率 / 上下文使用率；修正三处会让 DeepSeek / GLM 提示前缀缓存整段失效的写法</div>
+  <ul>
+      <li><b>⚡ 右栏实时指标</b>：「📊 面板」新增缓存命中率（命中 token ÷ 输入 token）与上下文使用率
+        （最近一次请求输入 ÷ 短期记忆上限），每次模型调用结束即更新；模型不提供缓存统计时显示「—」，
+        0% 只表示确实没命中。摘要标签头部同步显示，经典兜底界面也补齐。</li>
+      <li><b>🧠 缓存采集</b>：覆盖 DeepSeek / GLM(智谱) / OpenAI / Kimi / 通义 / 豆包 / Anthropic / Gemini；
+        流式回答也带缓存用量，对话模式不再只有本地估算。</li>
+      <li><b>🚀 命中率提升</b>：对话历史改为分批（格点）裁剪，不再每轮从头丢一条；ReAct 工具目录只追加不改写；
+        易变记忆移出稳定前缀；ReAct 运行中不再多做一次用不上的付费摘要。</li>
+      <li><b>📈 接口</b>：<code>/api/tokens</code> 增加缓存与上下文字段（不新增路由），任务历史补记缓存用量；
+        <code>/metrics</code> 新增缓存命中率指标。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.9</span><span class="cl-date">2026-10-17</span>
+  </div>
+  <div class="cl-sum">交付链四件套内置安装；新增依赖自检 automind doctor；修复两个会让工具被重复执行的风暴</div>
+  <ul>
+      <li><b>📦 交付链内置</b>：交付清单（记录实际写入的文件与指纹）、产物自检（写完立刻回读磁盘，坏文件当场判失败）、
+        文件占用重试（Excel/WPS 占用时自动退避重试）、任务通知（本地日志 + 可选 Webhook 推送）四个插件随包分发、默认开启，
+        老版本升级后自动生效，插件页可停用。</li>
+      <li><b>🩺 依赖自检</b>：命令行运行 <code>automind doctor</code> 一次看清核心 / Web / 办公 / 外部程序 / 插件五类依赖状态，
+        <code>--fix</code> 一键补齐缺失的 Python 库；launch.bat 新增自检选项，服务器启动时也会提示缺口。</li>
+      <li><b>🛠 执行更稳</b>：修复文件被占用时双重重试（最坏执行 12 次）与中间件异常导致的工具重放；
+        插件中间件顺序改由清单 priority 显式声明，不再取决于插件名的字母序。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.8</span><span class="cl-date">2026-10-16</span>
+  </div>
+  <div class="cl-sum">修复部分电脑上会话「⋯」、设置里的下拉框点了没反应；全面增强界面兼容性</div>
+  <ul>
+      <li><b>🧭 点了没反应</b>：根因是部分电脑上页面动画帧停摆，菜单 / 下拉框停在透明状态。现在启动时自动检测，
+        检测到就关闭界面动画，菜单与下拉框直接显示。</li>
+      <li><b>🛟 兜底</b>：会话「⋯」、全部下拉框、删除确认在仍看不见时自动换成系统原生下拉 / 确认框；
+        也可以在「通用设置 → 界面偏好」勾选「兼容控件模式」手动开启。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.7</span><span class="cl-date">2026-10-16</span>
+  </div>
+  <div class="cl-sum">机器人改用长连接（无需公网地址）；一个文件完成专业版 / 企业版升级；长任务与工具调用更稳</div>
+  <ul>
+      <li><b>📡 机器人长连接</b>：飞书、钉钉（Stream 模式）、企业微信智能机器人改为本机主动连接平台，
+        本地电脑 / 云电脑没有公网 IP 也能收发消息，不需要内网穿透；断线自动重连，设置页实时显示连接状态。</li>
+      <li><b>⚡ 一键升级</b>：把发行方发来的 <code>.ampkg</code> 升级包拖进「升级专业版 / 企业版」面板，自动装包并激活；
+        续期、升级到企业版同样拖一个新包即可。</li>
+      <li><b>🧠 长任务</b>：步数用完但仍在推进时自动续加；本机断网时等网络恢复后继续，不再让做了一半的任务作废。</li>
+      <li><b>🛠 工具调用</b>：Windows 上 <code>ls</code> / <code>cat</code> / <code>mkdir -p</code> 等命令自动改用 Git Bash 或 PowerShell；
+        中文报错不再乱码；file_edit 容忍缩进 / 行尾空白差异；文件被占用时自动重试。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.6</span><span class="cl-date">2026-10-15</span>
+  </div>
+  <div class="cl-sum">新增 IM 机器人；网络中断自动等待重试；隔离副本产物按相对路径覆盖回项目根</div>
+  <ul>
+      <li><b>🤖 机器人</b>：「设置 → 机器人」添加飞书 / 钉钉 / 企业微信 / 微信公众号 / 通用 Webhook 机器人。在聊天里发消息即可下达任务，
+        执行过程（计划、工具调用、失败）与结果回传到同一个聊天窗口；危险操作在聊天里回复「同意 / 拒绝」审批；
+        支持 <code>/stop</code> <code>/status</code> <code>/new</code> <code>/mode</code> <code>/apply</code> 指令与授权名单；设置页可「测试对话」。</li>
+      <li><b>📶 网络韧性</b>：安装依赖、克隆代码等遇到网络中断时，先等网络恢复再自动重试（pip / npm 自动改用国内镜像），
+        不再出现「已连续失败 3 次，停止重试」后整轮任务都用不了 terminal；新增 net_check、wait_for_network 工具。</li>
+      <li><b>⤵ 应用到项目</b>：隔离副本产物按相对路径覆盖回项目根（同目录同文件覆盖，缺失目录自动创建），覆盖前自动备份、可撤销；
+        应用前先预览新建 / 覆盖清单；构建产物（dist / build）也能应用回去。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.5</span><span class="cl-date">2026-10-14</span>
+  </div>
+  <div class="cl-sum">右栏新增「🧭 摘要」；项目目录可直接浏览整块磁盘与桌面；新增可运行的「在线客服」工作流样板</div>
+  <ul>
+      <li><b>🧭 对话摘要</b>：右栏新增「摘要」标签（默认打开），一屏看清当前目标、工作进度、任务规划、对话产物
+        （改过的文件点击即在代码标签打开、HTML 直接预览）、用到的技能 / 专家 / 工具，并可一键生成「目标 / 已完成 / 结论 / 下一步」要点摘要。</li>
+      <li><b>📁 目录浏览增强</b>：「通用设置 → 项目目录 → 浏览」新增桌面 / 文档 / 下载 / 主目录 / 当前项目快捷位置与全部盘符，
+        地址栏可直接输入路径、面包屑跳转、过滤、显示文件、新建文件夹；本机使用时可浏览整块磁盘（系统目录仍禁止）。
+        「工作区 → 新增工作区」同样可以浏览选择。</li>
+      <li><b>💬 在线客服工作流</b>：「🔀 工作流 → ＋ 新建」里一键安装「在线客服」样板：投诉转人工（坐席确认）、退款 / 物流 / 发票固定话术秒回、
+        其余由 Agent 只读知识库作答。branch 条件新增 <code>contains_any</code>（包含列表中任一关键词）。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.4</span><span class="cl-date">2026-10-08</span>
+  </div>
+  <div class="cl-sum">修复「界面未能加载：页面脚本未能正常运行」；旧内核里点「＋」「设置」保证出现菜单；初始欢迎页与左侧子页面视觉升级</div>
+  <ul>
+      <li><b>🛠 界面打不开</b>：部分电脑提示"页面脚本未能正常运行，通常是浏览器/内核版本过旧"，真实原因是系统把 .js 的类型登记成了
+        text/plain，浏览器拒绝执行（兼容版界面也一样）。现已在服务端修正；启动页也能自动重新加载被拒的脚本与样式。</li>
+      <li><b>🧭 菜单保证可见</b>：旧内核浏览器里点「＋」「设置」时，自动检测菜单是否真的显示出来，看不见就换成兼容菜单。
+        排障：地址栏加 <code>?menu=simple</code> 强制兼容菜单，<code>?menu=antd</code> 恢复。</li>
+      <li><b>🎨 界面</b>：全新欢迎页（模式卡片、快速开始卡片、未配置模型时的引导）与启动加载页；左侧导航各子页面统一页头与卡片样式。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.3</span><span class="cl-date">2026-10-07</span>
+  </div>
+  <div class="cl-sum">修复部分浏览器里点「设置」「＋」没有任何反应；增强旧内核浏览器兼容性</div>
+  <ul>
+      <li><b>🧭 旧内核浏览器</b>（360 / QQ / 搜狗等的旧 Chromium 内核、较旧的 Edge / Safari / Firefox / WebView2）里，
+        「设置」与输入框「＋」菜单打开后落在屏幕外的问题已修复：启动时自动探测并切换兼容样式，现代浏览器不受影响。</li>
+      <li>会话行「⋯」按钮在旧内核里不可见的问题已修复；补齐旧内核缺少的几个浏览器 API。</li>
+      <li>排障：地址栏加 <code>?compat=legacy</code> 强制使用兼容样式，<code>?compat=modern</code> 恢复。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.2</span><span class="cl-date">2026-10-07</span>
+  </div>
+  <div class="cl-sum">输入框支持 / 指令与 @ 引用文件、目录、对话；＋ 菜单与对话区重新设计；MCP / 技能 / 插件工具调用成功率大幅提升</div>
+  <ul>
+      <li><b>⌘ / 指令</b>：在行首输入 <code>/</code>（或 <code>./</code>）弹出指令面板 —— 操作（/new /clear /plan /schedule /browser…）、
+        本条模式（/coding…）、提示词（/explain /fix /test /review…）、技能、MCP 连接器、插件与工具、专家，↑↓ 选择、Enter 确认。</li>
+      <li><b>＠ 引用</b>：输入 <code>@</code> 搜索项目里的文件 / 目录，或选择另一个对话；选中后内容随消息交给模型，消息上的 chip 写明是否生效。
+        正文里手打的 <code>@src/app.py</code> 也会被识别。</li>
+      <li><b>🎨 界面</b>：＋ 菜单改为分组的双行条目（图标、说明、快捷键）；表格、引用、标题等对话内容排版更清晰。</li>
+      <li><b>🔧 工具调用成功率</b>：修复 MCP SDK 2.x 下所有 MCP 服务器都连不上的问题；MCP 工具报错不再被当成成功；
+        增加超时与断线自动重连；导入的 MCP 配置保留 env；模型写 <code>github.create_issue</code> 这类简写也能找到工具；
+        技能名可直接当工具调用，技能输入自动整形。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.1</span><span class="cl-date">2026-10-07</span>
+  </div>
+  <div class="cl-sum">浏览器自动化更可靠并可在右栏实时预览；应用内一步升级专业版 / 企业版（免 pip、免重启）；输入框新增定时任务入口；界面美化与浏览器兼容</div>
+  <ul>
+      <li><b>🌐 浏览器实时预览</b>：Agent 每做一步网页操作（打开、点击、输入…），右栏「浏览器」标签实时显示画面、地址与最近操作胶片条，点击放大；有新画面时自动切过去。</li>
+      <li><b>🎯 浏览器任务成功率</b>：新增 <code>snapshot</code> 动作给页面元素编号，按编号点击 / 输入；写"登录"这样的可见文字也能定位；
+        浏览器崩溃 / 页面被关自动重开，网络抖动自动重试，被遮挡的按钮也能点中；多个会话各用各的浏览器上下文，互不串页；截图不再塞进模型上下文。</li>
+      <li><b>⭐ 应用内升级</b>：设置 →「升级专业版 / 企业版」（或点左上角版本徽标）：拖入扩展包 .whl、粘贴许可证，当场校验、当场生效，不用命令行、不用重启。</li>
+      <li><b>⏰ 定时任务入口</b>：输入框旁「⏰ 定时」把正在写的内容直接建成定时任务。</li>
+      <li><b>🧭 界面</b>：左侧「系统」分组默认收起（点击展开）；右栏可收起成细栏；窄窗口不再把右栏挤出屏幕；兼容更旧的 Edge / WebView2、Safari 与 Firefox。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.11.0</span><span class="cl-date">2026-10-05</span>
+  </div>
+  <div class="cl-sum">长任务不再到 50 万 token 就中断（预算窗口自动续开）；目标交付模式（长期目标）；计划模式（先出计划、批准后执行）；输入框可引用 MCP 连接器与技能</div>
+  <ul>
+      <li><b>🪙 长任务不再"到 50 万 token 就中断"</b>：单任务 Token 预算用满后先压缩上下文、再<b>自动续开新窗口</b>接着跑
+        （默认最多再续 10 个窗口，整轮时长同步顺延），续开次数用完才交部分成果；对话区实时显示预算预警 / 续开 / 用尽。
+        <code>task_token_budget = 0</code> 现在表示<b>不设限</b>（此前会缩成 81,920）。</li>
+      <li><b>🎯 目标交付模式</b>：新建长期目标（目标 + 期望交付物 + 验收标准），挂到输入框后每轮任务都带着目标与最近进度去推进，
+        结束时把这一轮记进目标；目标面板看推进时间线，模型声明达成时由你确认完成。</li>
+      <li><b>📋 计划模式</b>：输入框一键进入 / 退出。开启后每条消息先生成计划，弹窗里<b>批准 / 修改步骤后执行 / 放弃</b>，批准前一步都不执行。</li>
+      <li><b>🔌 / 🧩 引用 MCP 连接器与技能</b>：「＋」菜单像挂专家一样勾选；连接器的工具必定下发给模型，
+        Markdown 技能的指令注入上下文，可执行技能经新工具 <code>skill_invoke</code> 调用；消息上的 chip 写明是否生效。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.10.0</span><span class="cl-date">2026-10-04</span>
+  </div>
+  <div class="cl-sum">工作流治理与固化：发布审批、按工作流权限、多级按角色审批、运行审计导出、凭据保管、并发配额与排队（企业版）；模板库、从执行轨迹生成工作流（专业版）</div>
+  <ul>
+      <li><b>🛡 发布审批（企业版）</b>：工作流分"草稿 / 待审批 / 已发布"；提交后由审批人批准，批准的就是那一版的摘要。
+        <b>触发器只运行已发布版本</b> —— 文件改一个字就要重新审批；不能批准自己提交的版本。</li>
+      <li><b>👥 按工作流权限（企业版）</b>：<code>workflow:view|edit|run|trigger|approve:&lt;文件&gt;</code> 接入 RBAC；
+        内置角色 developer / approver / viewer；没有运行权限调用运行接口返回 403，列表里看不到无权查看的工作流。</li>
+      <li><b>🙋 多级 / 按角色审批（企业版）</b>：<code>human</code> 步骤加 <code>approvers: [role:finance, role:manager]</code>
+        与 <code>mode: all / any</code>；不是指定审批人的回答不算数，每一级"谁、何时、批没批"都进报告。</li>
+      <li><b>📄 运行审计导出（企业版）</b>：每次运行的输入、发起人、每步状态与输出摘要、审批人与时间，导出 JSON / PDF，与报告逐条对应。</li>
+      <li><b>🔑 凭据保管（企业版）</b>：<code>{{ secrets.NAME }}</code> 只能用在 tool 步骤参数里，值不进报告、日志、运行记录与审计；
+        可用环境变量注入或静态加密存储。</li>
+      <li><b>🚦 并发配额与排队（企业版）</b>：按团队限制同时运行数，超出自动排队并显示位次，可在排队时停止。</li>
+      <li><b>📦 模板库 / 🧭 从轨迹生成（专业版）</b>：「＋ 新建」从模板开始，自定义模板可导入导出；
+        一次成功的任务可整理成工作流草稿（转义 <code>{{</code>、隐去凭据参数），人审后保存。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.9.0</span><span class="cl-date">2026-10-04</span>
+  </div>
+  <div class="cl-sum">工作流无人值守（专业版）：定时 / webhook 触发器、parallel 并行组、运行历史与看板、失败自动续跑与通知</div>
+  <ul>
+      <li><b>⏰ 触发器（专业版）</b>：工作流顶层 <code>triggers</code> 声明定时（cron）或入站 webhook；
+        界面「🔀 工作流 → ⏰ 触发器」看下次运行时间、启停、立即触发、生成 webhook 令牌（只显示一次、服务端只存摘要）。
+        定时最小间隔专业版 5 分钟 / 企业版 1 分钟，活跃触发器专业版 30 个；写错 cron、间隔太短、定时漏了必填入参都在校验阶段报错。</li>
+      <li><b>↻ 失败自动续跑与通知</b>：触发运行没有全绿时按触发器的 <code>retry</code> <b>从断点</b>自动续跑；
+        按工作流的 <code>notify</code> 发出站事件 / 群机器人 / 桌面通知，内容含失败步骤与原因。
+        服务重启时被打断的触发运行按 <code>on_restart: resume / notify</code> 自动续跑或只通知。</li>
+      <li><b>⚡ parallel 并行组（专业版）</b>：一组互不依赖的步骤同时跑（默认最多 4 个）；组里已成功的子步骤续跑时不再执行。
+        <code>foreach</code> 也可以 <code>max_concurrency</code> 逐项并发，单次最多 1000 项。</li>
+      <li><b>📊 看板（专业版）</b>：按工作流统计成功率、平均 / P95 耗时、Token 与按天趋势；运行记录保留 90 天，并接入观测中心。</li>
+      <li><b>🔀 branch 条件扩展（全部版本）</b>：新增 <code>&gt;</code> <code>&lt;</code> <code>&gt;=</code> <code>&lt;=</code>
+        <code>in</code> <code>exists</code>，仍是白名单、不求值；数值比较遇到非数字<b>判失败</b>而不是静默走 else。
+        修正：<code>then</code> 排在 <code>else</code> 后面时两条路都不走，现在加载期就报错。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.8.0</span><span class="cl-date">2026-09-30</span>
+  </div>
+  <div class="cl-sum">工作流可用化：Web 上写好、跑起、看懂、续上一条工作流；新增 agent 与 foreach 步骤</div>
+  <ul>
+      <li><b>🔀 工作流视图</b>：侧栏「工作台 → 🔀 工作流」—— 列表（校验状态 / 最近运行）、
+        在线编辑与实时校验（错误定位到行，点一下跳过去）、按 <code>inputs</code> 自动生成入参表单、
+        试运行预览、运行进度、运行记录与报告下载。不写代码、不开命令行。</li>
+      <li><b>▶ 异步运行</b>：运行接口立即返回 <code>run_id</code>，进度经 WebSocket 逐步推送；
+        可随时「⏹ 停止」（当前步骤标"已取消"）；输入框「＋」菜单新增「▶ 运行工作流」，运行卡片出现在当前会话。</li>
+      <li><b>↻ 断点续跑</b>：每步结束即落盘；失败 / 中止 / 被停止的运行可从断点续跑 ——
+        已成功的步骤直接沿用结果、一次都不重复执行。文件改过（摘要不同）则拒绝续跑。</li>
+      <li><b>🤖 agent 步骤</b>：把一个子目标交给 Agent 自主完成，但工具被 <code>allowed_tools</code> 圈定、
+        步数被 <code>max_steps</code> 圈定、token 被 <code>token_budget</code> 圈定；越权调用被拒绝并写进报告。</li>
+      <li><b>🔁 foreach 步骤</b>：对列表逐项执行子步骤（<code>{{ loop.item }}</code> / <code>{{ loop.index }}</code>），
+        社区版单次 ≤ 20 项，超限在校验阶段就报错。</li>
+      <li><b>🙋 审批</b>：<code>human</code> 步骤复用审批弹窗，并标明"来自工作流 X 第 N 步"。
+        修正：此前经 REST 运行时 human 步骤因回调签名不符<b>永远被判拒绝</b>。</li>
+      <li><b>📜 记账与通知</b>：每次运行计 1 次任务额度并写入任务历史；失败 / 部分成功发出站事件
+        <code>workflow.failed</code> / <code>workflow.partial</code>。社区版最多 20 个工作流（超出的仍可查看、校验、试运行）。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.7.8</span><span class="cl-date">2026-09-29</span>
+  </div>
+  <div class="cl-sum">输入框改版为输入卡片：视觉更清晰，功能不变</div>
+  <ul>
+      <li><b>✍ 输入卡片</b>：文本区在上、工具栏在下，整张卡片共用一个聚焦光圈，
+        不再是"按钮 + 独立描边文本框"的横排。</li>
+      <li><b>🧭 当前模式一眼可见</b>：工具栏显示本次发送将使用的模式；在 ＋ 菜单里选了
+        "本条用…模式"时以虚线标签标出"· 本条"。</li>
+      <li><b>⌨ 快捷键提示</b>：工具栏右侧常驻 <kbd>Enter</kbd> 发送 · <kbd>Shift</kbd>+<kbd>Enter</kbd> 换行，
+        执行中切换为"Enter 插入补充"；窄屏自动隐藏。</li>
+      <li><b>✨ 状态更醒目</b>：执行中卡片带渐变描边（此刻输入的是补充而非新任务）；
+        语音聆听中显示红色脉冲标签；没有可发送内容时发送键调暗；发送 / 停止改为矢量图标。</li>
+      <li>断点续跑提示条的按钮不再被挤到第二行。以上均为纯视觉调整，发送、插入、停止、
+        附件、语音、草稿保存等行为与 1.7.7 完全一致。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.7.7</span><span class="cl-date">2026-09-29</span>
+  </div>
+  <div class="cl-sum">断点续跑接到 Web；隔离工作区产物可见可取回、磁盘有上限；输入框加号菜单</div>
+  <ul>
+      <li><b>↻ 真正的断点续跑（Web 端）</b>：「继续此任务」此前只是把原任务文本重发一遍，
+        连续续跑还会把提示前缀越套越长。现在直接从服务端检查点接着跑 —— 计划任务只执行剩余步骤，
+        编程 / 工作任务带着<b>已真实完成的动作与产物清单</b>继续，不再重做。
+        会话里有没跑完的任务时，输入框上方会提示「↻ 从断点续跑」。</li>
+      <li><b>📁 隔离工作区三处补丁</b>：任务结束后以卡片列出副本里新增 / 修改了哪些文件，
+        一键<b>应用到项目</b>（任务期间你也改过的文件会先询问，均可在「↩️ 文件改动」撤销）；
+        复制前检查项目体积（默认上限 500MB，超过不隔离并说明原因），超过 20MB 的单个大文件不复制；
+        闲置 72 小时的副本自动清理，删除会话时一并清理，「工作区管理」里可查看占用并手动清理。</li>
+      <li><b>＋ 输入框加号菜单</b>：📎 附件（图片 / 文本 / 代码文件）、🎤 语音、
+        <b>本条用某个模式发送</b>、<b>本条挂某个专家</b>，都在输入框旁一步完成；只作用于这一条，
+        不改默认设置。发送后消息上的 chip 会显示服务端回执：生效 ✓ / 未生效 ✕（附原因）。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.7.6</span><span class="cl-date">2026-09-28</span>
+  </div>
+  <div class="cl-sum">长任务不再被一次断线打断；会话归档与项目记忆；设置面板全面可用</div>
+  <ul>
+      <li><b>🔌 "Connection error." 不再让长任务整轮失败</b>：openai SDK 的连接错误
+        文本恰好是 <code>Connection error.</code>，此前不命中任何重试关键字，<b>一次都不重试</b>。
+        现在按异常类型/状态码分类：连接断开、中转 5xx、限流都会指数退避重试；
+        建连超时单独限 15 秒、空闲连接 15 秒过期（避开中转掐断的旧连接）；
+        仍连不上时<b>任务层再等待重连</b>（10s / 30s / 60s，界面实时提示），
+        实在不行就交出<b>部分交付清单</b>，已完成的步骤不丢。</li>
+      <li><b>🗂 工作区会话管理</b>：左侧栏新增会话列表 —— 新建 / 切换 / 重命名 / 置顶 /
+        删除；<b>归档</b>时自动整理要点写入本工作区的长期记忆；新会话第一轮自动带上
+        "项目记忆"，也可以从任一会话<b>「接着聊」</b>延续上下文。各工作区、各用户互相隔离。</li>
+      <li><b>⚙ 设置面板修复</b>：「执行治理」的数值项此前<b>全部显示为空</b>（接口没返回），
+        而且每按一个键就保存一次；现在显示真实值、失焦才保存并校验范围；修改会同步到
+        正在使用的会话。API Keys 面板<b>「保存」空输入会删掉已配置 Key</b> 的问题已修复。</li>
+      <li><b>🔧 工具调用成功率</b>：参数 JSON 被截断时不再"补齐后照样执行"（会把半截内容
+        写进文件），而是明确告诉模型拆小重试；<code>filePath</code> → <code>file_path</code>
+        这类可确定的参数名自动纠正；<code>"600"</code>/<code>"true"</code> 等类型自动转换；
+        缺必需参数时执行前就给出可一次改对的提示。</li>
+      <li><b>🎨 左侧导航重做</b>：工作区徽标、会话列表、可折叠分组，并支持收起为图标栏。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
+  <div class="cl-head">
+    <span class="cl-ver">v1.7.5</span><span class="cl-date">2026-09-19</span>
+  </div>
+  <div class="cl-sum">长任务不再被预算掐死；工具调用失败率显著下降</div>
+  <ul>
+      <li><b>⏱ 长任务不再被 Token 预算掐死</b>：预算此前由
+        <code>max_tokens × 10</code> 派生（仅 81,920），而且<b>跨任务累计、
+        永不重置</b> —— 实测一个"读取文件并复述"的普通任务就烧掉 43,459 token，
+        <b>一个会话大约只能跑两个任务</b>。现在预算按任务重置、与
+        <code>max_tokens</code> 解耦（新配置项 <code>task_token_budget</code>，
+        默认 500,000），并且<b>耗尽时优雅收尾</b>：交出部分交付清单，而不是
+        抛异常让整个任务在半途丢掉全部成果。</li>
+      <li><b>💾 检查点终于能"续跑"了</b>：此前只在<b>任务跑完后</b>写一次检查点，
+        而"从检查点恢复"会把计划丢掉、<b>从头重跑</b>。现在按步落盘（15 秒节流、
+        原子写），恢复时已完成的目标保持完成、只跑剩下的。</li>
+      <li><b>🛑 点"停止"真的会停</b>：以前取消任务时正在跑的命令不会被杀
+        （只有超时才杀），而且杀的是 <code>cmd.exe</code>，真正的命令作为孙进程
+        被留下继续跑。现在取消即杀<b>整棵进程树</b>。</li>
+      <li><b>🔧 工具调用成功率明显提升</b>：工具名写错（<code>read_file</code>）
+        会在权限门控之前被自动纠正；沙箱补上 <code>hashlib</code> /
+        <code>zlib</code> / <code>struct</code> 等纯计算模块，并在拒绝时
+        <b>告知能导入什么</b>；系统提示与工具说明写明"路径相对项目根"。</li>
+      <li><b>🧠 推理模型的空回复不再算"成功"</b>：<code>deepseek-flash</code>
+        这类模型的 reasoning 与正文共用 <code>max_tokens</code>，预算被推理吃光后
+        正文为空、任务却被判为完成。现在会计数、提示并如实收尾。</li>
+      <li><b>💰 三处计费口径修准</b>：失败任务也上报 token；价格表补上
+        <code>deepseek-flash</code>（此前落到 fallback，<b>高估 6.48 倍</b>）；
+        额度退还真生效了。</li>
+  </ul>
+</div>
+
+<div class="cl-item">
     <div class="cl-head">
       <span class="cl-ver">v1.7.4</span><span class="cl-date">2026-09-18</span>
-      <span class="cl-badge">当前版本</span>
     </div>
     <div class="cl-sum">三处"看起来在防、其实没接上"的地方</div>
     <ul>
@@ -1655,7 +2083,7 @@ automind --list-skills    automind --list-providers</code></pre>
 </section>
 
 <footer>
-  AutoMind 使用手册 · 与软件 v1.7.4 同步 ·
+  AutoMind 使用手册 · 与软件 v1.7.5 同步 ·
   遇到手册未覆盖的问题，可在 💬 对话模式里直接问 AutoMind 本身
 </footer>
 

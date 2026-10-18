@@ -1,6 +1,7 @@
+import { legacyLogicalPropertiesTransformer, StyleProvider } from '@ant-design/cssinjs';
 import { App as AntApp, ConfigProvider, theme as antdTheme } from 'antd';
 import zhCN from 'antd/locale/zh_CN';
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { installGlobalApiErrorToast } from './api/client';
 import ConnectionBanner from './components/ConnectionBanner';
 import Header from './components/Header';
@@ -25,8 +26,16 @@ import ScheduleView from './components/views/ScheduleView';
 import StatsView from './components/views/StatsView';
 import TeamView from './components/views/TeamView';
 import ToolsView from './components/views/ToolsView';
+import WorkflowView from './components/views/WorkflowView';
+import RunWorkflowModal from './components/workflow/RunWorkflowModal';
+import GoalsModal from './components/modals/GoalsModal';
+import LicenseModal from './components/modals/LicenseModal';
+import ScheduleQuickModal from './components/modals/ScheduleQuickModal';
 import ShortcutsModal from './components/modals/ShortcutsModal';
+import UserQuestionModal from './components/modals/UserQuestionModal';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
+import { COMPAT, LEGACY_CSS } from './lib/compat';
+import { detectRafStall } from './lib/popupGuard';
 import { installHotkeys } from './lib/hotkeys';
 import { useApp } from './store/app';
 import { ANTD_BASE_FONT, initPrefs, usePrefs } from './store/prefs';
@@ -36,13 +45,13 @@ import { connectWS, sendStop } from './ws';
 const VIEWS: Record<string, React.ComponentType> = {
   plan: PlanView, tools: ToolsView, experts: ExpertsView, team: TeamView,
   kb: KbView, stats: StatsView, schedule: ScheduleView, history: HistoryView,
-  audit: AuditView, router: RouterView, observe: ObserveView,
+  audit: AuditView, router: RouterView, observe: ObserveView, workflow: WorkflowView,
 };
 
 //: 视图中文名 —— 渲染异常时用它告诉用户"是哪个面板出了问题"
 const VIEW_NAMES: Record<string, string> = {
   plan: '计划视图', tools: '工具面板', experts: '专家市场', team: '团队协作',
-  kb: '知识库', stats: '统计分析', schedule: '定时任务', history: '任务历史',
+  kb: '知识库', stats: '统计分析', schedule: '定时任务', history: '任务历史', workflow: '工作流',
   audit: '安全审计', router: '路由与成本', observe: '观测中心',
 };
 
@@ -89,6 +98,26 @@ export default function App() {
   const theme = useApp((s) => s.theme);
   const view = useApp((s) => s.view);
   const fontScale = usePrefs((s) => s.fontScale);
+  const reduceMotion = usePrefs((s) => s.reduceMotion);
+  // v1.11.8：rAF 停摆的电脑上关闭 antd 动画（见 lib/popupGuard.detectRafStall）。
+  // 启动时测一次，之后每次窗口重新可见时再测（远程桌面 / 窗口遮挡恢复后可能又好了也可能又坏了，
+  // 只往"关动画"方向切，不自动切回：关动画只是少了淡入，不影响任何功能）
+  const [rafStalled, setRafStalled] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const probe = () => detectRafStall().then((stalled) => {
+      if (stalled && alive) {
+        // eslint-disable-next-line no-console
+        console.warn('[AutoMind] 检测到页面动画帧停摆，已关闭界面动画以保证菜单 / 下拉框正常显示');
+        setRafStalled(true);
+      }
+    });
+    probe();
+    const onVis = () => { if (document.visibilityState === 'visible') probe(); };
+    document.addEventListener('visibilitychange', onVis);
+    return () => { alive = false; document.removeEventListener('visibilitychange', onVis); };
+  }, []);
+  const motionOff = LEGACY_CSS || reduceMotion || rafStalled;
 
   useEffect(() => {
     // 两处都要切：html.light 负责首绘前的配色，body.light 保持既有选择器兼容
@@ -118,8 +147,8 @@ export default function App() {
       +(prefs().fontScale + d).toFixed(2));
 
     return installHotkeys({
-      // 复用顶栏「🔄 新会话」那一份实现（带确认弹窗 + 清服务端历史 + 重置面板），
-      // 不在这里另写一份 —— 清会话是破坏性操作，两处实现迟早会走样。
+      // v1.7.6：新建会话（不再是"清空当前会话"）—— 由侧栏会话列表处理，
+      // 旧内容保留在原会话里，随时切回去看。
       newSession: () => window.dispatchEvent(new CustomEvent('automind:new-session')),
       templates: () => ui().openModal('templates'),
       settings: () => ui().openModal('general'),
@@ -155,6 +184,10 @@ export default function App() {
   const ViewComp = view !== 'chat' ? VIEWS[view] : null;
 
   return (
+    // v1.11.3 浏览器兼容：不支持 :where() / 逻辑属性的内核改用 antd 的兼容输出
+    // （见 lib/compat.ts）。否则下拉菜单、弹窗的样式整条失效 —— 点「＋」「设置」看不到内容。
+    <StyleProvider hashPriority={COMPAT.where ? 'low' : 'high'}
+      transformers={COMPAT.logical ? [] : [legacyLogicalPropertiesTransformer]}>
     <ConfigProvider
       locale={zhCN}
       theme={{
@@ -166,6 +199,10 @@ export default function App() {
           // 自有样式变大、antd 组件纹丝不动，界面会割裂
           fontSize: Math.round(ANTD_BASE_FONT * fontScale),
           fontFamily: "'Inter','Segoe UI',system-ui,-apple-system,'Microsoft YaHei',sans-serif",
+          // 旧内核关闭进出场动画：弹层要等 animationend 才算"出场完成"，动画没跑起来时
+          // 菜单 / 弹窗会一直停在 opacity:0 —— 看起来就是"点了没反应"
+          // v1.11.8：动画帧停摆 / 用户选了减少动效时同样关闭
+          ...(motionOff ? { motion: false } : {}),
           ...(theme === 'dark' ? {
             colorBgContainer: '#0e1220', colorBgElevated: '#161c2e',
             colorBorder: '#262f47', colorBorderSecondary: '#1f2740',
@@ -212,8 +249,16 @@ export default function App() {
         <UpdateModal />
         <ShortcutsModal />
         <ApprovalModal />
+        {/* v1.11.11：模型提问弹窗（ask_user_question）。与审批并列挂在根上：
+            任务可能在任何视图下运行，弹窗不能依赖 ChatPanel 是否可见。 */}
+        <UserQuestionModal />
+        <RunWorkflowModal />
+        <GoalsModal />
+        <LicenseModal />
+        <ScheduleQuickModal />
         <PreviewModal />
       </AntApp>
     </ConfigProvider>
+    </StyleProvider>
   );
 }

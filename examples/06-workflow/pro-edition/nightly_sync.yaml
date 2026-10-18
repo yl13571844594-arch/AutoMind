@@ -1,0 +1,68 @@
+# 夜间同步 —— v1.9.0 专业版样板：定时触发 + parallel 并行组 + 失败重试与通知
+#
+# 需要专业版（automind-pro + 有效许可证）。社区版加载这份文件会在**校验阶段**被拦下，
+# 并指出是哪一行需要专业版 —— 不会跑到一半才失败。
+#
+# 看点：
+#   · triggers: 每个工作日 02:30 自动跑一次；没跑成（partial / failed）就在 120 秒后
+#     **从断点**自动续跑，最多 2 次 —— 已成功的步骤（包括并行组里已成功的子步骤）不再执行；
+#   · on_restart: resume —— 跑到一半服务被重启，起来后自动续跑（默认 notify 只通知）；
+#   · notify: 失败 / 部分成功 / 被中断时发出站事件 + 群机器人消息
+#     （群机器人地址取服务端环境变量 AUTOMIND_IM_WEBHOOK，不写进这份会进版本库的文件）；
+#   · parallel: 三份导出互不依赖，同时跑（最多 3 个）；组结束后可以直接引用子步骤的输出。
+#
+# 在界面「🔀 工作流 → ⏰ 触发器」里能看到下一次运行时间、启停、立即触发。
+version: 1
+name: 夜间数据同步
+description: 并行导出三张表，汇总成一份清单；失败自动续跑并通知
+
+inputs:
+  out_dir:
+    type: string
+    required: false
+    default: examples/06-workflow/out/nightly
+    description: 输出目录（相对于项目根目录）
+
+triggers:
+  - cron: "30 2 * * 1-5"
+    description: 工作日凌晨 2:30
+    retry: 2
+    retry_delay: 120
+
+on_restart: resume
+
+notify:
+  on: [failed, partial, interrupted]
+  channels: [webhook, im]
+
+steps:
+  - id: exports
+    type: parallel
+    max_concurrency: 3
+    steps:
+      - id: export_users
+        type: tool
+        tool: file_write
+        args:
+          path: "{{ inputs.out_dir }}/users.csv"
+          content: "id,name\n1,甲\n2,乙\n"
+      - id: export_orders
+        type: tool
+        tool: file_write
+        args:
+          path: "{{ inputs.out_dir }}/orders.csv"
+          content: "id,amount\n1,100\n2,250\n"
+        on_failure: retry(2)
+      - id: export_items
+        type: tool
+        tool: file_write
+        args:
+          path: "{{ inputs.out_dir }}/items.csv"
+          content: "id,title\n1,键盘\n"
+
+  - id: manifest
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/manifest.json"
+      content: '{"users": {{ steps.export_users.output }}, "orders": {{ steps.export_orders.output }}, "items": {{ steps.export_items.output }}}'

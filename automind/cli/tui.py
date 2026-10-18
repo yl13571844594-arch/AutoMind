@@ -121,6 +121,7 @@ _REPL_HELP = """\
   /tools             列出可用工具
   /skills            列出可用技能
   /stats             显示本次会话统计
+  /compact           压缩当前上下文（省 Token，v1.11.11）
   /clear             清屏
   /exit  /quit  q    退出（显示 Token 摘要）
 其余输入将作为任务交给 Agent 执行。"""
@@ -205,6 +206,22 @@ async def run_rich_repl(agent: Any) -> None:
             console.print(Panel(
                 f"任务数: [bold]{total_tasks}[/] · 累计 Token: [bold]{total_tokens}[/]",
                 title="会话统计", border_style="green"))
+            continue
+        if low == "/compact":
+            # v1.11.11：手动压缩（长任务/对话后想省 Token 时用）。
+            # 与自动压缩共用同一条链路，失败也给出具体原因。
+            try:
+                stat = await agent.force_compact()
+            except Exception as e:
+                console.print(f"[red]压缩失败：{type(e).__name__}: {e}[/]")
+                continue
+            if stat.get("ok"):
+                console.print(
+                    f"[green][OK][/] 已压缩（{stat.get('scope')}）：折叠 "
+                    f"{stat.get('folded', 0)} 条 · 回收 {stat.get('chars_reclaimed', 0)} 字符 · "
+                    f"约省 {stat.get('est_tokens_saved', 0)} tokens")
+            else:
+                console.print(f"[yellow]没有可压缩的内容：{stat.get('error', '')}[/]")
             continue
 
         # ── 执行任务 ──

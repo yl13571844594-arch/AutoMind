@@ -1,0 +1,56 @@
+# 批量生成 —— v1.8.0 的 foreach 样板（离线、不需要凭据）
+#
+# 对一个列表逐项执行一组子步骤。子步骤里多了一个根变量 loop：
+#   {{ loop.item }}   当前项（列表元素本身，可以继续 .字段 往下取）
+#   {{ loop.index }}  从 0 开始的序号
+# 同一项里，后面的子步骤可以用 {{ steps.<子步骤id>.output }} 读前面子步骤的结果；
+# 出了 foreach，整步的输出是"每项一条记录"的列表：{{ steps.<foreach id>.output }}。
+#
+# 上限：社区版单次最多 20 项（专业版 1000）。items 写成字面量列表时在校验阶段就查；
+# 写成模板时在展开之后、执行第一项之前查 —— 超限一项都不会执行。
+#
+# 怎么跑：
+#   python -m automind.workflow run examples/06-workflow/batch_notes.yaml
+version: 1
+name: 批量生成说明卡片
+description: 对每个主题写一张说明卡片，最后生成一份索引
+
+inputs:
+  topics:
+    type: array
+    required: false
+    default: [工作流即代码, 断点续跑, 人工审批]
+    description: 要生成卡片的主题列表
+  out_dir:
+    type: string
+    required: false
+    default: examples/06-workflow/out
+    description: 输出目录（相对于项目根目录）
+
+steps:
+  - id: cards
+    type: foreach
+    items: "{{ inputs.topics }}"
+    steps:
+      - id: write_card
+        type: tool
+        tool: file_write
+        args:
+          path: "{{ inputs.out_dir }}/card-{{ loop.index }}.md"
+          content: "# {{ loop.item }}\n\n（第 {{ loop.index }} 张卡片，由工作流 foreach 生成）\n"
+      # 读回来：报告里每一项都有一行 ok + 输出摘要，评审能看到"写进去的就是那句"
+      - id: check_card
+        type: tool
+        tool: file_read
+        args:
+          path: "{{ inputs.out_dir }}/card-{{ loop.index }}.md"
+    # 某一项失败时整步记失败，但已写好的卡片仍然有效，索引照样生成
+    on_failure: continue
+
+  - id: index
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/index.json"
+      # 前后带了字面量，整串渲染成文本（列表按 JSON 序列化）
+      content: '{"cards": {{ steps.cards.output }}}'

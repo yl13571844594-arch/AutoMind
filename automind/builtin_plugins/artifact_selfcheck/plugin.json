@@ -1,0 +1,8 @@
+{
+  "name": "artifact_selfcheck",
+  "version": "1.0.0",
+  "description": "交付物自检：写文件/存 Office/导出 PDF 图片之后立刻回读磁盘——存在、非空、能重新打开；不合格当场把这次调用判失败并给出修法。",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks",
+  "priority": 20
+}

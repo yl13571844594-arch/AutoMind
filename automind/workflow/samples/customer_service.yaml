@@ -1,0 +1,179 @@
+# 在线客服 —— 关键词路由 + 人工接管 + AI 兜底（v1.11.5 内置样板，社区版可用）
+#
+# 一条客户咨询进来，先登记会话，再按关键词分流：
+#
+#   投诉 / 转人工  → 登记人工工单 → 【人工审批】坐席确认接管 → 回复"已转人工"
+#   退款 / 退货    → 回复退款政策（固定话术，零 token）
+#   发货 / 物流    → 回复物流说明（固定话术，零 token）
+#   发票 / 开票    → 回复开票指引（固定话术，零 token）
+#   其他问题      → Agent 只读知识库 + 写回复（仅可用 file_read / file_write）
+#
+# 设计要点：
+#   · 高频问题走**确定的话术**，不调模型 —— 便宜、稳定、可评审；
+#     只有话术覆盖不到的才交给 Agent，且 Agent 被白名单关在"读知识库、写回复"里；
+#   · 关键词路由用 v1.11.5 新增的 contains_any（包含列表中任一词），仍然是白名单比较、不求值；
+#   · 投诉一律先过人工：human 步骤排在"回复客户"之前，坐席不接就不会对外承诺。
+#
+# 每次运行的产物（在 out_dir 下）：
+#   cs-session.md   会话登记（客户、渠道、原话）
+#   cs-handoff.md   人工工单（仅投诉 / 转人工路径）
+#   cs-reply.md     发给客户的回复
+#
+# 怎么跑：
+#   · 界面：「🔀 工作流」→ ＋ 新建 →「在线客服（内置样板）」→ 保存 → ▶ 运行，
+#     在表单里改"客户留言"即可走不同分支（例：我要退款 / 快递到哪了 / 我要投诉）；
+#   · 命令行（不接模型，走固定话术的分支可以真跑）：
+#       python -m automind.workflow run workflows/customer_service.yaml --input message="快递到哪了"
+version: 1
+name: 在线客服
+description: 客户咨询自动分流：固定话术秒回高频问题，投诉转人工，其余由 Agent 查知识库作答
+
+inputs:
+  customer:
+    type: string
+    required: false
+    default: 张先生
+    description: 客户称呼
+  channel:
+    type: string
+    required: false
+    default: 官网在线客服
+    description: 来源渠道（官网 / 小程序 / App …）
+  message:
+    type: string
+    required: false
+    default: 你好，我昨天下的订单 A1024 什么时候发货？
+    description: 客户留言（改成"我要退款""我要投诉""会员积分怎么用"可走不同分支）
+  kb_path:
+    type: string
+    required: false
+    default: workflows/customer-service-kb.md
+    description: 知识库文件（AI 兜底作答时只读这份文件）
+  out_dir:
+    type: string
+    required: false
+    default: workflows/out/customer-service
+    description: 产物输出目录（相对于项目根目录）
+
+steps:
+  # ① 登记会话：先把原话落盘，后面任何一步失败都能回溯"客户到底问了什么"
+  - id: receive
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-session.md"
+      content: |
+        # 客服会话登记
+
+        - 客户：{{ inputs.customer }}
+        - 渠道：{{ inputs.channel }}
+        - 留言：{{ inputs.message }}
+    on_failure: abort
+
+  # ② 投诉 / 转人工：优先级最高，先判
+  - id: route_complaint
+    type: branch
+    condition: "{{ inputs.message }} contains_any [投诉, 人工, 差评, 举报, 太差, 骗]"
+    then: handoff_ticket
+    else: route_refund
+
+  - id: handoff_ticket
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-handoff.md"
+      content: |
+        # 人工工单（优先级：高）
+
+        - 客户：{{ inputs.customer }}（{{ inputs.channel }}）
+        - 原话：{{ inputs.message }}
+        - 处理要求：10 分钟内电话回访，先致歉、再核实、最后给方案
+    on_failure: abort
+
+  # 坐席确认接管之后才对外回复 —— 没人接就不承诺"已转人工"
+  - id: agent_takeover
+    type: human
+    prompt: |
+      客户 {{ inputs.customer }}（{{ inputs.channel }}）需要人工处理：
+
+      「{{ inputs.message }}」
+
+      工单已登记到 {{ inputs.out_dir }}/cs-handoff.md。是否由你接管该会话？
+    timeout: 900
+
+  - id: handoff_reply
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-reply.md"
+      content: |
+        {{ inputs.customer }}您好，非常抱歉给您带来不好的体验。
+        您的问题已转交人工客服专员处理，我们会在 10 分钟内与您联系，请保持电话畅通。
+
+  # ③ 退款 / 退货
+  - id: route_refund
+    type: branch
+    condition: "{{ inputs.message }} contains_any [退款, 退货, 退钱, 换货, 不想要]"
+    then: refund_reply
+    else: route_shipping
+
+  - id: refund_reply
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-reply.md"
+      content: |
+        {{ inputs.customer }}您好！商品签收 7 天内、不影响二次销售即可无理由退货：
+        1. 在「我的订单」中点击「申请售后」，选择退货原因并提交；
+        2. 审核通过后按页面地址寄回（质量问题运费由我们承担）；
+        3. 仓库签收后 1–3 个工作日原路退款。
+        如需帮助随时回复"人工"。
+
+  # ④ 发货 / 物流
+  - id: route_shipping
+    type: branch
+    condition: "{{ inputs.message }} contains_any [发货, 物流, 快递, 到货, 配送, 单号, 到哪]"
+    then: shipping_reply
+    else: route_invoice
+
+  - id: shipping_reply
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-reply.md"
+      content: |
+        {{ inputs.customer }}您好！现货订单在付款后 24 小时内发货（预售商品以页面时间为准）。
+        发货后可在「我的订单 → 查看物流」实时跟踪，一般 2–4 天送达。
+        如超过 48 小时仍未发货，请回复订单号，我们为您加急处理。
+
+  # ⑤ 发票
+  - id: route_invoice
+    type: branch
+    condition: "{{ inputs.message }} contains_any [发票, 开票, 报销, 抬头]"
+    then: invoice_reply
+    else: ai_reply
+
+  - id: invoice_reply
+    type: tool
+    tool: file_write
+    args:
+      path: "{{ inputs.out_dir }}/cs-reply.md"
+      content: |
+        {{ inputs.customer }}您好！订单完成后可在「我的订单 → 申请开票」自助开具电子发票，
+        支持个人与企业抬头（企业需填写税号），开具后 1 个工作日内发送到您的邮箱。
+
+  # ⑥ 话术覆盖不到 → Agent 查知识库作答（只能读文件、写回复，不能联网 / 跑命令）
+  - id: ai_reply
+    type: agent
+    goal: >-
+      你是在线客服。客户「{{ inputs.customer }}」通过{{ inputs.channel }}留言：
+      「{{ inputs.message }}」。
+      请先用 file_read 读取知识库 {{ inputs.kb_path }}，只依据知识库内容作答；
+      知识库里没有的信息不要编造，礼貌说明并建议客户回复"人工"。
+      回复控制在 150 字以内、语气亲切，用 file_write 写入 {{ inputs.out_dir }}/cs-reply.md，
+      最后把回复原文作为你的最终答案。
+    allowed_tools: [file_read, file_write]
+    max_steps: 8
+    token_budget: 30000
+    timeout: 300
+    on_failure: abort

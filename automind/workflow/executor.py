@@ -27,6 +27,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import time
@@ -39,9 +40,11 @@ from typing import Any
 from automind.core.logging import get_logger
 from automind.core.types import ToolResult
 from automind.state.human_loop import ApprovalOutcome
+from automind.workflow.conditions import LIST_OPS, NUMERIC_OPS, as_number, parse_literal_list
+from automind.workflow.conditions import split_condition as _parse_condition
 from automind.workflow.exceptions import Position, TemplateError, WorkflowExecutionError
 from automind.workflow.schema import StepSpec, WorkflowSchema
-from automind.workflow.template import render, render_structure
+from automind.workflow.template import find_placeholders, render, render_structure, secret_refs
 
 logger = get_logger("automind.workflow.executor")
 
@@ -72,6 +75,85 @@ EXIT_OK = 0
 EXIT_STEP_FAILED = 1
 EXIT_BAD_WORKFLOW = 2
 EXIT_CANCELLED = 130
+
+#: 在 `_attempts` 里按 retry(n) 重试的类型（tool 在 `_run_tool` 内部自己重试）
+_RETRY_IN_STEP = frozenset({"llm", "agent"})
+#: 支持 retry 的全部类型；其余类型写 retry 时"失败即用尽"
+_RETRYABLE_TYPES = frozenset({"tool", "llm", "agent"})
+
+#: agent 步骤视为"完成"的结束原因：模型自己判断做完了、不再调工具
+_AGENT_DONE = frozenset({"no_more_tools"})
+_AGENT_STOP_ZH = {
+    "max_iterations": "达到 max_steps 上限",
+    "task_budget": "token 预算或时长预算用尽",
+    "no_progress": "反复做同一件事、没有进展",
+    "empty_response": "模型连续返回空内容",
+    "llm_unavailable": "模型连接不可用",
+    "error": "执行出错",
+    "cancelled": "被取消",
+}
+
+#: foreach 上限"按当前版本自动取"的哨兵
+_AUTO_LIMIT: Any = object()
+
+#: foreach 逐项执行时的"本项上下文"（v1.9.0）。
+#:
+#: 为什么用 ContextVar：逐项**并发**时，每一项都要有自己的 ``loop`` 与自己的子步骤
+#: 输出 —— 共用一份上下文，第 3 项的子步骤会读到第 7 项刚写进去的输出（串项），
+#: 而报告上看不出任何异常。ContextVar 的值随 asyncio 任务隔离：每一项在自己的
+#: 任务里 ``set`` 一份浅拷贝，执行器里所有读写 ``self._context`` 的地方（渲染、
+#: 记录输出）就自动落到本项的那份上，不必把上下文一路当参数传下去。
+#: 值是 ``(执行器, 上下文)``：同一进程里可能有多个执行器（嵌套工作流），只认自己的。
+_ITEM_CONTEXT: contextvars.ContextVar[tuple[Any, dict[str, Any]] | None] = \
+    contextvars.ContextVar("automind_workflow_item_context", default=None)
+
+#: 一组任务的执行器：``await runner(jobs, max_concurrency=n, stop=event) -> list``。
+#: ``jobs`` 是零参协程工厂；``stop`` 被置位后**未启动**的任务不再启动（结果为 None），
+#: 已启动的跑完为止（中途掐断一个工具调用，比让它跑完更难对账）。
+GroupRunner = Callable[..., Awaitable[list[Any]]]
+
+
+async def run_group_sequential(jobs: list[Callable[[], Awaitable[Any]]], *,
+                               max_concurrency: int = 1,  # noqa: ARG001
+                               stop: asyncio.Event | None = None) -> list[Any]:
+    """逐个执行（社区核心的兜底实现）。
+
+    并发执行器是专业版特性 ``workflow_parallel`` 的实现（automind_pro）；没有它时
+    parallel / 逐项并发在**加载期**就被拦下了。这里的兜底只服务于"绕过加载器、
+    程序化构造 schema"的调用方：语义完全一致，只是不并发。
+    """
+    out: list[Any] = []
+    for job in jobs:
+        if stop is not None and stop.is_set():
+            out.append(None)
+            continue
+        out.append(await job())
+    return out
+
+
+def _default_group_runner() -> GroupRunner:
+    try:
+        from automind.core import edition
+
+        feature = edition.get_feature("workflow_parallel")
+        runner = getattr(feature, "run_group", None)
+        if callable(runner):
+            return runner
+    except Exception:                                  # pragma: no cover - 防御性
+        pass
+    return run_group_sequential
+
+
+def _resolve_foreach_max(value: Any) -> int | None:
+    """foreach 单次迭代上限：显式给值就用它，否则按当前版本限额（None = 不限）。"""
+    if value is not _AUTO_LIMIT:
+        return value
+    try:
+        from automind.core import quota
+
+        return quota.workflow_limit("workflow_foreach_max")
+    except Exception:                                  # pragma: no cover - 防御性
+        return None
 
 
 @dataclass
@@ -129,6 +211,9 @@ class WorkflowRun:
     warnings: list[str] = field(default_factory=list)
     #: 步骤成功的真实输出（不进 JSON 报告的默认输出，按需取）
     outputs: dict[str, Any] = field(default_factory=dict)
+    #: 断点续跑（v1.8.0，R-104）：本轮接的是哪一次运行、哪些步骤直接沿用了上次的结果
+    resumed_from: str = ""
+    resumed_steps: list[str] = field(default_factory=list)
 
     # ── 统计 ──────────────────────────────────────────
 
@@ -198,6 +283,9 @@ class WorkflowRun:
             },
             "steps": [s.as_dict() for s in self.steps],
         }
+        if self.resumed_from:
+            data["resumed_from"] = self.resumed_from
+            data["resumed_steps"] = list(self.resumed_steps)
         if include_outputs:
             data["outputs"] = jsonable(self.outputs)
         return data
@@ -211,6 +299,8 @@ class WorkflowRun:
                 f"共 {self.total} 步，成功 {self.succeeded}、失败 {self.failed}、"
                 f"跳过 {self.skipped}"
                 + (f"、取消 {self.cancelled}" if self.cancelled else "")
+                + (f"（其中 {len(self.resumed_steps)} 步沿用上次结果）"
+                   if self.resumed_steps else "")
                 + f"，耗时 {self.duration_ms / 1000:.2f}s")
 
 
@@ -220,6 +310,22 @@ def _status_zh(status: str) -> str:
         RUN_CANCELLED: "已取消", RUN_DRY_RUN: "试运行（未真正执行）",
         RUN_ABORTED: "已中止",
     }.get(status, status)
+
+
+#: 报告里替换凭据明文用的记号（v1.10.0，R-305）
+REDACTED = "***"
+#: 短于这个长度的凭据值不做替换：把报告里每个 "ab" 都换成 *** 只会让报告不可读，
+#: 而这么短的值本来也不该被当成凭据（存储端同样拒绝）
+MIN_REDACT_LEN = 4
+
+
+class _DryRunSecrets(dict):
+    """试运行时的凭据占位：任何名字都取得到，渲染成一句"这里是哪个凭据"。"""
+
+    __slots__ = ()
+
+    def __missing__(self, key: str) -> str:
+        return f"⟨凭据：{key}⟩"
 
 
 class _DryRunPlaceholder(dict):
@@ -328,7 +434,12 @@ class WorkflowExecutor:
     * ``registry``      —— `automind.tools.base.ToolRegistry`，`tool` 步骤走它 `dispatch`
     * ``llm``           —— 需要 `async generate(messages) -> LLMResponse|str`，`llm` 步骤用
     * ``approval``      —— `async (step, rendered_prompt) -> bool|dict`，`human` 步骤用
+    * ``agent_runner``  —— `async (step, rendered_goal) -> dict`，`agent` 步骤用
+      （返回 D6 结构，见 `automind/workflow/agent_step.py`）
     * ``env``           —— 模板 `{{ env.NAME }}` 的取值来源
+    * ``resume``        —— 断点续跑：上一次运行里**已成功**的步骤及其输出，
+      这些步骤不再执行、直接沿用（branch 除外：它没有副作用，重新判定更可靠）
+    * ``on_checkpoint`` —— 每个顶层步骤结束后收到一份可落盘的快照
 
     为什么要注入而不是内部构造：执行器要能在**没连任何真实系统**的情况下被
     测试与 dry-run（见 tests/workflow），也要能复用 agent 已经建好的注册表
@@ -347,6 +458,13 @@ class WorkflowExecutor:
         dry_run: bool = False,
         strict_templates: bool = True,
         on_event: Callable[[str, dict[str, Any]], Any] | None = None,
+        agent_runner: Callable[..., Awaitable[Any]] | None = None,
+        run_id: str = "",
+        resume: dict[str, Any] | None = None,
+        on_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+        foreach_max: Any = _AUTO_LIMIT,
+        group_runner: GroupRunner | None = None,
+        secrets: dict[str, str] | None = None,
     ) -> None:
         self.schema = schema
         # 入参在这里就补全默认值，而不是指望调用方先调 check_inputs：
@@ -366,12 +484,46 @@ class WorkflowExecutor:
         #: 但**默认必须严格**：空串渲染会把错误推到远端系统上。
         self.strict_templates = bool(strict_templates)
         self.on_event = on_event
+        self.agent_runner = agent_runner
+        self.run_id = run_id or uuid.uuid4().hex[:12]
+        self.on_checkpoint = on_checkpoint
+        self.foreach_max = _resolve_foreach_max(foreach_max)
+        #: parallel 组 / foreach 逐项并发的执行器（v1.9.0）；缺省取专业版特性，
+        #: 没有则逐个执行（见 run_group_sequential）
+        self.group_runner: GroupRunner = group_runner or _default_group_runner()
+        #: 凭据（v1.10.0，企业版）：名 → 明文。只在渲染 tool 参数时取用；
+        #: 报告、事件、落盘快照里出现的明文一律替换成 ***（见 ``_redact``）
+        self._secrets: dict[str, str] = {str(k): str(v) for k, v in (secrets or {}).items()}
+        self._redact_values: list[str] = sorted(
+            {v for v in self._secrets.values() if len(v) >= MIN_REDACT_LEN},
+            key=len, reverse=True)
+        #: 可沿用的步骤：id → {"output": ..., "output_digest": ...}
+        resume = resume or {}
+        self._resume_from = str(resume.get("from_run") or "")
+        self._resume_steps: dict[str, dict[str, Any]] = {
+            str(k): v for k, v in (resume.get("steps") or {}).items()
+            if isinstance(v, dict)}
+        self._resumed: list[str] = []
 
         self._visits: dict[str, int] = {}
         self._records: dict[str, StepReport] = {}
-        self._context: dict[str, Any] = {}
+        self._base_context: dict[str, Any] = {}
         self._current_id: str = ""
         self._cancelled = False
+        #: 快照序号：并行组里多个子步骤几乎同时落盘时，旧快照不能覆盖新快照
+        self._snapshot_seq = 0
+
+    @property
+    def _context(self) -> dict[str, Any]:
+        """模板上下文：foreach 逐项执行时是本项的那份，否则是整轮的那份。"""
+        hit = _ITEM_CONTEXT.get()
+        if hit is not None and hit[0] is self:
+            return hit[1]
+        return self._base_context
+
+    @_context.setter
+    def _context(self, value: dict[str, Any]) -> None:
+        self._base_context = value
 
     # ── 对外入口 ──────────────────────────────────────
 
@@ -385,11 +537,13 @@ class WorkflowExecutor:
         """
         run = WorkflowRun(
             workflow=self.schema.name, version=self.schema.version,
-            run_id=uuid.uuid4().hex[:12], started_at=_now(), dry_run=self.dry_run,
+            run_id=self.run_id, started_at=_now(), dry_run=self.dry_run,
             inputs=self.inputs, source=self.schema.source,
             source_digest=self.schema.source_digest,
             warnings=[w.message for w in self.schema.warnings],
+            resumed_from=self._resume_from,
         )
+        self._run = run
         started = time.perf_counter()
         self._context = self._build_context()
         finished = False
@@ -447,6 +601,15 @@ class WorkflowExecutor:
                 index += 1
                 continue
 
+            # 断点续跑（R-104）：上次已成功的步骤直接沿用结果，**不再执行**。
+            # branch 例外 —— 它没有副作用，而且它的判定依赖前面步骤的输出；
+            # 重新判定一次与"沿用上次的去向"结果相同，但少一处状态要对账。
+            if (step.id in self._resume_steps and step.type != "branch"
+                    and not self.dry_run):
+                await self._restore_step(step)
+                index += 1
+                continue
+
             # 同一份文件 + 同一条路径 = 同一条执行序列。若某步被走到第二次，
             # 说明出现了加载期没拦住的循环（例如将来放宽了跳转规则），
             # 此时按"中止"处理：继续跑会变成死循环，而报告里只会看到一堆重复行。
@@ -466,6 +629,7 @@ class WorkflowExecutor:
 
             self._records[step.id] = record
             await self._emit_step_end(record)
+            await self._checkpoint()
 
             if record.status == STATUS_ABORTED and not jump:
                 aborted = True
@@ -476,6 +640,75 @@ class WorkflowExecutor:
         # 客户对照文件逐条看时，"少了一行"和"这行是跳过"是两件不同的事）
         self._mark_remaining(run, aborted)
         run.status = self._final_status(run, aborted)
+
+    async def _restore_step(self, step: StepSpec) -> None:
+        """把上次运行里已成功的步骤"原样搬过来"：输出进上下文、报告里如实标注。"""
+        saved = self._resume_steps[step.id]
+        output = saved.get("output")
+        await self._emit_step_start(step)
+        now = _now()
+        record = StepReport(
+            id=step.id, type=step.type, status=STATUS_OK, started_at=now, finished_at=now,
+            line=step.position.line,
+            output_digest=str(saved.get("output_digest") or digest_of(output)),
+            detail={"resumed": True, "from_run": self._resume_from})
+        self._record_output(step, output)
+        if step.type == "parallel":
+            # 整组上次就成功了：子步骤的输出也一起搬回来，组后面的步骤照常能引用
+            for child in step.substeps:
+                saved_child = self._resume_steps.get(child.id)
+                if saved_child is None and isinstance(output, dict):
+                    saved_child = {"output": output.get(child.id)}
+                if saved_child is not None:
+                    self._record_output(child, saved_child.get("output"))
+        self._records[step.id] = record
+        self._resumed.append(step.id)
+        logger.info("workflow_step_resumed", step=step.id, from_run=self._resume_from)
+        await self._emit_step_end(record)
+        await self._checkpoint()
+
+    def snapshot(self) -> dict[str, Any]:
+        """当前进度的可落盘快照（R-104）：已结束步骤的记录 + 成功步骤的输出。
+
+        只放**顶层**步骤：foreach 的子步骤以整个 foreach 为续跑粒度
+        （一项跑一半的状态很难说清"重跑安不安全"，整步重跑的语义最简单）。
+        parallel 组例外（D2，v1.9.0）：组内子步骤以**子步骤**为续跑粒度 ——
+        组里已成功的子步骤续跑时跳过，只重跑没成功的那几个。
+        """
+        top = {s.id for s in self.schema.steps}
+        child_of = {c.id: s.id for s in self.schema.steps if s.type == "parallel"
+                    for c in s.substeps}
+        top |= set(child_of)
+        steps_ctx = self._context.get("steps", {}) if self._context else {}
+        records = {sid: r.as_dict() for sid, r in self._records.items()
+                   if sid in top and r.status != STATUS_STARTED}
+        for sid, rec in records.items():
+            if sid in child_of:                        # 组内子步骤：标上所属的组
+                rec["parent"] = child_of[sid]
+        outputs = {sid: (steps_ctx.get(sid) or {}).get("output")
+                   for sid, r in self._records.items()
+                   if sid in top and r.status == STATUS_OK}
+        self._snapshot_seq += 1
+        # 快照里的输出是续跑时要喂回去的：凭据明文换成 *** 之后，续跑的步骤若引用到它，
+        # 拿到的会是 ***。这是刻意的 —— 宁可续跑时那一步失败，也不让明文落盘。
+        return {"run_id": self.run_id, "workflow": self.schema.name, "seq": self._snapshot_seq,
+                "source": self.schema.source, "source_digest": self.schema.source_digest,
+                "inputs": self._redact(jsonable(self.inputs)), "records": self._redact(records),
+                "outputs": self._redact(jsonable(outputs)), "resumed_from": self._resume_from}
+
+    async def _checkpoint(self) -> None:
+        """把快照交给注入的落盘回调。失败只记日志 —— 落盘是保险，不是流程的一部分。"""
+        if self.on_checkpoint is None or self.dry_run:
+            return
+        try:
+            result = self.on_checkpoint(self.snapshot())
+            if asyncio.iscoroutine(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                       # pragma: no cover - 观测兜底
+            logger.warning("workflow_checkpoint_failed", run_id=self.run_id,
+                           error=f"{type(exc).__name__}: {exc}")
 
     def _final_status(self, run: WorkflowRun, aborted: bool) -> str:
         if self.dry_run:
@@ -502,12 +735,7 @@ class WorkflowExecutor:
 
         # 未知类型在加载期就被拒绝；这里是防御性兜底，且**必须在 dry-run 分支之前**：
         # 放在后面会让 dry-run 走到一个没有返回值的分支上（实测踩过这个坑）。
-        handler = {
-            "tool": self._run_tool,
-            "llm": self._run_llm,
-            "human": self._run_human,
-            "branch": self._run_branch,
-        }.get(step.type)
+        handler = self._handler_for(step.type)
 
         if self.dry_run:
             # dry-run 只渲染参数、不做任何真实动作。见 _dry_run_step。
@@ -520,6 +748,7 @@ class WorkflowExecutor:
             record.finished_at = _now()
             return record, None
 
+        jump: int | None = None
         try:
             if handler is None:                       # 加载期已拦住，防御性兜底
                 record.status = STATUS_FAILED
@@ -528,14 +757,13 @@ class WorkflowExecutor:
                 record.finished_at = _now()
                 return record, None
 
-            jump: int | None = None
             if step.timeout:
                 # 超时是**步骤级**的硬上限，与工具自身的 timeout 参数是两回事：
                 # 工具超时管"这一次调用"，步骤超时还兜住"多次重试的总时长"。
                 async with asyncio.timeout(step.timeout):
-                    await handler(step, record)
+                    await self._attempts(step, record, handler)
             else:
-                await handler(step, record)
+                await self._attempts(step, record, handler)
             # 跳转目标由 branch 步骤自己写进 detail["goto"]：用一个显式的
             # "执行期协议字段"而不是让每个 handler 返回不同形状的值，
             # 避免"忘了解包元组"这类只有跑到那条分支才会暴露的错误。
@@ -566,19 +794,6 @@ class WorkflowExecutor:
             record.finished_at = _now()
             self._records[step.id] = record
             raise
-        except TemplateError as exc:
-            # 模板错误在加载期已尽量拦掉；能走到这里的是"执行路径导致取不到值"
-            # （例如 branch 跳过了产出某变量的步骤）。报错要能指向具体字段。
-            record.status = STATUS_FAILED
-            record.error = f"模板渲染失败：{exc.format()}"
-        except WorkflowExecutionError as exc:
-            record.status = STATUS_FAILED
-            record.error = exc.message
-        except Exception as exc:                       # 兜底：任何异常都不许吞掉
-            record.status = STATUS_FAILED
-            record.error = f"步骤抛出未预期的异常（{type(exc).__name__}）：{exc}"
-            logger.error("workflow_step_error", step=step.id, step_type=step.type,
-                         error=f"{type(exc).__name__}: {exc}")
 
         # 失败策略的**唯一**收口处。刻意放在这里而不是各 handler 里：
         # 无论失败来自工具返回、模板渲染、超时还是"没注入依赖"，
@@ -593,14 +808,73 @@ class WorkflowExecutor:
         #   · retry(n) 但未用尽 → 不会走到这里（handler 内部会继续重试）
         if record.status == STATUS_FAILED:
             policy = step.on_failure
-            exhausted_retry = policy.kind == "retry" and record.retries >= policy.retries
+            # 不支持重试的类型（human / branch / foreach）写了 retry：失败即视为用尽。
+            # 此前 llm 步骤写 retry(n) 根本不重试、失败后还按 continue 放行 ——
+            # 与文档"retry 用尽按 abort 处理"相反（v1.8.0 修正）。
+            exhausted_retry = policy.kind == "retry" and (
+                record.retries >= policy.retries or step.type not in _RETRYABLE_TYPES)
             if policy.kind == "abort" or exhausted_retry:
                 record.status = STATUS_ABORTED
                 record.detail.setdefault("on_failure", policy.raw)
 
         record.duration_ms = (time.perf_counter() - started) * 1000
         record.finished_at = _now()
+        if self._redact_values:
+            record.error = self._redact(record.error)
+            record.detail = self._redact(record.detail)
         return record, jump
+
+    def _handler_for(self, step_type: str) -> Callable[..., Awaitable[None]] | None:
+        return {
+            "tool": self._run_tool,
+            "llm": self._run_llm,
+            "human": self._run_human,
+            "branch": self._run_branch,
+            "agent": self._run_agent,
+            "foreach": self._run_foreach,
+            "parallel": self._run_parallel,
+        }.get(step_type)
+
+    async def _attempts(self, step: StepSpec, record: StepReport,
+                        handler: Callable[..., Awaitable[None]]) -> None:
+        """执行 handler；llm / agent 按 `retry(n)` 在这里重试（tool 在 handler 内部重试）。
+
+        异常在这里统一转成"本次尝试失败"：
+          · 模板错误、依赖没注入（WorkflowExecutionError）—— 重试也不会好，直接收尾；
+          · 其它异常（网络抖动、模型报错）—— 计一次失败，还有次数就再试；
+          · 取消与步骤超时照常往外抛（由 `_run_step` 收口）。
+        """
+        tries = step.on_failure.max_attempts if step.type in _RETRY_IN_STEP else 1
+        for attempt in range(tries):
+            if attempt:
+                record.retries = attempt
+                record.status = STATUS_STARTED
+                record.error = ""
+                logger.info("workflow_step_retry", step=step.id, step_type=step.type,
+                            attempt=attempt + 1)
+            try:
+                await handler(step, record)
+            except (asyncio.CancelledError, TimeoutError):
+                raise
+            except TemplateError as exc:
+                # 模板错误在加载期已尽量拦掉；能走到这里的是"执行路径导致取不到值"
+                # （例如 branch 跳过了产出某变量的步骤）。报错要能指向具体字段。
+                record.status = STATUS_FAILED
+                record.error = f"模板渲染失败：{exc.format()}"
+                return
+            except WorkflowExecutionError as exc:
+                record.status = STATUS_FAILED
+                record.error = exc.message
+                return
+            except Exception as exc:                   # 兜底：任何异常都不许吞掉
+                record.status = STATUS_FAILED
+                record.error = f"步骤抛出未预期的异常（{type(exc).__name__}）：{exc}"
+                logger.error("workflow_step_error", step=step.id, step_type=step.type,
+                             error=f"{type(exc).__name__}: {exc}")
+            if record.status != STATUS_FAILED:
+                return
+        if tries > 1 and record.retries:
+            record.error = f"{record.error}（已重试 {record.retries} 次）"
 
     # ── 各类型步骤 ────────────────────────────────────
 
@@ -625,6 +899,14 @@ class WorkflowExecutor:
         if not tool_name:
             record.status = STATUS_FAILED
             record.error = f"步骤 {step.id} 的 tool 字段渲染后为空"
+            return
+
+        missing = [name for text in _walk_strings(step.args) for name in secret_refs(text)
+                   if name not in self._secrets]
+        if missing and not self.dry_run:
+            record.status = STATUS_FAILED
+            record.error = (f"凭据 {'、'.join(dict.fromkeys(missing))} 未配置：请在企业版「凭据保管」"
+                            "里添加（值不会进报告与日志），或检查名字是否写对")
             return
 
         #: 每次尝试的参数都被记录 —— 重试时参数可能因模板取值不同而不同，
@@ -677,7 +959,7 @@ class WorkflowExecutor:
         if policy.kind == "retry" and record.retries:
             record.error = f"{record.error}（已重试 {record.retries} 次）"
         logger.warning("workflow_step_failed", step=step.id, tool=tool_name,
-                       on_failure=policy.raw, error=record.error)
+                       on_failure=policy.raw, error=self._redact(record.error))
         return
 
     async def _run_llm(self, step: StepSpec, record: StepReport) -> None:
@@ -744,16 +1026,40 @@ class WorkflowExecutor:
             logger.warning("workflow_human_no_channel", step=step.id)
             return
 
-        try:
-            raw = await self.approval(step, prompt)
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            # 审批通道自己炸了 → 同样按拒绝（与 plan_executor 的处理一致）
-            outcome = ApprovalOutcome(approved=False,
-                                      comment=f"审批通道异常（{type(exc).__name__}）：{exc}")
+        # v1.10.0（R-303）：approvers + mode。mode=all 按声明顺序逐级审批，每一级都要通过；
+        # mode=any 只发一次审批，列出的任一审批人通过即可。没写 approvers 时与此前完全一样
+        # （一次审批，谁看到弹窗谁就能批）。每一次裁决（谁、什么时候、批没批）都进报告 ——
+        # 运行审计导出（R-304）要的就是这一份。
+        if step.approvers and step.approval_mode == "all":
+            levels = [[a] for a in step.approvers]
         else:
-            outcome = ApprovalOutcome.normalize(raw)
+            levels = [list(step.approvers)]
+        approvals: list[dict[str, Any]] = []
+        outcome = ApprovalOutcome(approved=False)
+        for level_no, required in enumerate(levels, 1):
+            kwargs = ({"required": required, "level": level_no, "levels": len(levels)}
+                      if step.approvers else {})
+            raw: Any = None
+            try:
+                raw = await self.approval(step, prompt, **kwargs)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 审批通道自己炸了 → 同样按拒绝（与 plan_executor 的处理一致）
+                outcome = ApprovalOutcome(approved=False,
+                                          comment=f"审批通道异常（{type(exc).__name__}）：{exc}")
+            else:
+                outcome = ApprovalOutcome.normalize(raw)
+            by = raw.get("approver") if isinstance(raw, dict) else None
+            approvals.append({"level": level_no, "required": required,
+                              "approved": outcome.approved, "by": jsonable(by) if by else None,
+                              "at": _now(), "comment": outcome.comment or ""})
+            if not outcome.approved:
+                break
+        record.detail["approvals"] = approvals
+        if step.approvers:
+            record.detail["approvers"] = list(step.approvers)
+            record.detail["approval_mode"] = step.approval_mode
 
         record.detail["approval"] = "approved" if outcome.approved else "denied"
         if outcome.comment:
@@ -769,9 +1075,275 @@ class WorkflowExecutor:
 
         record.status = STATUS_FAILED
         detail = f"：{outcome.comment}" if outcome.comment else ""
-        record.error = f"人工审批未通过{detail}"
+        level = (f"（第 {len(approvals)}/{len(levels)} 级，需要 {'、'.join(levels[len(approvals) - 1])}）"
+                 if step.approvers and len(levels) > 1 else "")
+        record.error = f"人工审批未通过{level}{detail}"
         self._record_output(step, None, error=record.error)
         return
+
+    async def _run_agent(self, step: StepSpec, record: StepReport) -> None:
+        """`agent` 步骤（v1.8.0，R-106）：把一个子目标交给 Agent 自主完成。
+
+        与 `llm` 步骤的区别：llm 只做一次生成；agent 会多轮"思考 → 调工具"，
+        但**工具集被 allowed_tools 圈定**、步数被 max_steps 圈定、token 被
+        token_budget 圈定 —— 自主性关在一个评审方看得见的笼子里。
+
+        成功的判据是"Agent 自己宣布完成"（stop_reason = no_more_tools）。步数 /
+        预算耗尽、原地打转时产出的是**部分交付**，如实记失败（但输出仍保留，
+        后续步骤可用 `{{ steps.x.output.answer }}` 读到它做到了哪一步）。
+        """
+        if self.agent_runner is None:
+            raise WorkflowExecutionError(
+                f"步骤 {step.id} 是 agent 类型，但执行器没有注入 agent_runner。"
+                "请通过 Web 界面或 REST 接口运行（服务端会自动接上）；命令行不接模型，"
+                "只能 --dry-run。嵌入调用见 automind/workflow/agent_step.py")
+        goal = to_text(render(step.goal, self._context, position=step.position,
+                              path_name=f"steps.{step.id}.goal", strict=self.strict_templates))
+        raw = await self.agent_runner(step, goal)
+        out = raw if isinstance(raw, dict) else {"answer": to_text(raw)}
+        result = {
+            "answer": str(out.get("answer") or ""),
+            "artifacts": list(out.get("artifacts") or []),
+            "actions_ok": int(out.get("actions_ok") or 0),
+            "actions_failed": int(out.get("actions_failed") or 0),
+            "stop_reason": str(out.get("stop_reason") or ""),
+        }
+        denied = list(out.get("denied_tools") or [])
+        record.detail.update({
+            "goal_chars": len(goal), "goal_digest": digest_of(goal),
+            "stop_reason": result["stop_reason"],
+            "actions_ok": result["actions_ok"], "actions_failed": result["actions_failed"],
+            "artifacts": result["artifacts"][:20],
+            "allowed_tools": out.get("allowed_tools", step.allowed_tools),
+            "iterations": out.get("iterations"), "tokens": out.get("tokens"),
+        })
+        if denied:
+            # 越权调用必须进报告：评审方要能看到"它试图做允许范围之外的事"
+            record.detail["denied_tools"] = denied[:20]
+        self._record_output(step, result)
+        record.output_digest = digest_of(result)
+        if result["stop_reason"] in _AGENT_DONE:
+            record.status = STATUS_OK
+            return
+        record.status = STATUS_FAILED
+        record.error = (f"agent 步骤未完成（{_AGENT_STOP_ZH.get(result['stop_reason'], result['stop_reason'] or '原因未知')}）："
+                        f"成功动作 {result['actions_ok']} 个、失败 {result['actions_failed']} 个；"
+                        "部分结果已保留在 output 中")
+        # 失败时 error 字段也要能被 `{{ steps.x.error }}` 读到
+        self._context["steps"][step.id]["error"] = record.error
+
+    async def _run_foreach(self, step: StepSpec, record: StepReport) -> None:
+        """`foreach` 步骤（v1.8.0，R-107）：对列表逐项执行子步骤。
+
+        语义（与 docs/WORKFLOWS.md 逐字对应）：
+          · 子步骤 `on_failure: abort`（默认）失败 → **本 foreach 立即停止**，
+            剩余项不再执行，整步记失败（其自身的 on_failure 决定整轮是否继续）；
+          · 子步骤 `on_failure: continue` 失败 → 该项记失败，继续本项后续子步骤与后续各项；
+          · 任一项失败 → 整步记失败（部分成功不许记成成功），输出仍是逐项列表。
+        上限在**展开之后、执行第一项之前**判定：超限一项都不跑。
+        """
+        items = self._foreach_items(step)
+        child_ids = [c.id for c in step.substeps]
+        stop = asyncio.Event()
+        stopped: list[tuple[int, str]] = []
+
+        async def _one(index: int, item: Any) -> dict[str, Any]:
+            entry = await self._run_item(step, index, item)
+            if entry.get("stopped"):
+                stopped.append((index, entry["stopped"]))
+                stop.set()
+            await self._emit("iteration_end", {
+                "id": step.id, "index": index, "total": len(items),
+                "status": entry["status"]})
+            return entry
+
+        jobs = [(lambda i=i, it=it: _one(i, it)) for i, it in enumerate(items)]
+        if step.max_concurrency > 1:
+            raw = await self.group_runner(jobs, max_concurrency=step.max_concurrency, stop=stop)
+        else:
+            raw = await run_group_sequential(jobs, stop=stop)
+        # 并发时结果按项的顺序收（不是按完成顺序）：报告要能和输入逐项对照
+        results = [r for r in raw if r is not None]
+        steps_ctx = self._context.setdefault("steps", {})
+        for cid in child_ids:                       # 子步骤的输出只在循环内可见
+            steps_ctx.pop(cid, None)
+        self._context.pop("loop", None)
+
+        failed = [r for r in results if r["status"] != STATUS_OK]
+        output = [{"index": r["index"], "item": r["item"], "status": r["status"],
+                   "outputs": r["outputs"]} for r in results]
+        record.detail.update({
+            "items": len(items), "executed": len(results), "failed_items": len(failed),
+            "not_started": len(items) - len(results),
+            # 大规模迭代（专业版上限 1000）时报告只逐项展开前 50 项；
+            # 失败项的序号全部列出（最多 200 个）—— 排障要的就是"哪几项坏了"
+            "failed_indexes": [r["index"] for r in failed][:200],
+            "iterations": [{"index": r["index"], "status": r["status"], "steps": r["steps"]}
+                           for r in results[:50]],
+        })
+        if step.max_concurrency > 1:
+            record.detail["max_concurrency"] = step.max_concurrency
+        self._record_output(step, output)
+        record.output_digest = digest_of(output)
+        if stopped:
+            # 并发时可能有不止一项 abort：报告里写第一个（按项序），其余见 failed_indexes
+            record.status = STATUS_FAILED
+            record.error = min(stopped)[1]
+        elif failed:
+            record.status = STATUS_FAILED
+            record.error = (f"{len(failed)}/{len(items)} 项有子步骤失败"
+                            f"（第 {', '.join(str(r['index'] + 1) for r in failed[:10])} 项）")
+        else:
+            record.status = STATUS_OK
+        if record.status == STATUS_FAILED:
+            self._context["steps"][step.id]["error"] = record.error
+
+    async def _run_item(self, step: StepSpec, index: int, item: Any) -> dict[str, Any]:
+        """执行 foreach 的一项：在**本项自己的上下文**里依次跑子步骤。
+
+        本项上下文 = 整轮上下文的浅拷贝 + ``loop`` + 本项子步骤的输出；
+        逐项并发时各项互不可见（见 ``_ITEM_CONTEXT`` 的说明）。
+        """
+        base = self._base_context
+        item_ctx = {**base, "steps": dict(base.get("steps") or {}),
+                    "loop": {"item": item, "index": index}}
+        token = _ITEM_CONTEXT.set((self, item_ctx))
+        entry: dict[str, Any] = {"index": index, "item": jsonable(item),
+                                 "status": STATUS_OK, "outputs": {}, "steps": []}
+        try:
+            for child in step.substeps:
+                child_record, _ = await self._run_step(child)
+                entry["steps"].append({
+                    "id": child.id, "status": child_record.status,
+                    "error": child_record.error,
+                    "duration_ms": round(child_record.duration_ms, 1)})
+                if child_record.status == STATUS_OK:
+                    entry["outputs"][child.id] = (item_ctx["steps"].get(child.id) or {}).get("output")
+                    continue
+                entry["status"] = STATUS_FAILED
+                if child_record.status == STATUS_ABORTED:
+                    entry["stopped"] = (f"第 {index + 1} 项的子步骤 {child.id} 失败"
+                                        f"（{child_record.error}），策略为 abort，剩余项不再执行")
+                    break
+        finally:
+            _ITEM_CONTEXT.reset(token)
+        return entry
+
+    async def _run_parallel(self, step: StepSpec, record: StepReport) -> None:
+        """`parallel` 并行组（v1.9.0，R-204）：组内子步骤并发执行。
+
+        语义（与 docs/WORKFLOWS.md 逐字对应）：
+          · 最多同时跑 ``max_concurrency`` 个（默认 4）；
+          · 子步骤 ``on_failure: abort``（默认）失败 → **还没启动的**子步骤不再启动，
+            已经在跑的跑完为止（中途掐断一个外部调用比让它跑完更难对账）；
+          · 任一子步骤失败 → 整组记失败（部分成功不许记成成功），组自己的
+            ``on_failure`` 决定整轮是否继续；
+          · 组的输出是 ``{子步骤 id: 输出}``；组结束后也可以直接引用
+            ``{{ steps.<子步骤>.output }}``；
+          · 续跑（D2）：组内已成功的子步骤沿用上次结果，只重跑其余的。
+        """
+        stop = asyncio.Event()
+
+        async def _job(child: StepSpec) -> StepReport:
+            if child.id in self._resume_steps and not self.dry_run:
+                return await self._restore_child(child, parent=step.id)
+            await self._emit_step_start(child)
+            child_record, _ = await self._run_step(child)
+            self._records[child.id] = child_record
+            await self._emit_step_end(child_record, parent=step.id)
+            if child_record.status == STATUS_ABORTED:
+                stop.set()
+            # 每个子步骤结束就落一次盘：组跑到一半被停掉，已成功的那几个续跑时也不再执行
+            await self._checkpoint()
+            return child_record
+
+        jobs = [(lambda c=child: _job(c)) for child in step.substeps]
+        raw = await self.group_runner(jobs, max_concurrency=step.max_concurrency, stop=stop)
+        children: list[dict[str, Any]] = []
+        output: dict[str, Any] = {}
+        steps_ctx = self._context.setdefault("steps", {})
+        for child, child_record in zip(step.substeps, raw, strict=True):
+            if child_record is None:
+                child_record = StepReport(
+                    id=child.id, type=child.type, status=STATUS_SKIPPED, line=child.position.line,
+                    error="未启动：组内有子步骤失败且策略为 abort")
+                self._records[child.id] = child_record
+            children.append({"id": child.id, "type": child.type, "status": child_record.status,
+                             "error": child_record.error, "line": child_record.line,
+                             "duration_ms": round(child_record.duration_ms, 1),
+                             "resumed": bool(child_record.detail.get("resumed"))})
+            if child_record.status == STATUS_OK:
+                output[child.id] = (steps_ctx.get(child.id) or {}).get("output")
+        failed = [c for c in children if c["status"] != STATUS_OK]
+        record.detail.update({"max_concurrency": step.max_concurrency, "children": children})
+        self._record_output(step, output)
+        record.output_digest = digest_of(output)
+        if not failed:
+            record.status = STATUS_OK
+            return
+        record.status = STATUS_FAILED
+        first = next((c for c in failed if c["status"] != STATUS_SKIPPED), failed[0])
+        not_started = sum(1 for c in failed if c["status"] == STATUS_SKIPPED)
+        record.error = (f"并行组 {len(failed)}/{len(children)} 个子步骤未成功"
+                        f"（首个：{first['id']} —— {first['error']}）"
+                        + (f"；{not_started} 个因 abort 未启动" if not_started else ""))
+        self._context["steps"][step.id]["error"] = record.error
+
+    async def _restore_child(self, child: StepSpec, *, parent: str) -> StepReport:
+        """续跑时组内已成功的子步骤：沿用上次输出，不再执行（D2）。"""
+        saved = self._resume_steps[child.id]
+        output = saved.get("output")
+        await self._emit_step_start(child)
+        now = _now()
+        record = StepReport(
+            id=child.id, type=child.type, status=STATUS_OK, started_at=now, finished_at=now,
+            line=child.position.line,
+            output_digest=str(saved.get("output_digest") or digest_of(output)),
+            detail={"resumed": True, "from_run": self._resume_from})
+        self._record_output(child, output)
+        self._records[child.id] = record
+        self._resumed.append(child.id)
+        await self._emit_step_end(record, parent=parent)
+        return record
+
+    def _foreach_items(self, step: StepSpec, *, dry_run: bool = False) -> list[Any]:
+        """展开 items 并做上限检查（超限直接抛，一项都不跑）。
+
+        dry-run 时上游输出是占位对象，数不出有几项 —— 按"一项占位"预览子步骤。
+        """
+        if isinstance(step.items, list):
+            items: Any = render_structure(step.items, self._context, position=step.position,
+                                          path_name=f"steps.{step.id}.items",
+                                          strict=self.strict_templates)
+        else:
+            items = render(str(step.items or ""), self._context, position=step.position,
+                           path_name=f"steps.{step.id}.items", strict=self.strict_templates)
+        if isinstance(items, str):
+            # 上游工具常把列表以 JSON 文本返回 —— 能无歧义解析成列表就认，其余不猜
+            try:
+                parsed = json.loads(items)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list):
+                items = parsed
+        if dry_run and isinstance(items, _DryRunPlaceholder):
+            return [items]
+        if isinstance(items, dict) and not isinstance(items, _DryRunPlaceholder):
+            raise WorkflowExecutionError(
+                f"foreach 步骤 {step.id} 的 items 渲染结果是映射而不是列表"
+                f"（键：{'、'.join(list(map(str, items))[:10])}）。请引用其中的列表字段，"
+                "如 {{ steps.x.output.rows }}")
+        if not isinstance(items, (list, tuple)):
+            raise WorkflowExecutionError(
+                f"foreach 步骤 {step.id} 的 items 渲染结果不是列表，而是 "
+                f"{type(items).__name__}：{str(items)[:120]}")
+        items = list(items)
+        if self.foreach_max is not None and len(items) > self.foreach_max:
+            raise WorkflowExecutionError(
+                f"foreach 步骤 {step.id} 展开后有 {len(items)} 项，超过当前版本单次最大迭代数 "
+                f"{self.foreach_max}（一项都未执行）。请在上游步骤里筛选/分批，"
+                "或升级到更高版本（专业版上限 1000）")
+        return items
 
     async def _run_branch(self, step: StepSpec, record: StepReport) -> None:
         """`branch` 步骤：受限比较，选一个**前面**的步骤跳过去。
@@ -794,17 +1366,15 @@ class WorkflowExecutor:
             record.error = f"无法解析的 branch 条件：{condition!r}"
             return
 
-        lhs = to_text(render(left, self._context, position=step.position,
-                             path_name=f"steps.{step.id}.condition", strict=self.strict_templates))
-        rhs = to_text(render(right, self._context, position=step.position,
-                             path_name=f"steps.{step.id}.condition", strict=self.strict_templates))
-
-        if operator == "==":
-            matched = lhs == rhs
-        elif operator == "!=":
-            matched = lhs != rhs
-        else:                                          # contains
-            matched = rhs in lhs
+        try:
+            matched, lhs, rhs = self._evaluate_condition(step, operator, left, right)
+        except _ConditionError as exc:
+            # 比较本身无法进行（数值比较遇到非数字、in 的右侧不是列表）→ 判**失败**，
+            # 不静默走 else：走错分支而报告全绿，是 branch 最危险的错
+            record.status = STATUS_FAILED
+            record.error = f"branch 条件无法判定：{exc}"
+            record.detail.update({"condition": condition, "operator": operator})
+            return
 
         target_id = step.then if matched else step.else_
         other_id = step.else_ if matched else step.then
@@ -835,6 +1405,70 @@ class WorkflowExecutor:
             else:
                 self._skip_range(other_index, max(target_index, other_index),
                                  f"branch 步骤 {step.id} 判定为假，本步骤属于 then 分支，未执行")
+
+    def _evaluate_condition(self, step: StepSpec, operator: str, left: str,
+                            right: str) -> tuple[bool, str, str]:
+        """按 conditions.py 的语义判定；返回 ``(是否成立, 左侧文本, 右侧文本)``。"""
+        path_name = f"steps.{step.id}.condition"
+        if operator == "exists":
+            present = self._exists(left)
+            return present, ("存在" if present else "不存在"), ""
+
+        def _text(side: str) -> str:
+            return to_text(render(side, self._context, position=step.position,
+                                  path_name=path_name, strict=self.strict_templates))
+
+        lhs = _text(left)
+        if operator in LIST_OPS:
+            options = parse_literal_list(right)
+            if options is None:
+                value = render(right, self._context, position=step.position,
+                               path_name=path_name, strict=self.strict_templates)
+                if isinstance(value, str):
+                    try:
+                        value = json.loads(value)
+                    except ValueError:
+                        pass
+                if not isinstance(value, (list, tuple)):
+                    raise _ConditionError(
+                        f"{operator} 的右侧渲染结果不是列表（{type(value).__name__}：{str(value)[:80]}）")
+                options = [_option_text(v) for v in value]
+            shown = json.dumps(options[:50], ensure_ascii=False)
+            if operator == "contains_any":
+                # 空串关键词会让任何文本都"命中"，几乎一定是笔误 —— 不算命中
+                return any(o and o in lhs for o in options), lhs, shown
+            return lhs in options, lhs, shown
+        rhs = _text(right)
+        if operator in NUMERIC_OPS:
+            a, b = as_number(lhs), as_number(rhs)
+            if a is None or b is None:
+                bad = lhs if a is None else rhs
+                raise _ConditionError(f"数值比较 {operator!r} 的一侧不是数字：{bad[:80]!r}")
+            return {">": a > b, "<": a < b, ">=": a >= b, "<=": a <= b}[operator], lhs, rhs
+        if operator == "==":
+            return lhs == rhs, lhs, rhs
+        if operator == "!=":
+            return lhs != rhs, lhs, rhs
+        return rhs in lhs, lhs, rhs                    # contains
+
+    def _exists(self, text: str) -> bool:
+        """``exists``：单个占位符引用的值取得到且不为 null（dry-run 占位视为存在）。"""
+        tokens = find_placeholders(text)
+        if len(tokens) != 1 or not tokens[0].is_valid:
+            return False
+        current: Any = self._context
+        for part in tokens[0].path:
+            if isinstance(current, dict):
+                try:
+                    current = current[part]
+                except KeyError:
+                    return False
+            elif isinstance(current, (list, tuple)) and part.isdigit() \
+                    and int(part) < len(current):
+                current = current[int(part)]
+            else:
+                return False
+        return current is not None
 
     def _skip_range(self, start: int, stop: int, reason: str) -> None:
         """把 `[start, stop)` 区间里**尚未执行**的步骤标记为 skipped。
@@ -900,18 +1534,44 @@ class WorkflowExecutor:
                 prompt = to_text(render(step.prompt, self._context, position=step.position,
                                         path_name=f"steps.{step.id}.prompt", strict=True))
                 preview.update({"human": True, "prompt_preview": prompt[:200]})
+                if step.approvers:
+                    preview.update({"approvers": list(step.approvers),
+                                    "approval_mode": step.approval_mode})
                 record.detail["approval_channel"] = self.approval is not None
                 # 试运行下 human 步骤的输出按"已批准"记账（试运行本来就不会真的问人），
                 # 这样后面若用 branch 判断审批结果，试运行也能把两条路都走一遍
                 self._record_output(step, "approved", dry_run=True)
+            elif step.type == "agent":
+                goal = to_text(render(step.goal, self._context, position=step.position,
+                                      path_name=f"steps.{step.id}.goal", strict=True))
+                preview.update({"agent": True, "goal_preview": goal[:200],
+                                "allowed_tools": step.allowed_tools,
+                                "max_steps": step.max_steps,
+                                "token_budget": step.token_budget})
+                record.detail["agent_injected"] = self.agent_runner is not None
+            elif step.type == "foreach":
+                failure = await self._dry_run_foreach(step, preview)
+                if failure:
+                    record.status = STATUS_FAILED
+                    record.error = failure
+                    record.detail.update(preview)
+                    return
+            elif step.type == "parallel":
+                failure = await self._dry_run_parallel(step, preview)
+                if failure:
+                    record.status = STATUS_FAILED
+                    record.error = failure
+                    record.detail.update(preview)
+                    return
             elif step.type == "branch":
                 operator, left, right = _split_condition(step.condition)
                 lhs = to_text(render(left, self._context, position=step.position,
                                      path_name=f"steps.{step.id}.condition", strict=True)) \
-                    if operator else left
+                    if operator and operator != "exists" else left
                 rhs = to_text(render(right, self._context, position=step.position,
                                      path_name=f"steps.{step.id}.condition", strict=True)) \
-                    if operator else right
+                    if operator and operator != "exists" and operator not in LIST_OPS or (
+                        operator in LIST_OPS and parse_literal_list(right) is None) else right
                 preview.update({"condition": step.condition, "left_preview": lhs[:120],
                                 "right": rhs, "then": step.then, "else": step.else_})
         except TemplateError as exc:
@@ -929,6 +1589,58 @@ class WorkflowExecutor:
         # 会让一次**本来完全合法**的试运行报错（见 _DryRunPlaceholder 的说明）。
         self._record_output(step, _DryRunPlaceholder(), dry_run=True)
 
+    async def _dry_run_foreach(self, step: StepSpec, preview: dict[str, Any]) -> str:
+        """试运行 foreach：展开 items、查上限，并把子步骤在前几项上各渲染一遍。
+
+        返回失败原因（空串 = 通过）。只预览前 3 项 —— 试运行要回答的是
+        "模板写得对不对、会不会超限"，不是把 20 项的参数全铺出来。
+        """
+        try:
+            items = self._foreach_items(step, dry_run=True)
+        except WorkflowExecutionError as exc:
+            return f"试运行失败：{exc.message}"
+        preview_items = items[:3]
+        iterations: list[dict[str, Any]] = []
+        steps_ctx = self._context.setdefault("steps", {})
+        try:
+            for index, item in enumerate(preview_items):
+                self._context["loop"] = {"item": item, "index": index}
+                rows = []
+                for child in step.substeps:
+                    child_record = StepReport(id=child.id, type=child.type,
+                                              line=child.position.line)
+                    await self._dry_run_step(child, child_record)
+                    rows.append({"id": child.id, "status": child_record.status,
+                                 "error": child_record.error,
+                                 "detail": jsonable(child_record.detail)})
+                    if child_record.status != STATUS_OK:
+                        return (f"试运行第 {index + 1} 项的子步骤 {child.id} 失败："
+                                f"{child_record.error}")
+                iterations.append({"index": index, "steps": rows})
+        finally:
+            self._context.pop("loop", None)
+            for child in step.substeps:
+                steps_ctx.pop(child.id, None)
+        placeholder = len(items) == 1 and isinstance(items[0], _DryRunPlaceholder)
+        preview.update({"foreach": True,
+                        "items": "⟨试运行占位：真跑时才知道有几项⟩" if placeholder else len(items),
+                        "limit": self.foreach_max, "preview": iterations})
+        return ""
+
+    async def _dry_run_parallel(self, step: StepSpec, preview: dict[str, Any]) -> str:
+        """试运行 parallel 组：逐个渲染子步骤（不并发、无副作用）；返回失败原因。"""
+        rows = []
+        for child in step.substeps:
+            child_record = StepReport(id=child.id, type=child.type, line=child.position.line)
+            await self._dry_run_step(child, child_record)
+            rows.append({"id": child.id, "type": child.type, "status": child_record.status,
+                         "error": child_record.error, "detail": jsonable(child_record.detail)})
+            if child_record.status != STATUS_OK:
+                return f"试运行并行组的子步骤 {child.id} 失败：{child_record.error}"
+        preview.update({"parallel": True, "max_concurrency": step.max_concurrency,
+                        "children": rows})
+        return ""
+
     # ── 上下文与记录 ──────────────────────────────────
 
     def _build_context(self) -> dict[str, Any]:
@@ -938,11 +1650,31 @@ class WorkflowExecutor:
         （时间、随机数、宿主路径）—— 工作流的可复现性依赖于"同样的输入产生
         同样的参数"，多一个变量就多一处不可复现的来源。
         """
-        return {
+        context: dict[str, Any] = {
             "inputs": {name: self.inputs.get(name) for name in self.schema.inputs},
             "steps": {},
             "env": dict(self.env),
         }
+        # v1.10.0：凭据根。试运行不碰真值（任何名字都渲染成占位）
+        context["secrets"] = _DryRunSecrets() if self.dry_run else dict(self._secrets)
+        return context
+
+    def _redact(self, value: Any) -> Any:
+        """把凭据明文从任意结构里抹掉（报告 / 事件 / 快照用；模板上下文里保留真值）。"""
+        if not self._redact_values:
+            return value
+        if isinstance(value, str):
+            for secret in self._redact_values:
+                if secret in value:
+                    value = value.replace(secret, REDACTED)
+            return value
+        if isinstance(value, dict) and type(value).__str__ is dict.__str__:
+            return {k: self._redact(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._redact(v) for v in value]
+        if isinstance(value, tuple):
+            return tuple(self._redact(v) for v in value)
+        return value
 
     def _record_output(self, step: StepSpec, output: Any, *, error: str = "",
                        dry_run: bool = False) -> None:
@@ -995,7 +1727,8 @@ class WorkflowExecutor:
             run.steps.append(record)
             if record.status == STATUS_OK:
                 entry = self._context.get("steps", {}).get(step.id) or {}
-                run.outputs[step.id] = entry.get("output")
+                run.outputs[step.id] = self._redact(entry.get("output"))
+        run.resumed_steps = list(self._resumed)
         if self.run_cancelled and run.status == RUN_CANCELLED:
             run.error = run.error or "工作流被取消"
 
@@ -1018,7 +1751,7 @@ class WorkflowExecutor:
         if self.on_event is None:
             return
         try:
-            result = self.on_event(event, payload)
+            result = self.on_event(event, self._redact(payload))
             if asyncio.iscoroutine(result):
                 await result
         except asyncio.CancelledError:
@@ -1032,12 +1765,17 @@ class WorkflowExecutor:
                            error=f"{type(exc).__name__}: {exc}")
 
     async def _emit_step_start(self, step: StepSpec) -> None:
-        await self._emit("step_start", {
-            "id": step.id, "type": step.type, "line": step.position.line,
-            "index": self._step_no(), "total": len(self.schema.steps)})
+        payload = {"id": step.id, "type": step.type, "line": step.position.line,
+                   "index": self._step_no(), "total": len(self.schema.steps)}
+        if step.parent:                                # parallel 组内的子步骤
+            payload["parent"] = step.parent
+        await self._emit("step_start", payload)
 
-    async def _emit_step_end(self, record: StepReport) -> None:
-        await self._emit("step_end", record.as_dict())
+    async def _emit_step_end(self, record: StepReport, *, parent: str = "") -> None:
+        payload = record.as_dict()
+        if parent:
+            payload["parent"] = parent
+        await self._emit("step_end", payload)
 
     # ── 取消辅助（供外部读取）──────────────────────────
 
@@ -1062,6 +1800,13 @@ async def run_workflow(
     env: dict[str, str] | None = None,
     dry_run: bool = False,
     on_event: Callable[[str, dict[str, Any]], Any] | None = None,
+    agent_runner: Callable[..., Awaitable[Any]] | None = None,
+    run_id: str = "",
+    resume: dict[str, Any] | None = None,
+    on_checkpoint: Callable[[dict[str, Any]], Any] | None = None,
+    foreach_max: Any = _AUTO_LIMIT,
+    group_runner: GroupRunner | None = None,
+    secrets: dict[str, str] | None = None,
 ) -> WorkflowRun:
     """执行一份工作流并拿回报告 —— 服务端与 CLI 的统一入口。
 
@@ -1071,7 +1816,10 @@ async def run_workflow(
     """
     executor = WorkflowExecutor(schema, inputs=inputs, registry=registry, llm=llm,
                                 approval=approval, env=env, dry_run=dry_run,
-                                on_event=on_event)
+                                on_event=on_event, agent_runner=agent_runner,
+                                run_id=run_id, resume=resume, on_checkpoint=on_checkpoint,
+                                foreach_max=foreach_max, group_runner=group_runner,
+                                secrets=secrets)
     return await executor.run()
 
 
@@ -1126,21 +1874,42 @@ def check_inputs(schema: WorkflowSchema, provided: dict[str, Any]
 # ═══════════════════════════════════════════════════════════════
 
 
+class _ConditionError(Exception):
+    """branch 条件在执行期无法判定（不是"不成立"，是"没法比"）。"""
+
+
+def _option_text(value: Any) -> str:
+    """in 的列表项 → 比较用的文本（与 conditions.parse_literal_list 的口径一致）。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(jsonable(value), ensure_ascii=False, sort_keys=True)
+    return str(value)
+
+
 def _split_condition(condition: str) -> tuple[str | None, str, str]:
     """把 `左 <算子> 右` 拆开；解析不了返回 `(None, "", "")`。
 
-    先看两字符算子（`==` / `!=`）再看 `contains`：顺序会影响到
-    `a != b == c` 这种（加载期已拒绝）写法的解析结果，先两字符更符合直觉。
+    解析规则与加载期校验共用 conditions.py 的同一份实现（v1.9.0）——
+    两边各写一份"找算子"，迟早出现"校验说是 A、执行按 B 判"。
     """
-    text = str(condition or "").strip()
-    for op in ("==", "!="):
-        idx = text.find(op)
-        if idx > 0:
-            return op, text[:idx].strip(), text[idx + len(op):].strip()
-    idx = text.find("contains")
-    if idx > 0:
-        return "contains", text[:idx].strip(), text[idx + len("contains"):].strip()
-    return None, "", ""
+    cond = _parse_condition(condition)
+    if cond is None:
+        return None, "", ""
+    return cond.op, cond.left, cond.right
+
+
+def _walk_strings(value: Any) -> list[str]:
+    """嵌套结构里的全部字符串（找凭据引用用）。"""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [s for v in value.values() for s in _walk_strings(v)]
+    if isinstance(value, list):
+        return [s for v in value for s in _walk_strings(v)]
+    return []
 
 
 def _extract_text(response: Any) -> str | None:
@@ -1208,11 +1977,14 @@ __all__ = [
     "StepReport",
     "WorkflowExecutor",
     "WorkflowRun",
+    "REDACTED",
+    "GroupRunner",
     "check_inputs",
     "digest_of",
     "iter_positions",
     "jsonable",
     "report_to_json",
+    "run_group_sequential",
     "run_workflow",
     "to_text",
 ]

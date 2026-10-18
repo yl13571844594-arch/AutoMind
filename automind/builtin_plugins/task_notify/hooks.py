@@ -15,7 +15,6 @@ payload 示例：``{"text": "✅ AutoMind 任务完成（成功/失败，耗时 
 from __future__ import annotations
 
 import json
-import logging
 import os
 import threading
 import urllib.request
@@ -23,8 +22,9 @@ from datetime import datetime
 from pathlib import Path
 
 from automind.core.hooks import AgentHooks
+from automind.core.logging import get_logger
 
-logger = logging.getLogger("automind.plugin.task_notify")
+logger = get_logger("automind.plugin.task_notify")
 
 _LOG_PATH = Path("~/.automind/notifications.log").expanduser()
 _lock = threading.Lock()

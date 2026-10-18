@@ -21,7 +21,8 @@ def _executor() -> ReActExecutor:
 class TestNearestMatchHint:
     """file_edit 精确匹配失败时应回显文件中最接近的片段。"""
 
-    def test_indentation_mismatch_gives_hint(self, tmp_path):
+    def test_indentation_mismatch_is_tolerated(self, tmp_path):
+        """v1.11.7：缩进写错但唯一命中 → 直接改对（并按文件里的缩进调整 new_string）。"""
         f = tmp_path / "app.py"
         f.write_text("def main():\n    value = compute()\n    return value\n",
                      encoding="utf-8")
@@ -29,10 +30,28 @@ class TestNearestMatchHint:
         # 模型给的 old_string 缩进错误（制表符而非 4 空格）
         r = asyncio.run(tool.execute(path=str(f), old_string="\tvalue = compute()",
                                      new_string="\tvalue = compute(x)"))
+        assert r.success and "忽略缩进差异" in r.output["match_note"]
+        assert f.read_text(encoding="utf-8") == "def main():\n    value = compute(x)\n    return value\n"
+
+    def test_ambiguous_tolerant_match_still_gives_hint(self, tmp_path):
+        """容错匹配命中多处时不猜，照旧报错并回显最接近的片段。"""
+        f = tmp_path / "app.py"
+        f.write_text("def a():\n    value = compute()\n\ndef b():\n        value = compute()\n",
+                     encoding="utf-8")
+        tool = FileEditTool()
+        r = asyncio.run(tool.execute(path=str(f), old_string="\tvalue = compute()",
+                                     new_string="\tvalue = compute(x)"))
         assert not r.success
         assert "Nearest match" in r.error
         assert "value = compute()" in r.error  # 回显真实行
-        assert "2\t" in r.error  # 带行号
+
+    def test_trailing_whitespace_and_gbk_file(self, tmp_path):
+        f = tmp_path / "old.txt"
+        f.write_bytes("标题   \n内容\n".encode("gbk"))
+        tool = FileEditTool()
+        r = asyncio.run(tool.execute(path=str(f), old_string="标题\n内容", new_string="新标题\n内容"))
+        assert r.success and r.output["encoding"] == "gbk"
+        assert f.read_bytes().decode("gbk").replace("\r\n", "\n") == "新标题\n内容\n"
 
     def test_totally_absent_string_no_hint(self, tmp_path):
         f = tmp_path / "app.py"

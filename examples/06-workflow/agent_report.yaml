@@ -1,0 +1,78 @@
+# 接口错误率日报 —— v1.8.0 的 agent 步骤样板
+#
+# 四步：读取日志（tool）→ 交给 Agent 分析并写报告（agent）→ 人工审批（human）
+#       → 发送通知（tool）。
+#
+# agent 步骤是整份流程里**唯一**由模型临场决定"怎么做"的一步，但它被关在三道
+# 评审方看得见的边界里：
+#   · allowed_tools —— 只能读文件、写文件、跑纯计算的 Python；想调 terminal /
+#     http_request 之类会被拒绝，并记进报告的 denied_tools；
+#   · max_steps     —— 最多 15 轮"思考 → 调工具"；
+#   · token_budget  —— 本步骤最多 8 万 token，用尽就交出已完成的部分。
+#
+# 发送这一步用的是本机桌面通知（notify，离线、不需要凭据）。接入群机器人时把它
+# 换成 im_integration（text: ...），再在审批通过后才会真的发出去。
+#
+# 怎么跑：
+#   · 试运行（不调模型、不弹审批）：
+#       python -m automind.workflow run examples/06-workflow/agent_report.yaml --dry-run
+#   · 真跑：把本文件复制到项目的 workflows/ 目录，在界面「🔀 工作流」里运行
+#     （命令行不接模型，含 agent 步骤的工作流只能 dry-run）。
+version: 1
+name: 接口错误率日报
+description: 读取访问日志 → Agent 分析并写报告 → 人工审批 → 发送通知
+
+inputs:
+  log_path:
+    type: string
+    required: false
+    default: examples/06-workflow/sample-access.log
+    description: 访问日志路径（相对于项目根目录）
+  report_path:
+    type: string
+    required: false
+    default: examples/06-workflow/out/error-report.md
+    description: 报告输出路径
+
+steps:
+  # 先用确定的工具步骤确认日志存在：读不到就不必惊动模型，直接停
+  - id: fetch
+    type: tool
+    tool: file_read
+    args:
+      path: "{{ inputs.log_path }}"
+    timeout: 30
+    on_failure: abort
+
+  - id: analyze
+    type: agent
+    goal: >-
+      阅读 {{ inputs.log_path }}（每行格式：时间 方法 路径 状态码 耗时），
+      统计每个接口的请求数与 5xx 错误率，找出错误率最高的 3 个接口，
+      把结论写成 Markdown 表格保存到 {{ inputs.report_path }}。
+      最后用一两句话概括结论。
+    allowed_tools: [file_read, file_write, python_sandbox]
+    max_steps: 15
+    token_budget: 80000
+    timeout: 600
+    on_failure: abort
+
+  # 审批在"发出去"之前：报告写得不对，人可以在这里拦下
+  - id: approve
+    type: human
+    prompt: |
+      错误率日报已生成：{{ inputs.report_path }}
+
+      Agent 的结论：
+      {{ steps.analyze.output.answer }}
+
+      是否发送通知？
+    timeout: 900
+
+  - id: send
+    type: tool
+    tool: notify
+    args:
+      title: 接口错误率日报
+      message: "{{ steps.analyze.output.answer }}"
+    on_failure: continue

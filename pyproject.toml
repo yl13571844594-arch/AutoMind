@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "automind-agent"
 # 与 automind/__init__.py 的 __version__ 保持一致（§14.1 单一数据源）
-version = "1.7.4"
+version = "1.11.13"
 description = "通用自动化 Agent 框架（社区版）- 支持分层规划、符号推理、自我纠错、MCP 和多模型后端"
 readme = "README.md"
 license = "MIT"
@@ -46,6 +46,7 @@ web = [
     "uvicorn>=0.29.0",
     "openai>=1.30.0",
     "httpx>=0.27.0",
+    "websockets>=12.0",      # v1.11.7 IM 机器人长连接（飞书 / 钉钉 Stream / 企业微信智能机器人）
 ]
 # 办公自动化工具（excel/word/pdf/calendar）。这些库不进核心依赖 ——
 # 只用对话功能的用户没道理被拖上一堆 Office 解析库；工具照常注册，
@@ -74,6 +75,7 @@ full = [
     "fastapi>=0.110.0",
     "uvicorn>=0.29.0",
     "httpx>=0.27.0",
+    "websockets>=12.0",
     "tiktoken>=0.7.0",
     "rich>=13.0",
     "openai>=1.30.0",
@@ -165,6 +167,9 @@ automind = [
     "builtin_plugins/*/hooks.py",
     # 评测套件（v1.7.3）：随包分发冒烟套件，装完即可 `python -m automind.eval run smoke`
     "eval/suites/*.yml",
+    # 内置可运行工作流样板（v1.11.5）：YAML + 配套知识库
+    "workflow/samples/*.yaml",
+    "workflow/samples/*.md",
 ]
 
 [tool.ruff]

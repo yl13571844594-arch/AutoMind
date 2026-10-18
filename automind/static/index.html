@@ -140,6 +140,38 @@
           <div class="stat-item"><div class="label">本次 Tokens</div><div class="value" id="stat-tokens">0</div></div>
           <div class="stat-item"><div class="label">耗时</div><div class="value" id="stat-duration">0ms</div></div>
         </div>
+        <!-- v1.11.10：提示缓存命中率 / 上下文使用率。数据来自 /api/tokens（会话累计）
+             与 WS usage_update（本轮实时）；没有缓存统计时显示「—」，不写成 0%。 -->
+        <div class="stat-grid" style="margin-top:8px">
+          <div class="stat-item"><div class="label">缓存命中率</div><div class="value" id="stat-cache">—</div></div>
+          <div class="stat-item"><div class="label">上下文使用率</div><div class="value" id="stat-context">—</div>
+            <div class="ctx-bar" id="ctx-bar"><div class="ctx-bar-fill" id="ctx-bar-fill"></div></div>
+          </div>
+        </div>
+        <div id="stat-usage-hint" style="font-size:.74em;color:var(--text3);margin-top:8px">—</div>
+      </div>
+      <!-- v1.11.11 待办 / 子智能体 / 交付（与 React 右栏同步；数据来自 todo_updated 事件与 /api/todo） -->
+      <div class="section" id="todo-section">
+        <h3>📋 待办
+          <span style="margin-left:auto;display:flex;align-items:center;gap:8px;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3);font-size:.95em">
+            <span id="todo-counts"></span>
+            <a id="todo-clear" style="cursor:pointer;display:none" onclick="clearTodo()" title="清空待办清单">清空</a>
+          </span>
+        </h3>
+        <div id="todo-list" style="font-size:.82em;color:var(--text2)">
+          <em style="color:var(--text3)">暂无待办。多步任务中模型会维护一份待办清单。</em>
+        </div>
+      </div>
+      <!-- 子智能体是专业版 multi_agent 功能：社区版整块隐藏，不给一个永远空的面板 -->
+      <div class="section" id="subagents-section" style="display:none">
+        <h3>🤖 子智能体 <span id="subagents-count" style="margin-left:auto;font-weight:400;text-transform:none;letter-spacing:0;color:var(--text3);font-size:.95em"></span></h3>
+        <div id="subagents-list"></div>
+      </div>
+      <div class="section" id="deliverables-section">
+        <h3>📦 最近交付</h3>
+        <div id="deliverables-list" style="font-size:.82em;color:var(--text2)">
+          <em style="color:var(--text3)">任务声明的交付文件会列在这里，可点击预览或复制路径</em>
+        </div>
       </div>
       <div class="section">
         <h3>🪙 Token 用量统计</h3>
@@ -189,6 +221,22 @@
   <div class="modal">
     <button class="modal-close" onclick="closeModal()" title="关闭 (Esc)" aria-label="关闭">✕</button>
     <div id="settings-content"></div>
+  </div>
+</div>
+
+<!-- ═══════ 用户提问弹窗（v1.11.11，模型执行中 ask_user_question 触发） ═══════ -->
+<div class="modal-overlay" id="question-modal">
+  <div class="modal" style="width:620px">
+    <button class="modal-close" onclick="dismissUserQuestion()" title="稍后再答（模型会按超时处理，超时不等于同意）" aria-label="关闭">✕</button>
+    <h2 id="question-title">🙋 模型需要你确认</h2>
+    <div style="font-size:.8em;color:var(--text3);margin:6px 0 12px">
+      选择一项（或填写自定义内容）后提交，任务会带着你的回答继续。
+    </div>
+    <div id="question-content"></div>
+    <div class="btn-row" style="justify-content:flex-end;align-items:center">
+      <span id="uq-countdown" style="margin-right:auto;font-size:.78em;color:var(--text3)"></span>
+      <button class="btn-primary" onclick="submitUserAnswer()">提交回答</button>
+    </div>
   </div>
 </div>
 

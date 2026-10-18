@@ -221,6 +221,11 @@ def _record_metrics(etype: str, event: dict) -> None:
             cum = event.get("cumulative") or {}
             METRICS.gauge("automind_tokens_prompt", cum.get("prompt_tokens", 0))
             METRICS.gauge("automind_tokens_completion", cum.get("completion_tokens", 0))
+            # v1.11.10：提示缓存命中率进监控。没有缓存数据时 cache_rate 为 None，
+            # 此时不写 gauge —— 写 0 会被看板当成"缓存完全没命中"，是假数字。
+            rate = cum.get("cache_rate")
+            if rate is not None:
+                METRICS.gauge("automind_cache_hit_ratio", rate)
     except Exception:            # pragma: no cover - 监控绝不影响主链路
         pass
 

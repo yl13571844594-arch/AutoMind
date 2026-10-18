@@ -48,7 +48,7 @@ class DbQueryTool(AbstractTool):
     parameters = {
         "type": "object",
         "properties": {
-            "database": {"type": "string", "description": "Path to the SQLite .db file."},
+            "database": {"type": "string", "description": "Path to the SQLite .db file, relative to the project root."},
             "sql": {"type": "string", "description": "SQL statement (use ? placeholders)."},
             "params": {
                 "type": "array",
@@ -124,7 +124,11 @@ class DbQueryTool(AbstractTool):
 # ── file_search ─────────────────────────────────────────────
 
 _SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv",
-              "dist", "build", ".idea", ".vscode", ".mypy_cache", ".pytest_cache"}
+              "dist", "build", ".idea", ".vscode", ".mypy_cache", ".pytest_cache",
+              # v1.11.13：会话隔离副本/检查点/缓存都在 .automind 下。此前
+              # file_search 会把 .automind/workspaces/bot-* 当成项目文件返回，
+              # 模型顺着读到 IM 机器人/其它会话的副本，工作区就"串"了。
+              ".automind"}
 _TEXT_SUFFIX = {".py", ".js", ".ts", ".tsx", ".jsx", ".java", ".go", ".rs", ".c",
                 ".cpp", ".h", ".cs", ".rb", ".php", ".sh", ".ps1", ".sql", ".md",
                 ".txt", ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".html",
@@ -158,13 +162,33 @@ class FileSearchTool(AbstractTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         try:
-            root = self.project_root
+            # v1.11.13：会话隔离开启时，模型创建的产物在副本里；只搜项目根
+            # 会让它"刚写的文件搜不到"。与 file_read/write 一样以副本为根。
+            try:
+                from automind.core import session_ctx as _sctx
+
+                ws = _sctx.workspace()
+            except Exception:                        # pragma: no cover - 防御
+                ws = None
+            base = Path(ws).resolve() if ws else self.project_root
+            root = base
             sub = str(kwargs.get("path") or "").strip()
             if sub:
-                target = (root / sub).resolve()
-                # 限定在项目根内 —— 与 file_read/file_write 同一套边界
-                if target != root and root not in target.parents:
-                    return bad(self.name, "path 超出项目目录范围")
+                target = Path(sub).expanduser()
+                if not target.is_absolute():
+                    target = (root / target).resolve()
+                else:
+                    target = target.resolve()
+                # 限定在项目根内 —— 与 file_read/file_write 同一套边界。
+                # v1.7.5：错误话术改走 file_editor 的 _RootGuard，两处口径统一。
+                # 此前这里是另一句"path 超出项目目录范围"，既没说是相对谁的，
+                # 也没给可照做的写法。
+                allowed = (self.project_root, base)
+                if not any(target == r or r in target.parents for r in allowed):
+                    from automind.tools.file_editor import _RootGuard
+
+                    return bad(self.name, _RootGuard(self.project_root).out_of_scope_message(
+                        kwargs.get("path"), list(allowed)))
                 root = target
             if not root.is_dir():
                 return bad(self.name, f"目录不存在：{root}")
@@ -184,11 +208,20 @@ class FileSearchTool(AbstractTool):
             for p in root.rglob("*"):
                 if len(hits) >= cap:
                     break
-                if not p.is_file() or any(d in _SKIP_DIRS for d in p.parts):
+                if not p.is_file():
+                    continue
+                # 跳过判断只看**相对搜索根**的路径：搜索根本身就在
+                # .automind/workspaces/<sid> 里时，用绝对 parts 会把整棵树都跳过
+                try:
+                    rel_parts = p.relative_to(root).parts
+                except ValueError:
+                    rel_parts = p.parts
+                if any(d in _SKIP_DIRS for d in rel_parts):
                     continue
                 if not fnmatch.fnmatch(p.name, glob_pat):
                     continue
-                rel = str(p.relative_to(self.project_root))
+                rel_base = base if (p == base or base in p.parents) else self.project_root
+                rel = str(p.relative_to(rel_base))
                 if rx is None:
                     hits.append({"path": rel, "size": p.stat().st_size})
                     continue

@@ -91,6 +91,12 @@ _NOT_SENSITIVE = frozenset({
     "max_tokens", "max_output_tokens", "max_completion_tokens", "min_tokens",
     "usage", "token_usage", "total_tokens", "prompt_tokens",
     "completion_tokens", "input_tokens", "output_tokens", "cached_tokens",
+    # v1.11.10：提示缓存用量字段。名字里都带 "token"，不显式豁免会被
+    # 当成凭据抹成 *** —— 那样"这次命中多少、省了多少"就永远对不出来。
+    "prompt_tokens_details", "prompt_cache_hit_tokens",
+    "prompt_cache_miss_tokens", "cache_creation_tokens",
+    "cache_read_input_tokens", "cache_creation_input_tokens",
+    "cached_content_token_count", "peak_prompt_tokens",
     "tokens", "n_tokens", "token_count", "tokenizer", "author", "authors",
 })
 

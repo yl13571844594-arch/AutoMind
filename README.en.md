@@ -31,12 +31,28 @@ it works out of the box) — for chatting, working, and coding, plus a
 > task history in a local SQLite database, knowledge-base vectors in a local directory.
 > Nothing is sent anywhere except the model provider you configured yourself.
 
+## ✨ What's new in v1.11.13
+
+- 🛠 **Higher tool-call success rate**: parameter aliases/types normalized, relative paths
+  anchored to the session workspace, GBK-aware file reads, automatic shell fallback for
+  chained commands — `file_read` / `file_write` / `file_edit` / `terminal` / `pwsh` get it
+  right the first time far more often.
+- 🔍 **`web_search` works out of the box**: with a configured DeepSeek key it uses the
+  official Search API (no extra model turn); otherwise it falls back to keyless web search.
+  Tavily / Serper / Brave / self-hosted SearXNG are still supported explicitly.
+- 🤖 **More reliable Feishu / WeCom / DingTalk bots**: bot sessions use their own `bot-…`
+  namespace and isolated workspace, so IM work never mixes with the Web workspace; writes
+  are no longer misjudged by post-write self-checks, and progress/results are relayed back
+  to the chat.
+- 📋 **Collaboration tools**: todo list, ask-the-user questions, deliverable declarations,
+  automatic context compaction and `/compact`; Pro adds one-shot sub-agent delegation.
+
 ## Screenshots
 
 <table>
 <tr>
 <td width="50%"><img src="docs/images/tools.png" alt="Tools panel"><br>
-<b>🔧 Tools panel</b> — 31 built-in tools plus skills, MCP servers and plugins, labelled by origin, searchable and toggleable</td>
+<b>🔧 Tools panel</b> — 40 built-in tools plus skills, MCP servers and plugins, labelled by origin, searchable and toggleable</td>
 <td width="50%"><img src="docs/images/observe.png" alt="Observability"><br>
 <b>📈 Observability</b> — a live execution DAG of the current task; see what every step is doing</td>
 </tr>

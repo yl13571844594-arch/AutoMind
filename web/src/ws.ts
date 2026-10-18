@@ -1,13 +1,17 @@
 // WebSocket 管理器 — 流式对话、执行过程实时展示、审批请求、团队活动。
 // 事件驱动地更新 Zustand store；断线指数退避重连（封顶 30s）。
 import { message } from 'antd';
-import { chatSid, MODE_LABELS, useApp, type Mode } from './store/app';
+import { apiGet } from './api/client';
+import { chatSid, isMySid, MODE_LABELS, useApp, type Mode } from './store/app';
+import { settleChips } from './lib/overrides';
 import {
   uid, useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem,
 } from './store/chat';
 import { useObserve } from './store/observe';
-import { usePanel } from './store/panel';
+import { usePanel, type SubAgentInfo } from './store/panel';
 import { usePrefs } from './store/prefs';
+import { useRefs } from './store/refs';
+import { RUN_STATUS_ZH, useWorkflow } from './store/workflow';
 import { esc, renderMarkdown } from './lib/markdown';
 import { fmtDuration, notifyTask } from './lib/notify';
 
@@ -58,6 +62,7 @@ export function connectWS() {
     useApp.setState({ wsState: 'connected', wsAttempt: 0, wsNextRetryAt: 0 });
     // 断过再连上要说一声：用户刚才看到的是"正在重连"，得有个收尾
     if (wasDown) message.success('已重新连接到服务器');
+    bindSession();
   };
   ws.onclose = () => { scheduleReconnect(); };
   ws.onerror = () => { try { ws?.close(); } catch { /* ignore */ } };
@@ -104,9 +109,58 @@ export function reconnectNow() {
 
 export function wsReady(): boolean { return !!ws && ws.readyState === WebSocket.OPEN; }
 
-export function sendRun(task: string, images: string[]) {
+/**
+ * 声明"这个页面在看哪个会话"（v1.8.0）。
+ *
+ * 此前连接只在发起任务时才绑定会话：刷新页面后、或切到另一个会话时，
+ * 后台运行的工作流的进度与审批弹窗都送不到这个页面上 —— 工作流不是从这条
+ * 连接发起的。打开连接、切换工作区/会话时各声明一次即可。
+ */
+let boundSid = '';
+export function bindSession(): void {
+  if (!wsReady()) return;
+  const sid = chatSid();
+  try { ws!.send(JSON.stringify({ action: 'bind', session_id: sid })); boundSid = sid; } catch { /* ignore */ }
+  // 待办按会话存在服务端；绑定（含切会话/重连）后拉一次，右栏才不会显示上一个会话的清单
+  void loadTodos();
+}
+
+/**
+ * 拉取当前会话的待办清单（v1.11.11）。
+ *
+ * 为什么不让右栏组件自己拉：右栏「面板」标签默认不一定打开（默认是「摘要」），
+ * 由组件拉就要求用户先点过去才看得到最新清单。绑定会话、任务结束各拉一次，
+ * 之后靠 WS 的 todo_updated 事件实时覆盖，任何打开时机都是新数据。
+ */
+async function loadTodos(): Promise<void> {
+  try {
+    const d = await apiGet(`/todo?session_id=${encodeURIComponent(chatSid())}`);
+    usePanel.getState().setTodos(Array.isArray(d?.todos) ? d.todos : [], d?.counts || undefined);
+  } catch {
+    // 待办是辅助信息：拉不到不影响任务；WS 事件到达时仍会更新
+  }
+}
+useApp.subscribe((s, prev) => {
+  if (s.convSuffix !== prev.convSuffix || s.wsSuffix !== prev.wsSuffix) {
+    if (chatSid() !== boundSid) bindSession();
+  }
+});
+
+/**
+ * 发起一次任务。``extra`` 承载 v1.7.7 的可选字段：
+ *   overrides          —— 本条消息的模式 / 专家 / 附件（见 lib/overrides.ts）
+ *   ref                —— 用户那条消息的 id，服务端在 task_start 原样带回，用来落定 chip
+ *   resume_checkpoint  —— 从断点续跑（任务原文由服务端取自断点）
+ *   interaction        —— 覆盖默认的当前模式（续跑用断点记录的模式）
+ */
+// 已发出、尚未收到 task_start 的那条用户消息 id（任务没能开始时据此把 chip 标为未生效）
+let pendingRef = '';
+
+export function sendRun(task: string, images: string[], extra?: Record<string, any>) {
+  pendingRef = String(extra?.ref || '');
   ws!.send(JSON.stringify({
     action: 'run', task, interaction: app().mode, images, session_id: chatSid(),
+    ...(extra || {}),
   }));
 }
 export function sendStop() {
@@ -167,6 +221,67 @@ export function sendInterject(text: string, itemId: string): void {
     action: 'interject', text, session_id: chatSid(), interaction: app().mode, images: [],
     ref: itemId,
   }));
+}
+
+/**
+ * 回答模型提出的问题（v1.11.11 WS action=user_answer）。
+ *
+ * 多标签页语义由服务端裁决（先到先得）：这里不做"是不是我这个窗口提问的"判断，
+ * 任一窗口都能答。发送失败返回 false，调用方据此保留弹窗而不是假装答完了。
+ */
+export function sendUserAnswer(
+  questionId: string,
+  answers: { id: string; selected: string[]; custom?: string }[],
+): boolean {
+  if (!wsReady()) return false;
+  try {
+    ws!.send(JSON.stringify({
+      action: 'user_answer', session_id: chatSid(), question_id: questionId, answers,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** /compact 结果迟迟不来时（服务端忙/连接半断）兜底收起 busy，避免一直"压缩中"。 */
+let compactTimer: ReturnType<typeof setTimeout> | null = null;
+const COMPACT_TIMEOUT_MS = 60_000;
+
+/**
+ * 手动压缩当前会话上下文（v1.11.11 WS action=compact）。
+ *
+ * 服务端只压缩"正在跑/复用中的 Agent"：拿不到就回 ok:false 与原因，
+ * 不会临时造一个空 Agent 假装压过 —— 界面上不能报"省了 0 token"式的假成功。
+ */
+export function sendCompact(): boolean {
+  if (!wsReady()) {
+    message.warning('与服务器的连接已断开，无法压缩上下文');
+    return false;
+  }
+  if (usePanel.getState().compactBusy) {
+    message.info('正在压缩上下文，请稍候…');
+    return false;
+  }
+  usePanel.getState().setCompactBusy(true);
+  try {
+    ws!.send(JSON.stringify({ action: 'compact', session_id: chatSid() }));
+  } catch {
+    usePanel.getState().setCompactBusy(false);
+    message.error('压缩请求发送失败，请重试');
+    return false;
+  }
+  if (compactTimer) clearTimeout(compactTimer);
+  compactTimer = setTimeout(() => {
+    compactTimer = null;
+    usePanel.getState().setCompactBusy(false);
+    message.warning('压缩结果迟迟没有返回，请稍后再试', 5);
+  }, COMPACT_TIMEOUT_MS);
+  return true;
+}
+
+function settleCompactWait(): void {
+  if (compactTimer) { clearTimeout(compactTimer); compactTimer = null; }
 }
 
 /** 回执里的 ref（服务端原样回显；也接受 client_ref 这种写法）。ref 就是气泡 id。 */
@@ -243,6 +358,12 @@ const INJECT_AT_CN: Record<string, string> = {
 };
 
 /** 提示语里引用插入原文：太长的截断，免得一条提示占掉半个屏幕。 */
+/** token 数的人话写法：1234567 → 123.5 万 */
+function fmtTok(v: unknown): string {
+  const n = Number(v || 0);
+  return n >= 10000 ? `${(n / 10000).toFixed(1)} 万` : String(n);
+}
+
 function brief(text: unknown, n = 40): string {
   const s = String(text ?? '');
   return s.length > n ? s.slice(0, n) + '…' : s;
@@ -448,6 +569,12 @@ function setRunning(on: boolean) {
     settleInterjectsOnRunEnd();
     chat().persist();
     panel().clearProgress();
+    // v1.11.11：任务都结束了，还等回答的提问不可能再有结果（取消/结束路径上
+    // 服务端只会取消 Future，不会补发 resolved）—— 不收掉弹窗会一直挡着界面。
+    panel().clearQuestion();
+    // v1.11.11：任务结束后待办可能刚被最后一步改过，再对一次账（HTTP 拉取，
+    // 不依赖本条连接还能不能收事件）；失败只是保持现有清单，不影响收尾。
+    void loadTodos();
   }
 }
 
@@ -464,6 +591,14 @@ function handle(data: any) {
       // 就会出现"任务在跑、输入框还是发送态、进度条不显示"的错乱渲染。
       setRunning(true);
       chat().setTaskMode(mode);
+      panel().armBrowserAutoSwitch();
+      // v1.11.10：新一轮任务从零累计 —— 上一轮的命中率/上下文不能带进来，
+      // 否则任务刚开始的那几秒，面板上显示的是"上一次任务"的数字。
+      panel().resetUsage();
+      // v1.11.11：上一轮遗留的提问弹窗/子智能体条目属于上一次执行，新任务开始时清掉。
+      // （子智能体不会跨任务存活；已完成项留到下一次任务开始前还能回看。）
+      panel().clearQuestion();
+      panel().clearSubagents();
       panel().startProgress(
         data.interaction === 'multi' ? '协同中'
           : data.interaction === 'loop' ? '迭代中'
@@ -473,6 +608,40 @@ function handle(data: any) {
       else if (data.interaction === 'multi') startMulti(mode);
       else if (data.interaction === 'loop') startLoop(mode);
       else startExec(mode);
+      // v1.7.7：overrides 回执 → 落定用户消息上的 chip（生效/未生效+原因）
+      pendingRef = '';
+      if (data.ref) {
+        chat().setChips(String(data.ref), (chips) => settleChips(chips, data.overrides));
+        const fails = Object.values(data.overrides || {}).filter((v: any) => v && v.applied === false);
+        if (fails.length) {
+          message.warning(`本条的部分设置未生效：${fails.map((f: any) => f.reason).join('；')}`, 5);
+        }
+      }
+      if (data.resume) {
+        const r = data.resume;
+        execTrace(mode, '↻ 从断点续跑',
+          r.kind === 'plan'
+            ? `原计划 ${r.done ?? 0}/${r.total ?? 0} 步已完成，只执行剩余 ${r.remaining ?? 0} 步`
+            : `已完成的 ${r.done ?? 0} 个动作不会重做，带着进度接着执行`, 'action');
+      }
+      break;
+
+    case 'plan_resumed':
+      panel().patchProgress({ label: `↻ 续跑：剩余 ${data.remaining ?? 0} 步` });
+      break;
+
+    case 'task_resumed':
+      panel().patchProgress({ label: '↻ 带着已完成进度续跑中…' });
+      break;
+
+    // v1.7.7 隔离工作副本的产物：渲染成可操作卡片（应用到项目 / 导出 / 删除副本）
+    case 'workspace_result':
+      if (Number(data.count || 0) > 0) {
+        chat().append(mode, {
+          kind: 'workspace', id: uid(), sid: chatSid(), path: String(data.path || ''),
+          added: data.added || [], modified: data.modified || [], deleted: data.deleted || [],
+        });
+      }
       break;
 
     case 'ma_plan':
@@ -532,11 +701,59 @@ function handle(data: any) {
         // 而实际上超时后这一步已按拒绝处理、任务也失败了
         timeoutS: data.timeout_s || 0,
         askedAt: Date.now(),
+        // v1.8.0（D1）：来自工作流的审批带上出处，弹窗显示"来自工作流 X 第 N 步"
+        workflow: data.source === 'workflow' ? {
+          name: String(data.workflow || ''), runId: String(data.workflow_run_id || ''),
+          stepId: String(data.step_id || ''), stepIndex: Number(data.step_index || 0),
+          stepType: String(data.step_type || ''),
+          required: Array.isArray(data.required) ? data.required.map(String) : [],
+          level: Number(data.level || 1), levels: Number(data.levels || 1),
+        } : undefined,
       });
       // 进度条同步切成"等你批准"：弹窗万一被别的窗口/弹层挡住，
       // 输入框旁边这一行仍然是可见的
       panel().patchProgress({ label: `⏳ 等待你批准：${data.tool || ''}` });
+      if (data.source === 'workflow' && document.hidden) {
+        notifyTask({ title: `🙋 工作流「${data.workflow || ''}」等待你审批`,
+                     body: `第 ${data.step_index || '?'} 步：${data.step_id || ''}` });
+      }
       break;
+
+    // ── v1.8.0 工作流运行进度（与发起它的是不是这条连接无关，按会话推送）──
+    case 'approval_forbidden':
+      // v1.10.0：这一级指定了审批人，而当前登录身份不是 —— 弹窗留着，等对的人来批
+      message.error(data.message || '你不是这一级的指定审批人，本次操作不生效。', 6);
+      break;
+
+    case 'wf_run_queued':
+    case 'wf_run_start':
+    case 'wf_step_start':
+    case 'wf_step_done':
+    case 'wf_iteration':
+    case 'wf_agent_action':
+    case 'wf_run_done': {
+      useWorkflow.getState().onEvent(data);
+      if (data.type === 'wf_run_start' && data.session_id === chatSid()) {
+        // 运行卡片进当前会话（已有同一次运行的卡片就不重复加）
+        const exists = chat().items(mode).some((i: any) => i.kind === 'workflow' && i.runId === data.run_id);
+        if (!exists) {
+          chat().append(mode, { kind: 'workflow', id: uid(), runId: String(data.run_id), name: String(data.workflow || '') });
+          chat().persist();
+        }
+      }
+      if (data.type === 'wf_run_done') {
+        const zh = RUN_STATUS_ZH[data.status] || data.status;
+        const ok = data.status === 'ok';
+        if (document.hidden) {
+          notifyTask({ title: `${ok ? '✅' : data.status === 'cancelled' ? '⏹' : '⚠️'} 工作流「${data.workflow}」${zh}`,
+                       body: String(data.summary_line || data.error || '') });
+        }
+        if (ok) message.success(`工作流「${data.workflow}」${zh}`);
+        else if (data.status !== 'cancelled') message.warning(`工作流「${data.workflow}」${zh}${data.resumable ? '，可从断点续跑' : ''}`, 6);
+        panel().bumpRefresh();
+      }
+      break;
+    }
 
     case 'approval_stale':
       // 迟到的回答（审批已超时/任务已中断）—— 明说，别让用户以为点空了
@@ -573,6 +790,98 @@ function handle(data: any) {
       break;
     }
 
+    case 'llm_reconnect': {
+      // v1.7.6：模型连接中断 → 执行器在等待重连（而不是直接判任务失败）
+      if (data.state === 'recovered') {
+        panel().patchProgress({ label: '连接已恢复，继续执行…' });
+        execTrace(taskMode(), '🔌 模型连接已恢复',
+          `第 ${Number(data.attempt || 1)} 次重连成功，任务继续`, 'action');
+        message.success('模型连接已恢复，任务继续执行', 3);
+      } else if (data.state === 'offline') {
+        // v1.11.7：本机断网 → 等网络回来再继续（最长约 10 分钟），而不是判任务失败
+        const wait = Math.round(Number(data.wait_s || 0));
+        panel().patchProgress({ label: `📶 本机网络断开，等待恢复（最长 ${wait}s）…` });
+        execTrace(taskMode(), '📶 本机网络断开，等待恢复后继续', esc(String(data.error || '')), 'error');
+        message.warning({ key: 'llm-reconnect',
+          content: '本机网络断开：网络恢复后任务会自动继续，已完成的步骤不会丢失', duration: 10 });
+      } else {
+        const n = Number(data.attempt || 1), max = Number(data.max_attempts || 3);
+        const wait = Math.round(Number(data.wait_s || 0));
+        panel().patchProgress({ label: `🔌 连接中断，${wait}s 后重连（${n}/${max}）` });
+        execTrace(taskMode(), `🔌 模型连接中断，等待重连（${n}/${max}）`,
+          esc(String(data.error || '')), 'error');
+        message.warning({ key: 'llm-reconnect',
+          content: `模型连接中断，${wait} 秒后自动重连（${n}/${max}），已完成的步骤不会丢失`,
+          duration: Math.min(wait, 10) });
+      }
+      break;
+    }
+
+    // v1.11.0 Token 预算窗口：此前 budget_* 事件前端一个都不认，任务到
+    // 50 万 token 就"安静地停住"—— 用户看不出为什么停、能不能接着跑。
+    case 'budget_warning': {
+      const left = Number(data.windows_left || 0);
+      execTrace(taskMode(), `🪙 Token 预算已用 ${data.percent}%（第 ${data.window || 1} 个窗口）`,
+        `${fmtTok(data.used)} / ${fmtTok(data.budget)}；`
+        + (left > 0 ? `用尽后会压缩上下文并自动续开新窗口（还可续开 ${left} 次）`
+          : '用尽后将不再开新步骤，已完成的部分照常交付'), 'action');
+      break;
+    }
+
+    case 'budget_window': {
+      const w = Number(data.window || 2), max = Number(data.max_windows || w);
+      panel().patchProgress({ label: `🪙 已续开第 ${w}/${max} 个预算窗口，继续执行…` });
+      execTrace(taskMode(), `🪙 预算窗口已续开（${w}/${max}）`,
+        `前面的窗口累计用掉 ${fmtTok(data.total_used)}；上下文已压缩，任务不中断继续执行`
+        + (data.deadline_extended_s ? `；整轮时长预算同步顺延 ${Math.round(data.deadline_extended_s / 60)} 分钟` : ''),
+        'action');
+      message.info({ key: 'budget-window', content: `Token 预算窗口已用满，已自动续开第 ${w}/${max} 个窗口，任务继续`, duration: 4 });
+      break;
+    }
+
+    case 'budget_exceeded': {
+      panel().patchProgress({ label: '🪙 Token 预算已用尽，正在交付已完成部分' });
+      execTrace(taskMode(), '🪙 Token 预算已用尽',
+        `累计 ${fmtTok(data.total_used ?? data.used)}（${Number(data.windows || 1)} 个窗口）。`
+        + '不再开新步骤，已完成的部分照常交付；发送「继续」即可接着做。'
+        + '如需一次跑更久，可在 设置 → 执行治理 调大「单任务 Token 预算」或「预算窗口自动续开次数」', 'error');
+      message.warning({ key: 'budget-exceeded', content: 'Token 预算已用尽：已完成的部分会照常交付，发送「继续」即可接着做', duration: 6 });
+      break;
+    }
+
+    // v1.11.0 计划模式：计划生成后等你批准（弹窗走 approval_request，这里只管进度与轨迹）
+    case 'plan_review': {
+      const n = Number(data.steps || 0);
+      if (data.state === 'waiting') {
+        panel().patchProgress({ label: `📋 计划已生成（${n} 步），等待你批准…` });
+      } else if (data.state === 'replanning') {
+        panel().patchProgress({ label: '📋 按你修改后的步骤重新规划…' });
+      } else if (data.state === 'approved') {
+        panel().patchProgress({ label: '📋 计划已批准，开始执行' });
+        execTrace(taskMode(), `📋 计划已批准${data.edited ? '（按你的修改重新规划）' : ''}`, `共 ${n} 步`, 'plan');
+      } else if (data.state === 'rejected') {
+        panel().patchProgress({ label: '📋 计划未获批准，未执行任何步骤' });
+        execTrace(taskMode(), '📋 计划未获批准', esc(String(data.reason || '')), 'error');
+      }
+      break;
+    }
+
+    // v1.11.0 目标交付模式：一轮结束，服务端把它记进了目标
+    case 'goal_progress': {
+      const g = data.goal || {};
+      if (g.id) {
+        useRefs.getState().patchGoal(g);
+        if (g.suggest_done && g.status !== 'done') {
+          message.info({ key: 'goal-done', duration: 6,
+            content: `🎯 模型认为目标「${g.title}」已达成 —— 在目标面板核对交付物后确认完成` });
+        } else if (g.progress) {
+          message.success({ key: 'goal-progress', duration: 4,
+            content: `🎯 目标「${g.title}」已推进第 ${g.run_count} 轮：${String(g.progress).slice(0, 60)}` });
+        }
+      }
+      break;
+    }
+
     case 'react_no_progress': {
       // ReAct 原地打转：同一个动作被反复执行到被拦截
       const blocked = Number(data.blocked || 0);
@@ -585,7 +894,7 @@ function handle(data: any) {
 
     case 'team_activity': {
       panel().pushTeam(data);
-      if (data.sid && data.sid !== chatSid()) {
+      if (data.sid && !isMySid(data.sid)) {
         if (data.kind === 'task_done') {
           message.info(`👥 同事完成了任务「${data.task}」${data.changed_files ? `（涉及 ${data.changed_files} 个文件改动）` : ''}`);
           panel().bumpRefresh();
@@ -604,16 +913,163 @@ function handle(data: any) {
       if (typeof cum.total_tokens === 'number') {
         panel().setStats({ tokens: cum.total_tokens });
       }
+      // v1.11.10：缓存命中 / 上下文占用。这些字段可能缺（旧后端、或模型供应商
+      // 不返回缓存用量），缺了按 0 兜底；但 cache_rate 的 null 要原样保留 ——
+      // 界面据此显示「—」，显示成 0% 会被读成"缓存一次都没命中"。
+      const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+      const ctx = data.context || {};
+      panel().setUsage({
+        input_tokens: num(cum.input_tokens),
+        cached_tokens: num(cum.cached_tokens),
+        calls: num(cum.calls),
+        cache_hit_calls: num(cum.cache_hit_calls),
+        cache_rate: typeof cum.cache_rate === 'number' ? cum.cache_rate : null,
+        peak_prompt_tokens: num(cum.peak_prompt_tokens),
+        context_max: num(ctx.max),
+        context_pct: num(ctx.pct),
+        active: true,
+      });
+      break;
+    }
+
+    // ── v1.11.11 待办 / 提问 / 交付 / 压缩 / 子智能体 ──
+    // 这些事件都是**新增的旁路信息**：处理失败/字段缺失最多是某块面板不更新，
+    // 绝不能影响任务主流程（所以每条都只碰 store，不碰 running / 气泡状态）。
+
+    // 模型用 todo_write 整表替换了待办清单：右栏「📋 待办」实时刷新
+    case 'todo_updated': {
+      const todos = Array.isArray(data.todos) ? data.todos : [];
+      panel().setTodos(todos, data.counts || undefined);
+      break;
+    }
+
+    // 模型用 ask_user_question 提问：弹出回答窗，等用户选择/补充
+    case 'user_question': {
+      const qs = Array.isArray(data.questions) ? data.questions : [];
+      const questions = qs.map((q: any) => ({
+        id: String(q?.id || ''),
+        question: String(q?.question || ''),
+        header: q?.header ? String(q.header) : '',
+        multi: !!q?.multi,
+        options: Array.isArray(q?.options)
+          ? q.options.map((o: any) => ({
+            label: String(o?.label || ''),
+            description: o?.description ? String(o.description) : '',
+          })).filter((o: any) => o.label)
+          : [],
+      })).filter((q: any) => q.id && q.question);
+      if (questions.length) {
+        panel().setQuestion({
+          question_id: String(data.question_id || ''),
+          questions,
+          timeout_s: Number(data.timeout_s || 0),
+        });
+      }
+      break;
+    }
+
+    // 回答已被（本窗口或其它标签页）送达服务端：关掉弹窗
+    case 'user_question_resolved': {
+      const cur = panel().question;
+      if (!cur || !data.question_id || cur.question_id === String(data.question_id)) {
+        panel().clearQuestion();
+      }
+      break;
+    }
+
+    // 服务端拒收（问题已超时/已结束、回答结构不合法）：不能静默关窗了事，
+    // 得让用户知道这条回答没有送进模型
+    case 'user_question_stale': {
+      panel().clearQuestion();
+      message.warning(String(data.message || '该问题已结束或不存在，本次回答不再生效'), 6);
+      break;
+    }
+
+    // 模型用 present 声明交付物：对话区落一张可点开的交付卡片
+    case 'presented_files': {
+      const files = (Array.isArray(data.files) ? data.files : []).map((f: any) => ({
+        path: String(f?.path || ''),
+        name: f?.name ? String(f.name) : '',
+        description: f?.description ? String(f.description) : '',
+      })).filter((f: any) => f.path);
+      if (files.length) {
+        chat().append(taskMode(), {
+          kind: 'deliverable', id: uid(), files, count: Number(data.count || files.length),
+        });
+      }
+      break;
+    }
+
+    // /compact 的异步结果：统一在这里落 busy=false 并告诉用户到底压了多少。
+    // 失败也要说清楚（"没有可压缩的上下文"是正常状态，不是错误弹窗）。
+    case 'compact_result': {
+      settleCompactWait();
+      panel().setCompactBusy(false);
+      if (data.ok) {
+        const saved = Number(data.est_tokens_saved || 0);
+        const folded = Number(data.folded || 0);
+        const chars = Number(data.chars_reclaimed || 0);
+        message.success(
+          `🧹 已压缩上下文：折叠 ${folded} 条消息`
+          + `${chars ? `、回收 ${chars.toLocaleString()} 字` : ''}`
+          + `${saved ? ` ≈ 省 ${saved.toLocaleString()} tk` : ''}`
+          + (Number(data.messages || 0) ? `，当前上下文 ${Number(data.messages)} 条消息` : ''),
+          6);
+      } else {
+        message.warning(`压缩未完成：${String(data.error || '未知原因')}`, 6);
+      }
+      panel().bumpRefresh();
+      break;
+    }
+
+    // 子智能体（专业版 multi_agent）：只进右栏「🤖 子智能体」列表
+    case 'subagent_started': {
+      panel().pushSubagent({
+        agent_id: String(data.agent_id || ''),
+        title: String(data.title || data.agent_id || '子智能体'),
+        task: String(data.task || ''),
+        status: String(data.status || 'running'),
+      });
+      break;
+    }
+    case 'subagent_update': {
+      // 字段可能缺（不同版本运行时的输出粒度不同）：缺了就别覆盖已有值，
+      // 否则一次只带 status 的 update 会把之前已经显示的输出尾部清空
+      panel().updateSubagent(String(data.agent_id || ''), {
+        status: String(data.status || 'running'),
+        ...(data.output_tail != null ? { output_tail: String(data.output_tail) } : {}),
+        ...(data.steps != null ? { steps: Number(data.steps) || 0 } : {}),
+        ...(data.tokens != null ? { tokens: Number(data.tokens) || 0 } : {}),
+      });
+      break;
+    }
+    case 'subagent_done': {
+      const patch: Partial<SubAgentInfo> = {
+        status: String(data.status || 'done'),
+        output: data.output ? String(data.output) : '',
+        error: data.error ? String(data.error) : '',
+        steps: Number(data.steps || 0),
+        tokens: Number(data.tokens || 0),
+      };
+      // title 只在服务端给了才覆盖：done 事件缺 title 时不能把已显示的标题抹成空
+      if (data.title) patch.title = String(data.title);
+      panel().updateSubagent(String(data.agent_id || ''), patch);
       break;
     }
 
     // 工具失败单独标红 —— 此前混在 step_action 流水里看不出来（v1.5.1）
     case 'tool_error': {
       const streak = data.streak || 1;
-      const tail = data.circuit_open
-        ? `（已连续失败 ${streak} 次，停止重试）`
-        : streak > 1 ? `（第 ${streak} 次失败）` : '';
-      execTrace(taskMode(), `⛔ 工具失败：${data.tool}${tail}`,
+      // v1.11.6：网络类失败与"工具本身坏了"分开说 —— 前者等网络恢复后会自动放行
+      const retried = data.net_retries ? `，已自动等待并重试 ${data.net_retries} 次` : '';
+      const tail = data.network
+        ? (data.circuit_open
+          ? `（网络中断${retried}，暂停调用，网络恢复后自动放行）`
+          : `（网络中断${retried}）`)
+        : data.circuit_open
+          ? `（已连续失败 ${streak} 次，停止重试）`
+          : streak > 1 ? `（第 ${streak} 次失败）` : '';
+      execTrace(taskMode(), `${data.network ? '📶' : '⛔'} 工具失败：${data.tool}${tail}`,
         esc(String(data.error || '')), 'error');
       break;
     }
@@ -680,15 +1136,28 @@ function handle(data: any) {
       break;
     }
     case 'browser_preview': {
-      // 浏览器/截图工具返回的网页截图 —— 直接渲染在对话框里，展示网页交互效果
+      // v1.11.1：浏览器每步操作后推一帧画面 → 右侧「浏览器」实时预览。
+      // 对话区只放**显式截图**（模型主动要的 / 截图类工具）：每步自动帧都塞进
+      // 对话会刷屏，而且一轮任务几十张图会让对话区滚动明显变卡。
       const b64 = data.screenshot_base64 || '';
-      if (b64) {
-        execTrace(mode, '🖼 ' + esc(data.tool || '浏览器') + ' · 网页截图',
-          `<img class="trace-shot" src="data:image/png;base64,${b64}" alt="网页截图" />`,
+      if (!b64) break;
+      const fmt = data.format === 'jpeg' ? 'jpeg' : 'png';
+      panel().pushFrame({
+        b64, fmt, url: String(data.url || ''), title: String(data.title || ''),
+        action: String(data.action || 'screenshot'),
+      });
+      if (!data.action || data.action === 'screenshot') {
+        const where = data.title || data.url ? ` · ${esc(String(data.title || data.url).slice(0, 60))}` : '';
+        execTrace(mode, '🖼 ' + esc(data.tool || '浏览器') + ' · 网页截图' + where,
+          `<img class="trace-shot" src="data:image/${fmt};base64,${b64}" alt="网页截图" />`,
           'shot');
       }
       break;
     }
+    case 'edition_changed':
+      // 其它标签页 / 本页激活了许可证：重新拉特性开关，🔒 当场消失
+      app().loadStatus();
+      break;
 
     case 'chat_chunk':
       if (!live.stream) startStream(mode);
@@ -720,9 +1189,21 @@ function handle(data: any) {
       break;
 
     case 'task_error':
+      if (pendingRef) {       // 任务根本没开始：本条的设置自然也都没生效
+        const ref = pendingRef;
+        pendingRef = '';
+        chat().setChips(ref, (chips) => chips.map((c) => (c.state === 'pending'
+          ? { ...c, state: 'fail', note: '任务未能开始' } : c)));
+      }
       removeTyping(mode);
       finalizeStream(mode, null);
       finalizeAll(mode);
+      if (data.resume_failed) {
+        // 断点已失效（已完成/已续跑/被新任务取代）：说清楚，不生成一张"再续跑"的死卡片
+        message.warning(String(data.error || '无法从断点续跑'), 6);
+        setRunning(false);
+        break;
+      }
       appendFailure(mode, '出错', String(data.error || '未知错误'));
       panel().bumpRefresh();
       setRunning(false);

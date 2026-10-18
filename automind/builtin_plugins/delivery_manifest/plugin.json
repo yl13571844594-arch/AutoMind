@@ -1,0 +1,8 @@
+{
+  "name": "delivery_manifest",
+  "version": "1.0.0",
+  "description": "交付清单：按任务记录实际写入的文件（路径/大小/指纹/写入方式），收尾时追加到回复并尽力落一份 markdown。清单来自工具调用记录，不是模型自述。",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks",
+  "priority": 10
+}

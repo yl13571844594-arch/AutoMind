@@ -11,8 +11,10 @@ from automind.context.context_manager import ContextManager
 from automind.context.env_detector import EnvironmentDetector
 from automind.context.input_parser import InputParser
 from automind.context.project_indexer import ProjectIndexer
+from automind.core import chat_window as _chat_window
 from automind.core.config import AgentConfig
 from automind.core.events import EventBus
+from automind.core.exceptions import BudgetExhaustedError
 from automind.core.hooks import AgentHooks, invoke_hook
 from automind.core.interject import (
     MAX_ROUNDS as MAX_INTERJECT_ROUNDS,
@@ -67,8 +69,24 @@ class _TokenTrackingLLM:
             if m:
                 try:
                     usage = _json.loads(m.group(1))
-                    self.usage.prompt_tokens += usage.get("prompt_tokens", 0)
-                    self.usage.completion_tokens += usage.get("completion_tokens", 0)
+                    prompt = int(usage.get("prompt_tokens", 0) or 0)
+                    self.usage.prompt_tokens += prompt
+                    self.usage.completion_tokens += int(
+                        usage.get("completion_tokens", 0) or 0)
+                    # v1.11.10：流式也记录提示缓存命中与总输入（对话模式的
+                    # 命中率就靠这里，不再只能拿到本地估算值）
+                    self.usage.cached_tokens += int(usage.get("cached_tokens", 0) or 0)
+                    self.usage.cache_creation_tokens += int(
+                        usage.get("cache_creation_tokens", 0) or 0)
+                    input_total = int(usage.get("input_tokens", 0) or 0) or prompt
+                    self.usage.input_tokens += input_total
+                    self.usage.calls += 1
+                    if int(usage.get("cached_tokens", 0) or 0) > 0:
+                        self.usage.cache_hit_calls += 1
+                    if usage.get("cache_reported"):
+                        self.usage.cache_reported_calls += 1
+                    self.usage.peak_prompt_tokens = max(
+                        self.usage.peak_prompt_tokens, input_total)
                 except Exception as e:
                     logger.warning("stream_usage_parse_failed", error=str(e))
                 # 移除标记再输出
@@ -105,10 +123,10 @@ from automind.planning.hierarchical_planner import HierarchicalPlanner
 from automind.planning.plan_executor import PlanExecutor
 from automind.planning.react_executor import ReActExecutor
 from automind.reflection.consistency_checker import ConsistencyChecker
-from automind.reflection.quality_assessor import QualityAssessor
+from automind.reflection.quality_assessor import QualityAssessor, QualityReport
 from automind.reflection.reflexion import ReflexionEngine
 from automind.skills.skill_registry import SkillRegistry
-from automind.state.checkpoint import CheckpointManager
+from automind.state.checkpoint import CheckpointManager, _plan_progress
 from automind.state.human_loop import (
     ApprovalAction,
     ApprovalRequest,
@@ -116,12 +134,45 @@ from automind.state.human_loop import (
 )
 from automind.state.resource_manager import ResourceManager
 from automind.tools.base import ToolRegistry
-from automind.tools.file_editor import FileEditTool, FileReadTool, FileWriteTool
+from automind.tools.file_editor import (
+    FileEditTool,
+    FileMultiEditTool,
+    FileReadTool,
+    FileWriteTool,
+)
 from automind.tools.function_calling import FunctionCallHandler
 from automind.tools.mcp_registry import MCPRegistry
 from automind.tools.permissions import PermissionEngine
 from automind.tools.sandbox import PythonSandboxTool
 from automind.tools.terminal import TerminalTool
+
+
+class _PlanRejected(Exception):
+    """计划模式下计划被驳回 —— 收尾路径据此跳过验收与反思（内部控制流）。"""
+
+
+def _task_token_budget(config: Any) -> int:
+    """单个任务的 Token 预算（**与 llm.max_tokens 解耦**）。
+
+    v1.7.5 之前这里直接写 ``config.llm.max_tokens * 10``。``max_tokens`` 是
+    "单次回复的长度上限"，与"一个任务总共能烧多少"没有关系，绑在一起会让
+    "调回复长度"顺带改掉"任务预算"—— 实测该派生值只有 81,920，而产品自带的
+    smoke 套件给单任务设的断言上限是 120,000，出厂默认下永远不可能满足。
+
+    取值（v1.11.0 统一 0 语义）：``execution.task_token_budget`` > 0 用它；
+    = 0 表示**不设限**（返回 0，``TokenCounter`` 据此永不判定耗尽）；
+    < 0 或非法值回落到 ``llm.max_tokens × 10``（向后兼容老配置）。
+
+    v1.10 及之前 0 也回落到派生值 81,920 —— 与 max_task_seconds 等闸门
+    "0 = 不限"的语义正好相反，用户填 0 求不限，预算反而缩到六分之一。
+    """
+    try:
+        budget = int(getattr(config.execution, "task_token_budget", 0) or 0)
+    except (TypeError, ValueError):
+        budget = -1
+    if budget >= 0:
+        return budget
+    return int(config.llm.max_tokens) * 10
 
 
 class AutoMindAgent:
@@ -149,12 +200,22 @@ class AutoMindAgent:
         # 执行过程事件回调（由 Web 层注入，用于实时展示执行过程）
         self.event_sink = None
         self._active_goal_id: str | None = None
+        #: 委派深度（0 = 用户直接对话的顶层；子智能体 >0）。子任务工具据此拒绝递归。
+        self._subagent_depth: int = 0
+        #: 上下文窗口压力压缩的上一次触发点（单次请求输入 token 数）。
+        #: 用来避免"每 $call 都压一次"——压缩会重置前缀缓存，压得太勤反而更贵。
+        self._last_context_compact_prompt: int = 0
         self.llm = self._init_llm()
         self._usage_total: dict[str, int] = {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
         self._budget_warned = False
         # 下一次触发上下文压缩的用量比例（每压一次往后推 5%）
         self._next_compact_at = self._BUDGET_WARN_AT
+        # v1.11.0 预算窗口：本任务已续开的窗口数 / 之前窗口累计用掉的 token /
+        # 墙钟预算因续开窗口而顺延的秒数
+        self._budget_windows_used = 0
+        self._budget_spent_prior = 0
+        self._deadline_shift = 0.0
         self._attach_usage_sink()
         self.tool_registry = ToolRegistry()
         self.permissions = PermissionEngine(
@@ -164,10 +225,18 @@ class AutoMindAgent:
         )
         # 审批回调（由 Web 层注入，用于 ask 模式的人工确认）
         self.approval_callback = None
+        # v1.11.0 本次运行的引用与闸门（Web 层按消息注入，每次运行前都会重新赋值）：
+        #   · prefer_tools   —— 输入框引用的 MCP 连接器 / 技能对应的工具：ReAct 必下发，
+        #                       不再看关键词打分的脸色（此前引用了也可能根本没发给模型）；
+        #   · plan_review_cb —— 计划模式：计划生成后先交人批准，批准才执行（None = 关）；
+        #   · _plan_rejected —— 本次计划被驳回的原因（非空 = 一步都没执行）
+        self.prefer_tools: list[str] = []
+        self.plan_review_cb = None
+        self._plan_rejected = ""
         #: 本次任务的绝对截止时刻（time.monotonic 基准；None = 不限）
         self._task_deadline: float | None = None
         self.resources = ResourceManager(
-            token_budget=self.config.llm.max_tokens * 10,
+            token_budget=_task_token_budget(self.config),
         )
 
         # ── 上下文模块 ───────────────────────────
@@ -209,6 +278,9 @@ class AutoMindAgent:
             use_cache=self.config.execution.subtask_cache,
             # v1.7.0：单目标执行上限 —— 并行批里一个目标挂住不再拖死整批
             goal_timeout=getattr(self.config.execution, "goal_timeout_seconds", 900.0),
+            # v1.7.5：重试之间的退避基数。这个配置项此前**没有任何读取方**，
+            # 改了也不生效 —— 现在真的接到重试循环上了。
+            retry_delay=getattr(self.config.execution, "retry_delay_seconds", 2.0),
         )
         self.fn_handler = FunctionCallHandler(self.tool_registry)
 
@@ -222,6 +294,9 @@ class AutoMindAgent:
 
         # ── 状态管理 ──────────────────────────────
         self.checkpoint_mgr = CheckpointManager(self.config.execution.checkpoint_dir)
+        #: 上次按步落盘的时刻（time.monotonic 基准）与累计次数（v1.7.5）
+        self._last_checkpoint_at: float = 0.0
+        self._checkpoint_saves: int = 0
         self.human_loop = HumanInTheLoop(auto_approve_safe=self.config.execution.auto_approve_safe)
 
         # ── 多智能体协同（专业版特性，运行时按需创建）──
@@ -306,6 +381,11 @@ class AutoMindAgent:
     def apply_plugin_hooks(self) -> None:
         """将当前已加载插件的 hooks 汇总应用到本 Agent。"""
         self.hooks = self.plugin_manager.assemble_hooks()
+        # v1.11.6：插件还可以提供工具与分派中间件（共享注册表，克隆会话同样生效）
+        reg = getattr(self, "tool_registry", None)
+        if reg is not None and hasattr(reg, "sync_plugin_tools"):
+            reg.sync_plugin_tools(self.plugin_manager.assemble_tools())
+            reg.set_middlewares(self.plugin_manager.assemble_middlewares())
 
     def _load_builtin_plugins(self) -> None:
         """默认加载随包分发的内置插件（用户插件仍需手动启用）。
@@ -336,10 +416,35 @@ class AutoMindAgent:
         from automind.core import session_ctx as _sctx
 
         sid = getattr(self, "session_id", "") or "default"
+        # v1.7.5：把会话身份写进检查点状态。此前 `_agent_state.session_id`
+        # 从没被赋值过，一直是 AgentState 的随机默认值，于是检查点文件名
+        # 里的那串 id 跟真实会话对不上 —— 既无法按会话找回，也没法判断
+        # "这个没跑完的任务属于谁"。
+        self._agent_state.session_id = sid
         plan = self._prepare_workspace(sid)
         with _sctx.bind_session(sid, run_id=_sctx.new_run_id("run"),
-                                workspace=plan.path if plan.isolated else None):
-            return await self._run_impl_bound(user_input, plan)
+                                workspace=plan.path if plan.isolated else None,
+                                sink=self._emit if self.event_sink is not None else None,
+                                project_root=self.config.project_root), \
+                _sctx.bind_agent(self, depth=getattr(self, "_subagent_depth", 0)):
+            try:
+                return await self._run_impl_bound(user_input, plan)
+            except BaseException as e:
+                # v1.7.7：被取消 / 抛错时**强制**落一次盘（绕过 15 秒节流）。
+                # 否则最后几步动作可能不在检查点里，续跑时会被当成没做过。
+                await self._checkpoint_interrupted(e)
+                raise
+
+    async def _checkpoint_interrupted(self, exc: BaseException) -> None:
+        """中断时把状态标成 interrupted 并强制落盘（纯旁路，绝不再抛）。"""
+        try:
+            md = self._agent_state.metadata
+            if md.get("status") in (None, "", "running"):
+                md["status"] = "interrupted"
+                md["error"] = f"{type(exc).__name__}: {exc}"[:300]
+            await self._maybe_checkpoint(force=True)
+        except BaseException as e:                    # pragma: no cover - 旁路
+            logger.warning("checkpoint_interrupt_failed", error=str(e))
 
     def _prepare_workspace(self, sid: str) -> Any:
         """按配置准备会话工作目录（未开启隔离时返回共享 project_root）。"""
@@ -352,10 +457,58 @@ class AutoMindAgent:
                         reason=plan.reason)
         return plan
 
+    def _workspace_note(self, ws_plan: Any) -> str:
+        """隔离副本里跑完后的说明：**改了哪些文件 + 怎么取回**（v1.7.7）。
+
+        此前只给一个路径和一句"调用工作区导出"—— 而导出根本没有界面入口，
+        产物等于藏在 .automind/workspaces 里没人找得到。
+        """
+        from automind.core import workspace as _ws
+        sid = getattr(self, "session_id", "") or "default"
+        try:
+            ch = _ws.changes(sid, self.config.project_root)
+        except Exception:
+            ch = {"ok": False}
+        lines = [f"\n\n---\n📁 本次任务在**会话独立工作副本**中执行（未直接改动你的项目目录）："
+                 f"`{ws_plan.path}`"]
+        if ch.get("ok"):
+            add, mod, dele = ch["added"], ch["modified"], ch["deleted"]
+            if ch["count"]:
+                lines.append(f"本次产物：新增 {len(add)} · 修改 {len(mod)} · 删除 {len(dele)}")
+                for rel in (add + mod)[:12]:
+                    lines.append(f"- `{rel}`" + ("（新增）" if rel in add else "（修改）"))
+                more = len(add) + len(mod) - 12
+                if more > 0:
+                    lines.append(f"- …另有 {more} 个")
+                lines.append("点击下方卡片的「应用到项目」可把这些改动按相对路径覆盖回项目根"
+                             "（同名文件直接覆盖，覆盖前自动备份，可在「↩️ 文件改动」里撤销）。")
+            else:
+                lines.append("本次没有产生文件改动。")
+        if getattr(ws_plan, "reason", ""):
+            lines.append(f"注：{ws_plan.reason}")
+        return "\n".join(lines)
+
+    async def _emit_workspace_result(self) -> None:
+        """把隔离副本的改动清单推给界面，渲染成可操作的卡片。"""
+        wp = getattr(self, "_workspace_plan", None)
+        if wp is None or not wp.isolated:
+            return
+        try:
+            from automind.core import workspace as _ws
+            ch = _ws.changes(getattr(self, "session_id", "") or "default",
+                             self.config.project_root)
+            if ch.get("ok"):
+                await self._emit({"type": "workspace_result", "path": wp.path,
+                                  "added": ch["added"][:200], "modified": ch["modified"][:200],
+                                  "deleted": ch["deleted"][:200], "count": ch["count"]})
+        except Exception as e:                        # pragma: no cover - 纯观测
+            logger.warning("workspace_result_emit_failed", error=str(e))
+
     async def _run_impl_bound(self, user_input: str, plan: Any) -> AgentResult:
         start_time = time.perf_counter()
         backtracks = 0
         errors_corrected = 0
+        self._begin_checkpoint_record(user_input)
         # v1.7.0 整轮任务总时长预算。单步超时管"某一步卡住"、无进展检测管
         # "原地打转"，都管不住"每步都正常但整体就是跑不完"——50 步 × 单次
         # LLM 5 分钟的理论上限是 4 小时以上。到点不再开新步骤，把已完成
@@ -374,6 +527,23 @@ class AutoMindAgent:
                 "LLM 未初始化。请先在「API Keys」面板配置当前提供商的 API Key。"
             )
         self.llm.reset()  # 重置本次任务的 token 计数
+        # v1.11.10：`usage_update` 的累计值同样按任务清零（此前是会话克隆
+        # 生命周期累计，右栏「本次」数字与旁边的任务语义对不上）
+        self._reset_usage_total()
+
+        # Token 预算**按任务**重置（v1.7.5）。
+        # 上面那句 llm.reset() 只清了 _TokenTrackingLLM 的显示计数，
+        # 而 ResourceManager 的已用量是跨任务累计、永不重置的 ——
+        # 加上 Web 端同一会话复用同一个克隆实例，结果是"会话预算用光之后，
+        # 之后每个新任务都在第一次模型调用时就失败"。
+        # 实测一个普通任务约烧 43~46k token，默认预算 81,920 意味着
+        # 一个会话大约只能跑两个任务。这里把它掰回"每个任务一份预算"。
+        if getattr(self, "resources", None) is not None:
+            self.resources.tokens.reset()
+            self._budget_warned = False
+            self._next_compact_at = self._BUDGET_WARN_AT
+        self._reset_budget_windows()
+        self._plan_rejected = ""
 
         # 1. 解析输入
         parsed = self.input_parser.parse(user_input)
@@ -381,44 +551,109 @@ class AutoMindAgent:
         self.context_mgr.add(Message(role=Role.USER, content=user_input))
 
         # 2. 收集上下文
+        # v1.11.10：把"每个任务都在变"的记忆片段从稳定的环境信息里拆出来。
+        # DeepSeek / GLM 的前缀缓存按**逐字节前缀**命中；记忆一变就把整段
+        # 环境+项目索引的缓存一起作废。拆成独立的 system 消息放在环境之后，
+        # 稳定前缀（系统提示 → 工具目录 → 环境）可跨任务复用。
         context = self._build_context(parsed)
+        memory_note = ""
         relevant_memories = await self.memory.retrieve_relevant(user_input, k=5)
         if relevant_memories:
-            context += "\n\n[Relevant Memories]\n" + "\n".join(
+            memory_note = "[Relevant Memories]\n" + "\n".join(
                 f"- [{m.source}] {m.content[:200]}" for m in relevant_memories
             )
 
         # 3. 选择模式并执行
         step_results = []
-        if self._mode == ExecutionMode.REACT:
-            result_text = await self._run_react(user_input, context)
-            plan = None
-        else:
-            plan, step_results = await self._run_plan_execute(user_input, context)
-            await self._invoke_hook("after_plan", plan)
-            result_text = self._build_result_text(plan, step_results)
-            backtracks = sum(1 for s in step_results if s.retries > 0) if step_results else 0
-            errors_corrected = sum(1 for s in step_results if s.retries > 0 and s.success) if step_results else 0
-            # v1.7.2：计划跑完后，把执行途中收到的用户补充用一次 ReAct 补跑
-            # 纳入本轮交付（计划模式的动作在执行前就定好了，中途改不了道，
-            # 但"收下不办"等于静默丢弃 —— 那是最坏的处理方式）。
-            result_text = await self._absorb_interjections_after_plan(
-                user_input, context, result_text)
+        result_text = ""
+        plan = None
+        budget_exhausted = ""
+        try:
+            if self._mode == ExecutionMode.REACT:
+                result_text = await self._run_react(user_input, context,
+                                                    memory_note=memory_note)
+                plan = None
+            else:
+                # 计划模式对前缀缓存不敏感：记忆仍并回上下文，保持既有提示结构
+                plan_context = (f"{context}\n\n{memory_note}" if memory_note else context)
+                plan, step_results = await self._run_plan_execute(user_input, plan_context)
+                await self._invoke_hook("after_plan", plan)
+                result_text = self._build_result_text(plan, step_results)
+                if self._plan_rejected:
+                    result_text = ("📋 计划模式：计划未获批准，**未执行任何步骤**。\n"
+                                   f"原因：{self._plan_rejected}\n\n拟定的计划：\n"
+                                   f"{self._plan_text(plan)}\n\n"
+                                   "可以补充要求后重新发送；退出计划模式则会直接执行。")
+                backtracks = sum(1 for s in step_results if s.retries > 0) if step_results else 0
+                errors_corrected = sum(1 for s in step_results if s.retries > 0 and s.success) if step_results else 0
+                # v1.7.2：计划跑完后，把执行途中收到的用户补充用一次 ReAct 补跑
+                # 纳入本轮交付（计划模式的动作在执行前就定好了，中途改不了道，
+                # 但"收下不办"等于静默丢弃 —— 那是最坏的处理方式）。
+                result_text = await self._absorb_interjections_after_plan(
+                    user_input, plan_context, result_text)
+        except BudgetExhaustedError as e:
+            # v1.7.5：预算耗尽不再让整个任务崩掉。
+            # ReAct 路径已在循环内自行优雅收尾（见 react_executor），
+            # 这里兜的是 Plan 路径与"计划后补跑"两步 —— 它们同样要调模型。
+            budget_exhausted = str(e)
+            plan = getattr(self, "_current_plan", None)
+            logger.warning("task_budget_exhausted", error=budget_exhausted,
+                           mode=getattr(self._mode, "value", str(self._mode)))
 
-        # 3.5 自主任务闭环：TDD 测试 + 多 Agent 审查 + Loop 验收（工作/编程模式）
-        if self._interaction in (InteractionMode.WORK, InteractionMode.CODING):
-            result_text = await self._autonomy_closure(user_input, result_text, context)
+        # 3.5 / 4 / 5 —— 这三步**本身也要花 token**（TDD 闭环 / 质量评估 / 反思）。
+        # 预算已经没了就降级跳过，而不是把手里已有的结果一起丢掉 —— 修复前最
+        # 荒谬的行为正是：任务其实已经做完了，却因为"没预算做质量评估"而整体失败。
+        try:
+            if getattr(self, "_plan_rejected", ""):
+                # 计划被驳回：什么都没执行，没有可验收 / 可反思的东西 —— 也别再花钱
+                raise _PlanRejected()
+            if self._interaction in (InteractionMode.WORK, InteractionMode.CODING):
+                result_text = await self._autonomy_closure(user_input, result_text, context)
 
-        # 4. 质量评估
-        quality = await self.quality_assessor.evaluate(user_input, result_text, context)
+            # 4. 质量评估
+            quality = await self.quality_assessor.evaluate(user_input, result_text, context)
 
-        # 5. 反思
-        reflection = await self.reflexion.reflect(
-            user_input,
-            "success" if quality.overall_pass else "partial",
-            result_text[:2000],
-            quality,
-        )
+            # 5. 反思
+            reflection = await self.reflexion.reflect(
+                user_input,
+                "success" if quality.overall_pass else "partial",
+                result_text[:2000],
+                quality,
+            )
+        except _PlanRejected:
+            quality = QualityReport(
+                completeness=0.0, correctness=0.0, consistency=0.0,
+                hallucination_score=0.0, issues=["计划未获批准，未执行任何步骤"],
+                suggestions=[], overall_pass=False)
+            reflection = None
+        except BudgetExhaustedError as e:
+            budget_exhausted = budget_exhausted or str(e)
+            quality = QualityReport(
+                completeness=0.0, correctness=0.0, consistency=0.0,
+                hallucination_score=0.0,
+                issues=["Token 预算已用尽，未执行质量评估与反思"],
+                suggestions=[], overall_pass=False)
+            reflection = None
+            logger.warning("post_processing_budget_exhausted", error=str(e))
+        except Exception as e:
+            # v1.7.6：收尾阶段模型连不上 —— 同理降级。任务主体已经做完，
+            # 不能因为"质量评估那一次调用碰上断网"就把整轮判成失败、结果丢掉。
+            from automind.core.llm import is_transient_llm_error
+            if not is_transient_llm_error(e):
+                raise
+            quality = QualityReport(
+                completeness=0.0, correctness=0.0, consistency=0.0,
+                hallucination_score=0.0,
+                issues=["模型连接中断，未执行质量评估与反思"],
+                suggestions=[], overall_pass=False)
+            reflection = None
+            logger.warning("post_processing_llm_unavailable", error=str(e)[:200])
+
+        if budget_exhausted:
+            result_text += (
+                "\n\n——— 本轮预算已用尽 ———\n"
+                f"{budget_exhausted}\n"
+                "上面是本轮**已经真实完成**的部分，直接说「继续」即可接着往下做。")
 
         # 6. 存储交互
         assistant_msg = Message(role=Role.ASSISTANT, content=result_text)
@@ -433,7 +668,31 @@ class AutoMindAgent:
         if self.config.execution.checkpoint_enabled:
             self._agent_state.plan = self._current_plan
             self._agent_state.messages = self.context_mgr.get_context()
-            checkpoint_id = await self.checkpoint_mgr.save(self._agent_state)
+            # v1.7.7：如实标记收尾状态 —— 只有真跑完的才是 completed；
+            # 交了部分交付清单（到步数上限 / 预算 / 断线）的是 partial，可续跑
+            md = self._agent_state.metadata
+            react = self._react_progress_snapshot() if plan is None else None
+            if react is not None:
+                md["react"] = react
+            if self._current_plan is not None and getattr(self, "_plan_rejected", ""):
+                # 驳回的计划不可"续跑"—— 续跑会绕过审批直接执行它
+                md["status"] = "dismissed"
+            elif self._current_plan is not None:
+                pstat = getattr(getattr(self._current_plan, "status", None), "value", "")
+                md["status"] = "completed" if pstat == "completed" and not budget_exhausted \
+                    else "partial"
+            elif self._mode == ExecutionMode.REACT:
+                reason = getattr(getattr(self, "react_executor", None), "stop_reason", "")
+                md["stop_reason"] = reason
+                md["status"] = "completed" if reason in ("", "no_more_tools") \
+                    and not budget_exhausted else "partial"
+            else:
+                md["status"] = "completed"
+            md["finished_at"] = time.time()
+            try:
+                checkpoint_id = await self.checkpoint_mgr.save(self._agent_state)
+            except Exception as e:                     # 收尾落盘失败不该让任务失败
+                logger.warning("checkpoint_final_save_failed", error=str(e))
 
         duration = (time.perf_counter() - start_time) * 1000
 
@@ -482,11 +741,8 @@ class AutoMindAgent:
 
         out_text = result_text
         if self._workspace_plan is not None and self._workspace_plan.isolated:
-            out_text += (
-                f"\n\n---\n📁 本次任务在**会话独立工作目录**中执行："
-                f"`{self._workspace_plan.path}`\n"
-                f"（为避免并发覆盖，改动没有直接写进你的项目目录。"
-                f"需要取回产物请在该目录查看，或调用工作区导出。）")
+            out_text += self._workspace_note(self._workspace_plan)
+            await self._emit_workspace_result()
 
         return AgentResult(
             success=success,
@@ -549,6 +805,9 @@ class AutoMindAgent:
                 "LLM 未初始化。请先在「API Keys」面板配置当前提供商的 API Key。"
             )
         self.llm.reset()
+        # v1.11.10：实时用量按"这一轮提问"清零，右栏缓存命中率/上下文
+        # 才不会被上一轮的累计值带偏
+        self._reset_usage_total()
         hist = history if history is not None else self._chat_history
 
         # 多模态：含图片时，构造 OpenAI 视觉消息格式
@@ -560,11 +819,49 @@ class AutoMindAgent:
         else:
             hist.append({"role": "user", "content": user_input})
 
-        messages = [{"role": "system", "content": self.CHAT_SYSTEM_PROMPT}, *hist[-20:]]
-        response = await self.llm.generate(messages)
+        # v1.11.10：分批裁剪历史（详见 automind/core/chat_window.py）。
+        # 逐条滑窗会让前缀每轮都变，DeepSeek/GLM 的前缀缓存全部作废。
+        messages = [{"role": "system", "content": self.CHAT_SYSTEM_PROMPT},
+                    *_chat_window.chat_history_window(hist)]
+        from automind.core.exceptions import LLMContextTooLargeError
+
+        try:
+            response = await self.llm.generate(messages)
+        except LLMContextTooLargeError:
+            # v1.11.11：上下文溢出先裁一半再重试一次（只此一次，避免死循环）
+            messages = await self._chat_retry_after_overflow(messages)
+            response = await self.llm.generate(messages)
         reply = response.text or "(无回复)"
         hist.append({"role": "assistant", "content": reply})
         return reply
+
+    async def _chat_retry_after_overflow(self, messages: list[dict[str, Any]]
+                                         ) -> list[dict[str, Any]]:
+        """对话模式上下文溢出：保留 system + 后半段历史，重试一次。
+
+        ``messages[0]`` 是系统提示（必须保留）；其余截掉前半段。裁剪本身
+        会改变前缀（缓存重置一次），但总比整轮问答直接失败好。
+        """
+        if not messages:
+            return messages
+        system = messages[0]
+        tail = messages[1:]
+        keep = max(4, len(tail) // 2)
+        tail = tail[-keep:]
+        while tail and tail[0].get("role") not in ("user", "system"):
+            tail.pop(0)
+        out = [system, *tail]
+        removed = max(0, len(messages) - len(out))
+        try:
+            await self._emit({
+                "type": "context_compacted", "scope": "chat",
+                "folded": removed, "chars_reclaimed": 0, "est_tokens_saved": 0,
+                "messages": len(out), "cache_reset": True,
+            })
+        except Exception as e:                    # pragma: no cover - 纯观测
+            logger.warning("chat_compact_event_failed", error=str(e)[:200])
+        logger.warning("chat_context_overflow_retry", removed=removed, kept=len(out))
+        return out
 
     def reset_chat(self) -> None:
         """清空对话历史。"""
@@ -655,6 +952,9 @@ class AutoMindAgent:
                 "LLM 未初始化。请先在「API Keys」面板配置当前提供商的 API Key。"
             )
         self.llm.reset()
+        # v1.11.10：实时用量按"这一轮提问"清零，右栏缓存命中率/上下文
+        # 才不会被上一轮的累计值带偏
+        self._reset_usage_total()
         hist = history if history is not None else self._chat_history
 
         if images:
@@ -665,24 +965,39 @@ class AutoMindAgent:
         else:
             hist.append({"role": "user", "content": user_input})
 
-        messages = [{"role": "system", "content": self.CHAT_SYSTEM_PROMPT}, *hist[-20:]]
+        # v1.11.10：分批裁剪历史（详见 automind/core/chat_window.py）。
+        # 逐条滑窗会让前缀每轮都变，DeepSeek/GLM 的前缀缓存全部作废。
+        messages = [{"role": "system", "content": self.CHAT_SYSTEM_PROMPT},
+                    *_chat_window.chat_history_window(hist)]
 
         chunks: list[str] = []
         #: 本轮真正被并入的插话 —— 结束后要写进历史，否则下一轮它就"没发生过"
         merged: list[Interjection] = []
         rounds = 0
+        from automind.core.exceptions import LLMContextTooLargeError
+
+        context_retry_used = False
         while True:
             start = len(chunks)
             interrupted = False
-            async for delta in self.llm.generate_stream(messages):
-                chunks.append(delta)
-                yield delta
-                # 每个 delta 都看一眼队列（deque 的读取是原子的、无锁）。
-                # 不在这里 break 的话，用户要等到整段写完才可能被理会 ——
-                # 而长回答正是最需要中途纠偏的场景。
-                if self._interjections.pending() and rounds < MAX_INTERJECT_ROUNDS:
-                    interrupted = True
-                    break
+            try:
+                async for delta in self.llm.generate_stream(messages):
+                    chunks.append(delta)
+                    yield delta
+                    # 每个 delta 都看一眼队列（deque 的读取是原子的、无锁）。
+                    # 不在这里 break 的话，用户要等到整段写完才可能被理会 ——
+                    # 而长回答正是最需要中途纠偏的场景。
+                    if self._interjections.pending() and rounds < MAX_INTERJECT_ROUNDS:
+                        interrupted = True
+                        break
+            except LLMContextTooLargeError:
+                # v1.11.11：上下文溢出且**还没有输出任何内容**时，裁一半重试一次。
+                # 已经吐过字则不能重试（会把同一段内容显示两遍），如实报错。
+                if context_retry_used or chunks:
+                    raise
+                context_retry_used = True
+                messages = await self._chat_retry_after_overflow(messages)
+                continue
 
             notes = self.drain_interjections()
             if not notes:
@@ -717,18 +1032,26 @@ class AutoMindAgent:
             for n in merged:
                 hist.insert(len(hist) - 1, {"role": "user", "content": n.text})
 
-        # 流式接口通常不返回用量，这里做估算
-        try:
-            prompt_text = "".join(
-                str(m.get("content", "")) for m in messages
-                if isinstance(m.get("content"), str)
-            )
-            self._last_stream_usage = TokenUsage(
-                prompt_tokens=self.llm.token_count(prompt_text),
-                completion_tokens=self.llm.token_count(reply),
-            )
-        except Exception:
-            self._last_stream_usage = TokenUsage()
+        # 用量：优先用提供商回传的**真实 usage**（流末尾的 STREAM_USAGE 标记，
+        # 含提示缓存命中），只有拿不到时才退回本地估算。
+        #
+        # v1.11.10：此前这里恒为估算值 —— 于是对话模式的缓存命中率永远是
+        # "不知道"，而提供商其实每一轮都告诉了我们命中了多少 token。
+        real_usage = getattr(self.llm, "usage", None)
+        if isinstance(real_usage, TokenUsage) and real_usage.total > 0:
+            self._last_stream_usage = real_usage.model_copy()
+        else:
+            try:
+                prompt_text = "".join(
+                    str(m.get("content", "")) for m in messages
+                    if isinstance(m.get("content"), str)
+                )
+                self._last_stream_usage = TokenUsage(
+                    prompt_tokens=self.llm.token_count(prompt_text),
+                    completion_tokens=self.llm.token_count(reply),
+                )
+            except Exception:
+                self._last_stream_usage = TokenUsage()
 
     async def run_multi(self, task: str, on_event: Any = None) -> dict:
         """多智能体协同执行（专业版特性 multi_agent，未授权时抛 FeatureNotAvailable）。"""
@@ -738,6 +1061,7 @@ class AutoMindAgent:
         if self.llm is None:
             raise RuntimeError("LLM 未初始化，请先配置 API Key。")
         self.llm.reset()
+        self._reset_usage_total()
         if self.orchestrator is None:
             self.orchestrator = feature.create(self.llm)
         result = await self.orchestrator.run(task, context="", on_event=on_event)
@@ -755,6 +1079,10 @@ class AutoMindAgent:
         from automind.core.edition import require_feature
 
         engine = require_feature("loop_engine")
+        # v1.11.10：循环工程同样算"一次任务"，实时用量从 0 起算
+        if self.llm is not None:
+            self.llm.reset()
+        self._reset_usage_total()
         return await engine.run(self, task, on_event=on_event,
                                 max_iterations=max_iterations)
 
@@ -1005,24 +1333,72 @@ class AutoMindAgent:
                 logger.warning("event_emit_failed",
                                event_type=event.get("type"), error=str(e))
 
+    def _reset_usage_total(self) -> None:
+        """把「本次任务」的实时用量归零（v1.11.10）。
+
+        此前 ``_usage_total`` 只在构造/克隆时初始化，Web 端同一会话的多轮任务
+        复用同一个克隆实例 —— 右栏「本次 Tokens」其实是"这个会话克隆从创建
+        到现在"的累计值，与旁边「本次任务」的语义自相矛盾。每个任务入口
+        重置一次，缓存命中率/上下文占用才是"这一次"的数字。
+        """
+        self._usage_total = {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+            "cached_tokens": 0, "cache_creation_tokens": 0, "input_tokens": 0,
+            "calls": 0, "cache_hit_calls": 0, "cache_reported_calls": 0,
+            "peak_prompt_tokens": 0,
+            # v1.11.11：最近一次请求的输入量 —— 上下文压力压缩看它（不是峰值，
+            # 否则压缩后峰值不降、会在下一次调用又触发一次压缩）
+            "last_prompt_tokens": 0,
+        }
+
+    def _context_window_tokens(self) -> int:
+        """上下文使用率的分母：短期记忆上限（与专业版统计口径一致）。
+
+        这是**预算口径**而非各模型的真实窗口 —— 不同模型窗口大小各异，
+        用配置值至少保证"同一个数字在社区版/专业版里含义相同"，
+        用户也能在设置里按自己的模型调。
+        """
+        try:
+            value = int(getattr(self.config.memory, "short_term_max_tokens", 0) or 0)
+        except Exception:
+            value = 0
+        return value or 128000
+
     def _attach_usage_sink(self) -> None:
         """把 LLM 的用量回调接到事件流上，每次调用结束推 usage_update。
 
         此前流式回答的 token 数只在整段生成完、解析 `<!--STREAM_USAGE:-->`
         标记时才更新一次；长回答期间界面上一直显示 0，看起来像没在计费。
         现在每次 LLM 调用（含流式）结束都推一条，前端累加即可实时显示。
+
+        v1.11.10：累计值里补上提示缓存命中与上下文峰值 —— 右栏的
+        「缓存命中率 / 上下文使用率」两块实时统计都由这条事件驱动。
         """
         if self.llm is None:
             return
-        self._usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
-                             "total_tokens": 0, "calls": 0}
+        self._reset_usage_total()
 
         async def _sink(usage: dict) -> None:
             t = self._usage_total
-            t["prompt_tokens"] += usage.get("prompt_tokens", 0)
-            t["completion_tokens"] += usage.get("completion_tokens", 0)
-            t["total_tokens"] += usage.get("total_tokens", 0)
+            prompt = int(usage.get("prompt_tokens", 0) or 0)
+            input_total = int(usage.get("input_tokens", 0) or 0) or prompt
+            cached = int(usage.get("cached_tokens", 0) or 0)
+            t["prompt_tokens"] += prompt
+            t["completion_tokens"] += int(usage.get("completion_tokens", 0) or 0)
+            t["total_tokens"] += int(usage.get("total_tokens", 0) or 0)
+            t["cached_tokens"] += cached
+            t["cache_creation_tokens"] += int(
+                usage.get("cache_creation_tokens", 0) or 0)
+            t["input_tokens"] += input_total
             t["calls"] += 1
+            if cached > 0:
+                t["cache_hit_calls"] += 1
+            if usage.get("cache_reported"):
+                t["cache_reported_calls"] += 1
+            # 上下文占用看的是"单次请求的输入有多大"，不是累加花销 ——
+            # 后者会随着步数线性增长，永远超过窗口，看着像快溢出了。
+            t["peak_prompt_tokens"] = max(t["peak_prompt_tokens"], input_total)
+            t["last_prompt_tokens"] = input_total
             # 同步记进 ResourceManager —— 不记账，预算检查就永远看到 0。
             #
             # v1.7.3：此前这里写的是 ``tokens_used.prompt`` / ``.completion``，
@@ -1033,10 +1409,25 @@ class AutoMindAgent:
             # tests/core/test_token_budget_chain.py 盯着真实回调路径。
             rm = getattr(self, "resources", None)
             if rm is not None:
-                rm.tokens.track_usage(usage.get("prompt_tokens", 0),
-                                      usage.get("completion_tokens", 0))
-            await self._emit({"type": "usage_update", "delta": usage,
-                              "cumulative": dict(t)})
+                rm.tokens.track_usage(prompt, usage.get("completion_tokens", 0))
+            # 没有缓存字段的提供商（Ollama / 部分中转）命中率是 None，
+            # 前端据此显示"—"，不要拿 0 冒充满分失败的假数字。
+            # 注意分母/分子都用**累计值**：用本次调用的值会让第二次调用
+            # 一命中就把整轮命中率刷成 0（右栏数字会来回跳）。
+            rate = (round(t["cached_tokens"] / t["input_tokens"] * 100, 1)
+                    if t["input_tokens"] and t["cache_reported_calls"] else None)
+            cum = dict(t)
+            cum["cache_rate"] = rate
+            ctx_max = self._context_window_tokens()
+            peak = t["peak_prompt_tokens"]
+            await self._emit({
+                "type": "usage_update", "delta": usage, "cumulative": cum,
+                "context": {
+                    "used": peak,
+                    "max": ctx_max,
+                    "pct": round(peak / ctx_max * 100, 1) if ctx_max else 0,
+                },
+            })
 
         self.llm.usage_sink = _sink
 
@@ -1049,15 +1440,25 @@ class AutoMindAgent:
               · ≥ 100%    —— 推 budget_exceeded 并**拒绝本次调用**，避免
                 预算保护形同虚设、账单无上限地涨下去。
             """
+            # v1.11.11：先看上下文窗口压力（与预算闸相互独立）。放在预算
+            # 判断之前，是为了在"钱包还够、但这一轮已经塞不下"时先自救。
+            await self._maybe_compact_for_context()
             rm = getattr(self, "resources", None)
             if rm is None:
                 return
             frac = rm.tokens.usage_fraction()
+            if frac >= 1.0 and await self._roll_budget_window():
+                # v1.11.0：开了新窗口 —— 用量已归零，本次调用照常放行
+                frac = rm.tokens.usage_fraction()
             if frac >= 1.0:
                 await self._emit({
                     "type": "budget_exceeded",
                     "used": rm.tokens.tokens_used.total,
                     "budget": rm.tokens.budget,
+                    "total_used": getattr(self, "_budget_spent_prior", 0)
+                    + rm.tokens.tokens_used.total,
+                    "windows": getattr(self, "_budget_windows_used", 0) + 1,
+                    "auto_continue": self._budget_auto_continue(),
                 })
                 logger.error("token_budget_exhausted",
                              used=rm.tokens.tokens_used.total, budget=rm.tokens.budget)
@@ -1069,6 +1470,9 @@ class AutoMindAgent:
                         "used": rm.tokens.tokens_used.total,
                         "budget": rm.tokens.budget,
                         "percent": round(frac * 100, 1),
+                        "window": getattr(self, "_budget_windows_used", 0) + 1,
+                        "windows_left": max(0, self._budget_auto_continue()
+                                            - getattr(self, "_budget_windows_used", 0)),
                     })
                     logger.warning("token_budget_high", percent=round(frac * 100, 1))
                 # 压缩可以反复做（ReAct 那条路是纯本地折叠，不花钱），
@@ -1096,7 +1500,82 @@ class AutoMindAgent:
     #: 用量到达该比例即预警并尝试压缩上下文
     _BUDGET_WARN_AT = 0.8
 
-    async def _compress_context(self) -> None:
+    def _budget_auto_continue(self) -> int:
+        """预算窗口用尽后最多再续开几个窗口（0 = 不续开）。"""
+        try:
+            return max(0, int(getattr(self.config.execution, "budget_auto_continue", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _reset_budget_windows(self) -> None:
+        """任务开始时把预算窗口状态归零（每个任务一份）。"""
+        self._budget_windows_used = 0
+        self._budget_spent_prior = 0
+        self._deadline_shift = 0.0
+        # v1.11.11：上下文压力压缩的触发点也按任务重置，否则新一轮任务会
+        # 被上一轮的大 prompt 阈值挡住、迟迟不压。
+        self._last_context_compact_prompt = 0
+        self._sync_deadline_shift()
+
+    def _sync_deadline_shift(self) -> None:
+        """把墙钟顺延量推给执行器（它们持有的是任务开始时的截止时刻）。"""
+        for name in ("react_executor", "plan_executor"):
+            ex = getattr(self, name, None)
+            if ex is not None:
+                try:
+                    ex.deadline_shift = self._deadline_shift
+                except Exception:              # pragma: no cover - 只读替身
+                    pass
+
+    async def _roll_budget_window(self) -> bool:
+        """当前预算窗口用尽 → 压缩上下文并开一个新窗口（v1.11.0）。
+
+        返回 True 表示已续开（调用方照常放行本次模型调用），False 表示
+        续开次数已用完 / 已关闭续跑，按原路径交部分交付清单。
+
+        这修的是"长任务到 50 万 token 就中断"：此前窗口一满就收尾，用户只能
+        手动说"继续"；而真长任务（几百步的重构、批量处理）每段都会撞上。
+        续开前先压缩上下文 —— 新窗口不该把上一个窗口的全部观察原样重发一遍。
+        """
+        rm = getattr(self, "resources", None)
+        cap = self._budget_auto_continue()
+        if rm is None or cap <= 0 or getattr(self, "_budget_windows_used", 0) >= cap:
+            return False
+        if not hasattr(self, "_budget_windows_used"):    # 轻量替身 / 老快照
+            self._budget_windows_used, self._budget_spent_prior = 0, 0
+            self._deadline_shift = 0.0
+        try:
+            await self._compress_context()
+        except Exception as e:                 # 压缩失败不影响续开
+            logger.warning("budget_window_compress_failed", error=str(e)[:200])
+        self._budget_spent_prior += rm.tokens.tokens_used.total
+        rm.tokens.reset()
+        self._budget_windows_used += 1
+        self._budget_warned = False
+        self._next_compact_at = self._BUDGET_WARN_AT
+        # 墙钟预算同步顺延一份：否则续开的窗口很快又撞上 max_task_seconds
+        try:
+            secs = float(getattr(self.config.execution, "max_task_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            secs = 0.0
+        extended = 0.0
+        if secs > 0 and getattr(self, "_task_deadline", None) is not None:
+            self._deadline_shift += secs
+            extended = secs
+            self._sync_deadline_shift()
+        logger.info("budget_window_rolled", window=self._budget_windows_used + 1,
+                    max_windows=cap + 1, total_used=self._budget_spent_prior)
+        await self._emit({
+            "type": "budget_window",
+            "window": self._budget_windows_used + 1,
+            "max_windows": cap + 1,
+            "budget": rm.tokens.budget,
+            "total_used": self._budget_spent_prior,
+            "deadline_extended_s": extended,
+        })
+        return True
+
+    async def _compress_context(self, force: bool = False) -> dict[str, Any]:
         """预算吃紧时压缩**真正会被重发的那份上下文**。
 
         v1.6.2 之前这里只压 ContextManager —— 而 ContextManager 存的是
@@ -1115,38 +1594,186 @@ class AutoMindAgent:
         # 必须是**正在跑**的那个执行器：任务跑完后 messages 还留着，
         # 去折叠一份不会再发出去的旧列表，等于什么都没省。
         if ex is not None and getattr(ex, "running", False) and ex.messages:
-            stat = None
+            stat: dict[str, Any] | None = None
             try:
                 stat = ex.compact()
                 logger.info("react_context_compacted_for_budget", **stat)
             except Exception as e:
                 logger.warning("react_compact_failed", error=str(e))
-            if stat and stat.get("folded"):
-                # 事件推送失败不能把"已经省下来了"这个事实一起吞掉 ——
-                # 否则又会退回去花钱做一次无用的摘要。
-                try:
-                    await self._emit({"type": "context_compacted",
-                                      "scope": "react", **stat})
-                except Exception as e:
-                    logger.warning("compact_event_emit_failed", error=str(e))
-                return   # 已经省下来了，不必再花钱做摘要
+                return {"ok": False, "scope": "react", "folded": 0,
+                        "chars_reclaimed": 0, "est_tokens_saved": 0,
+                        "messages": len(ex.messages), "error": str(e)[:300]}
+            if stat is not None:
+                # v1.11.10：**无论折没折到东西都到此为止**。
+                # 旧实现只在 folded>0 时返回，否则继续往下走 ContextManager
+                # 摘要压缩 —— 而 ReAct 在跑时那份流水账从未进过请求体，
+                # 摘要一个 token 也省不下来，还要付一次模型调用（且是一次
+                # 0% 缓存命中的一次性提示，直接把本次任务的命中率拉低）。
+                if stat.get("folded"):
+                    # 事件推送失败不能把"已经省下来了"这个事实一起吞掉。
+                    try:
+                        await self._emit({"type": "context_compacted",
+                                          "scope": "react",
+                                          # 折叠改写了早先的 tool 消息 ⇒ 下一轮
+                                          # 前缀缓存会整体重置一次。写明这件事，
+                                          # 免得用户看到命中率骤降以为出错。
+                                          "cache_reset": True, **stat})
+                    except Exception as e:
+                        logger.warning("compact_event_emit_failed", error=str(e))
+                else:
+                    logger.info("react_compact_noop", messages=len(ex.messages))
+                return {"ok": True, "scope": "react", **stat}
         try:
             mgr = getattr(self, "context_mgr", None)
             fn = getattr(mgr, "compress", None)
             if not callable(fn):
-                return
+                return {"ok": False, "scope": "none", "folded": 0,
+                        "chars_reclaimed": 0, "est_tokens_saved": 0,
+                        "messages": 0, "error": "没有可压缩的上下文"}
             import inspect
             r = fn(self.llm)
             if inspect.isawaitable(r):
                 await r
             logger.info("context_compressed_for_budget")
+            return {"ok": True, "scope": "context", "folded": 0,
+                    "chars_reclaimed": 0, "est_tokens_saved": 0,
+                    "messages": len(getattr(mgr, "_messages", []) or [])}
         except Exception as e:
             logger.warning("context_compress_failed", error=str(e))
+            return {"ok": False, "scope": "context", "folded": 0,
+                    "chars_reclaimed": 0, "est_tokens_saved": 0,
+                    "messages": 0, "error": str(e)[:300]}
+
+    async def _maybe_compact_for_context(self) -> None:
+        """上下文窗口压力触发压缩（v1.11.11）。
+
+        与"任务累计 token 预算"是两条独立的闸门：预算闸管的是"别烧太多钱"，
+        这里管的是"单次请求别把窗口撑爆"。只在 ReAct 正在跑时触发；并且
+        要求比上次触发点再涨 5% 窗口才压第二次 —— 压缩会重置前缀缓存，
+        压得太勤反而更贵、更容易打乱模型。
+        """
+        try:
+            ratio = float(getattr(self.config.execution, "context_compact_ratio", 0.8) or 0)
+        except (TypeError, ValueError):
+            ratio = 0.8
+        if ratio <= 0:
+            return
+        ex = getattr(self, "react_executor", None)
+        if ex is None or not getattr(ex, "running", False) or not ex.messages:
+            return
+        used = int((getattr(self, "_usage_total", {}) or {}).get("last_prompt_tokens", 0) or 0)
+        window = self._context_window_tokens()
+        if used <= 0 or window <= 0:
+            return
+        if used < int(window * ratio):
+            return
+        last = int(getattr(self, "_last_context_compact_prompt", 0) or 0)
+        if used < last + int(window * 0.05):
+            return
+        self._last_context_compact_prompt = used
+        try:
+            await self._emit({
+                "type": "context_pressure",
+                "used": used,
+                "max": window,
+                "percent": round(used / window * 100, 1),
+            })
+        except Exception as e:                    # pragma: no cover - 纯观测
+            logger.warning("context_pressure_emit_failed", error=str(e)[:200])
+        logger.info("context_pressure_compact", used=used, window=window,
+                    percent=round(used / window * 100, 1))
+        await self._compress_context(force=True)
+
+    async def force_compact(self) -> dict[str, Any]:
+        """手动压缩（Web `/compact` / CLI 命令 / 服务端 WS compact 动作）。"""
+        return await self._compress_context(force=True)
+
+    #: 按步落盘的最小间隔（秒）。写的是完整消息列表，太密会把磁盘写爆，
+    #: 太疏则会丢掉太多进度 —— 15 秒是"崩溃最多重做一两个动作"的量级。
+    _CHECKPOINT_MIN_INTERVAL = 15.0
+
+    def _begin_checkpoint_record(self, user_input: str) -> None:
+        """每个任务开头重置检查点里的"任务身份"（v1.7.7）。
+
+        * ``_current_plan`` 清空：会话克隆跨任务复用，上一轮计划任务留下的
+          计划若不清，ReAct 任务的检查点会带着它 —— 续跑时就会去跑上一个任务。
+        * metadata 记下**原始任务文本**、交互模式与 ``status=running``：Web 端
+          靠它判断"这个会话最后一个任务有没有跑完"，续跑时也用它作为任务原文
+          （而不是把续跑提示再套一层，那会越套越长）。
+        """
+        self._current_plan = None
+        self._agent_state.plan = None
+        origin = getattr(self, "_resume_origin", None) or {}
+        self._agent_state.metadata = {
+            "task": str(origin.get("task") or user_input)[:4000],
+            "interaction": getattr(self._interaction, "value", str(self._interaction)),
+            "mode": getattr(self._mode, "value", str(self._mode)),
+            "status": "running",
+            "started_at": time.time(),
+            **({"resumed_from": origin["checkpoint"]} if origin.get("checkpoint") else {}),
+        }
+
+    def _react_progress_snapshot(self) -> dict[str, Any] | None:
+        """ReAct 执行器当前的真实进度（已完成动作 / 产物 / 卡点），供续跑用。"""
+        ex = getattr(self, "react_executor", None)
+        if ex is None or not getattr(ex, "actions", None):
+            return None
+        try:
+            rep = ex.partial_report(self._agent_state.metadata.get("task", ""))
+        except Exception:                               # pragma: no cover
+            return None
+        keep = ("stop_reason", "interrupted_reason", "iterations_used", "completed_actions",
+                "failed_actions", "artifacts", "open_failures", "actions", "last_thought")
+        return {k: rep.get(k) for k in keep}
+
+    async def _maybe_checkpoint(self, force: bool = False) -> str:
+        """执行**途中**按步落盘（v1.7.5）。
+
+        修复前检查点只在 ``_run_impl_bound`` 的最后一步写一次 —— 那等于
+        "任务确实跑完了才留下记录"，崩溃/被杀时什么都留不下，所谓断点续跑
+        因此无从谈起。现在每个步骤结束后写一次，并用最小间隔节流。
+
+        **整体包在 try 里**：检查点是尽力而为的旁路，任何失败（包括属性缺失、
+        磁盘满、状态不可序列化）都只能记一条日志，绝不能把正在跑的任务弄失败。
+        """
+        try:
+            return await self._checkpoint_now(force)
+        except Exception as e:                        # pragma: no cover - 纯旁路
+            logger.warning("checkpoint_sidepath_failed", error=str(e))
+            return ""
+
+    async def _checkpoint_now(self, force: bool = False) -> str:
+        if not getattr(self.config.execution, "checkpoint_enabled", True):
+            return ""
+        # 用 getattr 取节流状态：会话克隆是 object.__new__ 造出来的、属性靠
+        # 手工清单复制，漏一个就会在这里抛 AttributeError（v1.7.5 真发生过：
+        # Web 端每次跑任务都失败）。旁路代码不该因为一个没同步的字段就炸掉主流程。
+        last = float(getattr(self, "_last_checkpoint_at", 0.0) or 0.0)
+        now = time.monotonic()
+        if not force and (now - last) < self._CHECKPOINT_MIN_INTERVAL:
+            return ""
+        self._last_checkpoint_at = now
+        self._agent_state.plan = self._current_plan
+        self._agent_state.messages = self.context_mgr.get_context()
+        if self.llm is not None:
+            self._agent_state.token_usage = self.llm.usage
+        react = self._react_progress_snapshot()
+        if react is not None:
+            self._agent_state.metadata["react"] = react
+        cid = await self.checkpoint_mgr.save(self._agent_state)
+
+        # 定期裁剪：prune() 此前**没有任何调用者**，检查点会无限增长。
+        self._checkpoint_saves = int(getattr(self, "_checkpoint_saves", 0)) + 1
+        if self._checkpoint_saves % 10 == 0:
+            try:
+                await self.checkpoint_mgr.prune()
+            except Exception as e:                    # pragma: no cover - 纯旁路
+                logger.warning("checkpoint_prune_failed", error=str(e))
+        return cid
 
     def _react_callbacks(self, tag: int | None = None):
         """构造 ReAct 的思考/行动回调，转发到 event_sink。"""
         step = {"n": 0}
-
         async def on_thought(text: str) -> None:
             step["n"] += 1
             await self._emit({"type": "step_thought", "iter": tag,
@@ -1154,6 +1781,8 @@ class AutoMindAgent:
 
         async def on_action(tc, result) -> None:
             out = result.output if result.success else result.error
+            # v1.7.5：ReAct 路径按步落盘（节流在 _maybe_checkpoint 里）
+            await self._maybe_checkpoint()
             # 浏览器/截图工具：把 base64 截图单独推给前端渲染 —— 让"网页交互效果"
             # 直接可视化在对话框里（step_action 的 output 是 600 字文本，塞不下图片）。
             preview = self._extract_screenshot(result)
@@ -1174,15 +1803,20 @@ class AutoMindAgent:
             # 失败原因被淹没在流水里。前端据此标红并给出原因。
             if not result.success:
                 ex = getattr(self, "react_executor", None)
-                streak = 0
+                st: dict = {}
                 if ex is not None:
-                    streak = (getattr(ex, "_tool_failures", {})
-                              .get(tc.name, {}).get("streak", 0))
+                    st = getattr(ex, "_tool_failures", {}).get(tc.name, {}) or {}
+                network = bool(st.get("network"))
+                streak = int(st.get("net_streak" if network else "streak", 0) or 0)
+                md = getattr(result, "metadata", None) or {}
                 await self._emit({
                     "type": "tool_error", "tool": tc.name,
                     "error": str(result.error or "")[:600],
                     "streak": streak,
-                    "circuit_open": streak >= getattr(
+                    # v1.11.6：网络类失败单独标出 —— 界面显示"网络中断，恢复后自动放行"
+                    "network": network,
+                    "net_retries": int(md.get("net_retries", 0) or 0),
+                    "circuit_open": int(st.get("streak", 0) or 0) >= getattr(
                         type(ex), "FAILURE_THRESHOLD", 3) if ex else False,
                 })
 
@@ -1243,8 +1877,15 @@ class AutoMindAgent:
             await self._emit({"type": "preflight_warning", **report})
         return report
 
-    async def _run_react(self, task: str, context: str) -> str:
-        """ReAct 模式执行。"""
+    async def _run_react(self, task: str, context: str, *,
+                         memory_note: str = "") -> str:
+        """ReAct 模式执行。
+
+        ``memory_note`` 是每个任务都可能变化的记忆片段（v1.11.10）。它与
+        环境信息分成两条 system 消息：环境在前、记忆在后 —— 这样"系统提示 +
+        工具目录 + 环境"这段前缀在多个任务之间保持不变，DeepSeek / GLM 的
+        自动前缀缓存才能跨任务命中。
+        """
         from automind.tools.output_budget import limits_from_config
 
         ex = self.config.execution
@@ -1276,6 +1917,8 @@ class AutoMindAgent:
             # 传的是**取值函数**而不是队列本身 —— 会话克隆各自有队列，
             # 取值时机由执行器决定，两者解耦。
             interjection_source=self.drain_interjections,
+            # v1.11.0：输入框引用的 MCP 连接器 / 技能工具 —— 必须下发给模型
+            prefer_tools=list(getattr(self, "prefer_tools", None) or []),
         )
         # 编程模式下注入面向编程的引导
         if self._interaction == InteractionMode.CODING:
@@ -1284,7 +1927,8 @@ class AutoMindAgent:
         text = await self.react_executor.run(
             task, context, on_thought=on_thought, on_action=on_action,
             on_no_progress=self._emit, deadline=self._task_deadline,
-            on_timeout=self._emit, on_interjection=self._emit)
+            on_timeout=self._emit, on_interjection=self._emit,
+            on_reconnect=self._emit, memory_note=memory_note)
         # 省 token 总账推给观测/前端：让"长任务越跑越省"看得见、可调参
         try:
             rep = self.react_executor.token_report()
@@ -1292,6 +1936,116 @@ class AutoMindAgent:
         except Exception as e:                    # pragma: no cover - 纯观测
             logger.warning("react_savings_emit_failed", error=str(e))
         return text
+
+    async def run_subtask(self, task: str, *,
+                          allowed_tools: list[str] | None = None,
+                          max_steps: int = 20,
+                          max_tokens: int = 60_000,
+                          event_sink: Any = None,
+                          approval_callback: Any = None) -> dict[str, Any]:
+        """在受限工具集与独立预算下跑一个**子任务**（v1.11.11，专业版子智能体用）。
+
+        与 ``run()`` 的区别：
+          · 只跑 ReAct 循环，不做计划 / 质量评估 / 反思（子任务要快、要可预期）；
+          · 工具白名单之外的工具不可见（复用工作流 agent 步骤的受限注册表）；
+          · token 预算独立（子任务的失败不应吃掉父任务的预算）；
+          · 委派深度 +1：工具层据此禁止子智能体继续委派或向用户提问。
+
+        返回 ``{success, output, steps, tokens, stop_reason, error}``。
+        绝不抛异常（除取消外）：子智能体失败要作为结果交回父级，而不是把父级带崩。
+        """
+        import asyncio
+
+        from automind.core import session_ctx as _sctx
+        from automind.planning.react_executor import ReActExecutor
+        from automind.tools.output_budget import limits_from_config
+        from automind.workflow.agent_step import RestrictedToolRegistry
+
+        if self.llm is None:
+            return {"success": False, "output": "", "steps": 0, "tokens": 0,
+                    "stop_reason": "no_llm",
+                    "error": "子任务无法开始：模型未初始化（检查 API Key）"}
+        # 工具范围：显式白名单优先；未指定 = **只读 SAFE 工具**（子任务默认
+        # 不该有写盘/执行命令的能力，父级要用写工具必须显式点名）。
+        if allowed_tools is None:
+            from automind.core.types import PermissionTier as _Tier
+
+            # 子智能体默认不给"父任务专属"的交互/编排工具：
+            #   · ask_user_question —— 子级没有回答界面，工具层也会拒绝；
+            #   · todo_write —— 待办属于父会话，子任务改它只会制造混乱；
+            #   · subagent* —— 嵌套委派由深度上限显式拒绝（这里连 schema 都不发）。
+            _exclusive = {"ask_user_question", "todo_write", "todo_read", "todo_clear"}
+            allowed_tools = [
+                t.name for t in self.tool_registry.list_all()
+                if getattr(t, "permission_tier", None) == _Tier.SAFE
+                and t.name not in _exclusive
+                and not str(t.name).startswith("subagent")
+            ]
+        elif not allowed_tools:
+            return {"success": False, "output": "", "steps": 0, "tokens": 0,
+                    "stop_reason": "bad_args",
+                    "error": "allowed_tools 为空：子智能体将没有任何工具可用；"
+                             "不需要限制时请省略该参数（默认只给只读工具）"}
+        registry = (RestrictedToolRegistry(self.tool_registry, allowed_tools)
+                    if allowed_tools else self.tool_registry)
+        ex_cfg = self.config.execution
+        old_sink = self.event_sink
+        old_budget = getattr(getattr(self, "resources", None), "tokens", None)
+        old_budget_value = getattr(old_budget, "budget", None)
+        try:
+            if event_sink is not None:
+                self.event_sink = event_sink
+            if old_budget is not None and int(max_tokens or 0) > 0:
+                old_budget.budget = int(max_tokens)
+            self.llm.reset()
+            self._reset_usage_total()
+            executor = ReActExecutor(
+                self.llm, registry,
+                max_iterations=max(1, int(max_steps or 20)),
+                permissions=self.permissions,
+                approval_cb=approval_callback,
+                # 子任务不做 TDD 自动验证/质量评估：副作用越少越可预期
+                auto_validate=False,
+                tool_budget=getattr(ex_cfg, "react_tool_budget", 14),
+                output_limits=limits_from_config(ex_cfg),
+                obs_keep_chars=(getattr(ex_cfg, "compact_keep_obs_chars", 0) or None),
+                interjection_source=self.drain_interjections,
+            )
+            sid = getattr(self, "session_id", "") or "default"
+            depth = int(getattr(self, "_subagent_depth", 0))
+            with _sctx.bind_session(
+                    sid, run_id=_sctx.new_run_id("sub"),
+                    workspace=_sctx.workspace(),
+                    sink=self._emit if self.event_sink is not None else None,
+                    project_root=self.config.project_root), \
+                    _sctx.bind_agent(self, depth=depth + 1):
+                text = await executor.run(
+                    task, "",
+                    on_thought=None, on_action=None,
+                    on_no_progress=self._emit, on_timeout=self._emit,
+                    on_interjection=self._emit, on_reconnect=self._emit)
+            success = executor.stop_reason in ("no_more_tools", "done")
+            return {
+                "success": bool(success),
+                "output": text or "",
+                "steps": int(getattr(executor, "iterations_used", 0)),
+                "tokens": int(getattr(getattr(self.llm, "usage", None), "total", 0) or 0),
+                "stop_reason": executor.stop_reason or "unknown",
+                "error": "" if success else (
+                    executor.interrupted_reason
+                    or f"子任务未正常完成（stop_reason={executor.stop_reason}）")[:400],
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:                    # pragma: no cover - 防御性
+            logger.warning("subtask_failed", error=f"{type(e).__name__}: {e}"[:300])
+            return {"success": False, "output": "", "steps": 0, "tokens": 0,
+                    "stop_reason": "error",
+                    "error": f"{type(e).__name__}: {e}"[:400]}
+        finally:
+            self.event_sink = old_sink
+            if old_budget is not None and old_budget_value is not None:
+                old_budget.budget = old_budget_value
 
     async def _run_plan_execute(self, task: str, context: str) -> tuple[HierarchicalPlan, list[Any]]:
         """Plan-and-Execute 模式执行。"""
@@ -1310,6 +2064,80 @@ class AutoMindAgent:
         plan = await self.hierarchical_planner.plan(task, context, tools)
         self._current_plan = plan
 
+        # v1.11.0 计划模式：先交人审，批准才执行（驳回 = 一步都不执行）
+        self._plan_rejected = ""
+        if getattr(self, "plan_review_cb", None) is not None:
+            plan = await self._review_plan(task, context, tools, plan)
+            self._current_plan = plan
+            if self._plan_rejected:
+                return plan, []
+
+        steps = await self._execute_plan(plan)
+        return plan, steps
+
+    @staticmethod
+    def _plan_text(plan: HierarchicalPlan) -> str:
+        """计划的叶子步骤，一行一步（审批弹窗展示 / 用户就地修改用）。"""
+        rows = []
+        for i, g in enumerate(plan.root_goal.leaf_goals(), 1):
+            tool = g.assigned_action.tool_name if g.assigned_action else ""
+            rows.append(f"{i}. {g.description}" + (f" [{tool}]" if tool else ""))
+        return "\n".join(rows)
+
+    async def _review_plan(self, task: str, context: str, tools: list[str],
+                           plan: HierarchicalPlan) -> HierarchicalPlan:
+        """计划模式（v1.11.0）：把计划交给人批准 —— 批准 / 修改后执行 / 放弃。
+
+        此前工作模式生成计划后**立即自动执行**，没有任何"等你看一眼"的停点：
+        计划方向错了，只能眼看着它一步步做下去再停止。这里在执行前插一道闸：
+
+        * 批准 → 按原计划执行；
+        * 修改后批准 → 以用户改过的步骤为准重新规划一次再执行（不再二次审批：
+          用户刚亲手改过，再弹一次是打扰）；
+        * 拒绝 / 超时按拒绝 / 审批通道异常 → 一步都不执行（fail-closed），
+          原因写进 ``_plan_rejected``，由收尾路径如实交代。
+        """
+        from automind.state.human_loop import ApprovalOutcome
+
+        text = self._plan_text(plan)
+        n = len(plan.root_goal.leaf_goals())
+        await self._emit({"type": "plan_review", "state": "waiting", "steps": n})
+        try:
+            raw = await self.plan_review_cb(
+                "plan_review", {"plan": text}, "plan",
+                f"计划模式：已生成 {n} 步计划，批准后才会开始执行。"
+                "可直接批准、修改步骤后批准，或放弃。")
+            outcome = ApprovalOutcome.normalize(raw)
+        except Exception as e:
+            logger.warning("plan_review_failed", error=str(e)[:200])
+            outcome = ApprovalOutcome(approved=False, comment=f"计划审批通道异常：{e}")
+        if not outcome.approved:
+            self._plan_rejected = outcome.comment or "你没有批准这份计划"
+            await self._emit({"type": "plan_review", "state": "rejected", "steps": n,
+                              "reason": self._plan_rejected})
+            logger.info("plan_review_rejected", reason=self._plan_rejected[:200])
+            return plan
+        edited = (outcome.arguments or {}).get("plan")
+        if isinstance(edited, str) and edited.strip() and edited.strip() != text.strip():
+            await self._emit({"type": "plan_review", "state": "replanning", "steps": n})
+            constrained = (f"{task}\n\n【用户审阅后修改的执行计划】请严格按下面的步骤"
+                           f"（顺序与范围）重新规划并执行，不要增加用户删掉的步骤：\n{edited.strip()}")
+            plan = await self.hierarchical_planner.plan(constrained, context, tools)
+            await self._emit({"type": "plan_review", "state": "approved", "edited": True,
+                              "steps": len(plan.root_goal.leaf_goals())})
+            return plan
+        await self._emit({"type": "plan_review", "state": "approved", "edited": False,
+                          "steps": n})
+        return plan
+
+    async def _execute_plan(self, plan: HierarchicalPlan) -> list[Any]:
+        """执行一份**已经存在**的计划。
+
+        v1.7.5 从 ``_run_plan_execute`` 里拆出来：断点续跑必须接着跑**原来
+        那份计划**（已完成的目标保持 COMPLETED，执行器自然会跳过它们），
+        而不是重新规划一遍 —— 后者会把已经做完的步骤原样再做一次，
+        那正是修复前 ``resume_from_checkpoint`` 的行为。
+        """
         # 推送计划已生成事件（含叶子步骤），供前端实时展示
         leaves = plan.root_goal.leaf_goals()
         # Goal 只存 children，父指针需现推 —— 观测中心用它还原真实的计划层级
@@ -1357,7 +2185,7 @@ class AutoMindAgent:
             deadline=self._task_deadline,
         )
 
-        return plan, report.steps
+        return list(report.steps)
 
     # ═══════════════════════════════════════════════════════════
     # 回调
@@ -1382,6 +2210,8 @@ class AutoMindAgent:
                            status="fail", error=step_result.error or "")
         if getattr(self, "_active_goal_id", None) == step_result.goal_id:
             self._active_goal_id = None
+        # v1.7.5：计划路径同样按步落盘（见 _maybe_checkpoint 的说明）
+        await self._maybe_checkpoint()
         await self._emit({"type": "plan_step_end",
                           "goal_id": step_result.goal_id,
                           "description": step_result.goal_description,
@@ -1565,6 +2395,9 @@ class AutoMindAgent:
         "checkpoint_mgr", "hooks", "plugin_manager",
         # 注册失败的账目与工具注册表同源：克隆只读它，不该各自一份
         "tool_registration_failures",
+        # v1.7.5：内置工具名单是只读的 frozenset，与共享的工具注册表同源。
+        # 缺了它，克隆会话的界面会把内置工具与 MCP/插件工具混为一谈。
+        "builtin_tool_names",
     )
 
     def clone_for_session(self) -> AutoMindAgent:
@@ -1603,12 +2436,19 @@ class AutoMindAgent:
         clone.event_sink = None
         clone.approval_callback = None
         clone._active_goal_id = None
+        # v1.11.11：补充工具/压缩相关的执行态也按会话隔离（与 __init__ 对齐，
+        # 否则 clone parity 会漏属性）
+        clone._subagent_depth = 0
+        clone._last_context_compact_prompt = 0
         clone._usage_total = {"prompt_tokens": 0, "completion_tokens": 0,
                               "total_tokens": 0, "calls": 0}
         clone._budget_warned = False
         clone._next_compact_at = self._BUDGET_WARN_AT
+        clone._budget_windows_used = 0
+        clone._budget_spent_prior = 0
+        clone._deadline_shift = 0.0
         clone.llm = clone._init_llm()
-        clone.resources = ResourceManager(token_budget=clone.config.llm.max_tokens * 10)
+        clone.resources = ResourceManager(token_budget=_task_token_budget(clone.config))
         clone._attach_usage_sink()
 
         # ── 独享：权限 / 上下文 / 规划 / 反思 ──
@@ -1629,6 +2469,7 @@ class AutoMindAgent:
             parallel=clone.config.execution.parallel_execution,
             use_cache=clone.config.execution.subtask_cache,
             goal_timeout=getattr(clone.config.execution, "goal_timeout_seconds", 900.0),
+            retry_delay=getattr(clone.config.execution, "retry_delay_seconds", 2.0),
         )
         clone.fn_handler = FunctionCallHandler(clone.tool_registry)
         clone.quality_assessor = QualityAssessor(clone.llm)
@@ -1644,6 +2485,25 @@ class AutoMindAgent:
         clone._mode = self._mode
         clone._interaction = self._interaction
         clone._chat_history = []
+        # 检查点的节流状态按会话各自独立（checkpoint_mgr 是共享的，节流不是）：
+        # 漏了这两个属性会让**每一次 Web 会话跑任务**都在按步落盘时抛
+        # AttributeError —— 这类"只在克隆路径上暴露"的漏项必须与 __init__ 同步，
+        # 见 tests/planning/test_agent_clone_parity.py 的自动比对用例。
+        clone._last_checkpoint_at = 0.0
+        clone._checkpoint_saves = 0
+        # 每次运行的状态同样要显式给出：
+        #   · `_task_deadline` 目前在 _run_impl_bound 里会被无条件赋值，
+        #     但依赖"别处一定会先赋值"是脆弱契约，显式初始化更安全；
+        #   · `_verify_state` **是真会踩到的**：收尾时 `if self._verify_state:`
+        #     读它，而它只在 _autonomy_closure 里被赋值 —— 对话模式下不会被赋值，
+        #     于是克隆会话每次收尾都抛 AttributeError。外面那层 try 只记一条
+        #     `run_summary_emit_failed` 就把整条 run_summary 事件吞掉了 ——
+        #     不报错、也不可见，正是最难发现的那类退化。
+        clone._task_deadline = None
+        clone._verify_state = {}
+        clone.prefer_tools = []
+        clone.plan_review_cb = None
+        clone._plan_rejected = ""
         # 插话队列必须独享：共享的话，A 标签页补的那句话会插进 B 标签页的回答里
         clone._interjections = InterjectionQueue()
         # 会话标识与工作区结果按会话独享（共享的话并发会话会互相覆盖）
@@ -1671,7 +2531,7 @@ class AutoMindAgent:
         # v1.6.4：会话身份经 contextvar 传给工具（registry 在克隆间共享，
         # 直接往工具实例上挂 session 会被并发会话互相覆盖）。
         _root = self.config.project_root
-        for cls in (FileReadTool, FileWriteTool, FileEditTool):
+        for cls in (FileReadTool, FileWriteTool, FileEditTool, FileMultiEditTool):
             self.tool_registry.register(cls(project_root=_root))
         self.tool_registry.register(PythonSandboxTool())
         # 浏览器 / 网页能力
@@ -1690,6 +2550,12 @@ class AutoMindAgent:
         # 编程能力增强：把 code_generator 技能（生成/补全/脚手架 + 语法校验 + 自动修复）
         # 以工具形式暴露给 ReAct 循环，编程模式可直接调用
         self.tool_registry.register(_CodeGenerateTool(self))
+        # v1.11.0：技能此前对模型完全不可达（只能在界面里管理）—— 用一个统一的
+        # skill_invoke 工具按名字调用，而不是每个技能注册一个工具撑大工具表
+        self.tool_registry.register(_SkillInvokeTool(self))
+        # v1.11.2：模型经常把技能名当工具名直接调用（"pdf_summary(path=…)"）——
+        # 名字确定是某个已装技能时，改道到 skill_invoke，而不是回一句"没有这个工具"
+        self.tool_registry.add_fallback(self._route_skill_as_tool)
 
         # 办公自动化与集成工具（v1.5.0）
         #
@@ -1724,6 +2590,91 @@ class AutoMindAgent:
                 logger.info("connectors_registered", tools=names)
         except Exception as e:
             self._record_tool_group_failure("connectors", e)
+
+        # ── v1.11.11 补充工具（只增不改：全部独立注册，失败同理留痕）──
+        self._register_supplement_tools()
+
+    def _register_supplement_tools(self) -> None:
+        """注册"模型主动协作"类补充工具（v1.11.11，只增不改）。
+
+        三个社区版工具 + 两个按条件注册的工具：
+          · todo_write / ask_user_question / present —— 任何版本都有；
+          · pwsh —— 仅 Windows 且本机确实找得到 PowerShell；
+          · subagent 家族 —— 仅专业版（multi_agent 特性已激活）。
+        单个工具注册失败只记录、不连累其余工具与启动。
+        """
+        for label, loader in (
+            ("todo", self._register_todo_tool),
+            ("ask_user", self._register_ask_user_tool),
+            ("present", self._register_present_tool),
+            ("pwsh", self._register_pwsh_tool),
+            ("subagents", self._register_subagent_tools),
+        ):
+            try:
+                loader()
+            except Exception as e:
+                self._record_tool_group_failure(f"supplement:{label}", e)
+
+    def _register_todo_tool(self) -> None:
+        from automind.tools.todo import TodoWriteTool
+
+        self.tool_registry.register(TodoWriteTool())
+
+    def _register_ask_user_tool(self) -> None:
+        from automind.tools.ask_user import AskUserTool
+
+        self.tool_registry.register(AskUserTool())
+
+    def _register_present_tool(self) -> None:
+        from automind.tools.present import PresentTool
+
+        self.tool_registry.register(PresentTool(project_root=self.config.project_root))
+
+    def _register_pwsh_tool(self) -> None:
+        from automind.tools.pwsh import PwshTool
+
+        if not PwshTool.available():
+            return                      # 非 Windows / 没装 PowerShell：不注册，不留坏工具
+        ex = self.config.execution
+        self.tool_registry.register(PwshTool(
+            workdir=self.config.project_root,
+            timeout=float(getattr(ex, "tool_timeout_seconds", 300.0)),
+            max_timeout=float(getattr(ex, "tool_timeout_max_seconds", 1800.0)),
+        ))
+
+    def _register_subagent_tools(self) -> None:
+        """专业版：模型可调用的子智能体委派（multi_agent 特性激活时）。"""
+        from automind.core import edition as _edition
+
+        if not _edition.has_feature("multi_agent"):
+            return                      # 社区版不注册，模型不会看到这些工具
+        from automind.tools.subagents import (
+            SubagentListTool,
+            SubagentSendTool,
+            SubagentStopTool,
+            SubagentTool,
+        )
+
+        for tool in (SubagentTool(), SubagentListTool(),
+                     SubagentSendTool(), SubagentStopTool()):
+            self.tool_registry.register(tool)
+
+
+    def _route_skill_as_tool(self, name: str, kwargs: dict) -> tuple[str, dict] | None:
+        """未知工具名恰好是某个已装技能 → 改道 ``skill_invoke``（只在唯一确定时）。"""
+        from automind.tools.base import resolve_name
+        reg = getattr(self, "skill_registry", None)
+        if reg is None:
+            return None
+        bare = name.split("__")[-1]
+        if bare.casefold().startswith("skill_") and bare.casefold() != "skill_invoke":
+            bare = bare[6:]
+        real, _ = resolve_name(bare, reg.list_names())
+        if real is None:
+            return None
+        inp = kwargs.pop("input", None)
+        return "skill_invoke", {"name": real, **({"input": inp} if inp is not None else {}),
+                                **kwargs}
 
     def _record_tool_group_failure(self, group: str, exc: BaseException) -> None:
         """记下一次"整组工具没注册上"：留结构化账目 + 给出怎么修。
@@ -1855,22 +2806,119 @@ class AutoMindAgent:
         return agent
 
     async def resume_from_checkpoint(self, checkpoint_id: str) -> AgentResult:
-        """从检查点继续执行未完成的计划；无进行中计划时仅确认已恢复上下文。"""
+        """从检查点**接着跑**还没做完的部分。
+
+        v1.7.5 之前这个方法名不副实：它把存下来的计划整个丢掉，然后用一句
+        "继续执行此前未完成的任务：…" **从头重跑**。
+
+        * **计划路径**：恢复原计划 → 已完成的目标保持 ``COMPLETED``（执行器
+          自己会跳过）→ 只跑剩下的那些。
+        * **ReAct 路径**（v1.7.7）：没有计划可恢复，但检查点里记着已经真实
+          完成的动作、产出的文件、卡在哪一步 —— 把这份进度原样交给模型，
+          明确"这些不要重做"，而不是只丢给它一句原任务让它重新摸索。
+
+        无论哪条路径，续跑都在本会话的身份与工作目录下执行（Web 端的隔离
+        工作区、轨迹、Token 预算都按会话生效），源检查点标记为 ``resumed``，
+        不会被重复续跑。
+        """
         state = await self.checkpoint_mgr.load(checkpoint_id)
+        md = dict(getattr(state, "metadata", {}) or {})
         plan = state.plan
-        if plan is None:
+        task = str(md.get("task") or getattr(plan, "task_description", "") or "")
+
+        if plan is not None:
+            status_value = getattr(getattr(plan, "status", None), "value", "")
+            progress = _plan_progress(plan)
+            if status_value in ("completed", "aborted") or (
+                    progress["total"] and progress["remaining"] <= 0):
+                return AgentResult(
+                    success=True,
+                    output=(f"检查点已恢复；计划状态为「{status_value or 'completed'}」，"
+                            f"{progress['done']}/{progress['total']} 步已完成，无需继续。"))
+            if progress["total"]:
+                self.checkpoint_mgr.mark(checkpoint_id, "resumed")
+                return await self._resume_plan(checkpoint_id, state, plan, task, progress)
+
+        if md.get("status") in ("completed", "dismissed", "resumed") and not md.get("react"):
+            return AgentResult(success=True, output="检查点已恢复；该任务已经完成，无需继续。")
+        if not task:
             return AgentResult(
                 success=True,
-                output="检查点已恢复（上下文与对话历史）；其中无进行中的计划，无需继续执行。",
-            )
-        status = getattr(plan, "status", None)
-        if status is not None and status.value in ("completed", "aborted"):
-            return AgentResult(
-                success=True,
-                output=f"检查点已恢复；计划状态为「{status.value}」，无需继续。",
-            )
-        task = getattr(plan, "task_description", "") or "继续未完成的任务"
-        return await self.run(f"继续执行此前未完成的任务：{task}")
+                output="检查点已恢复（上下文与对话历史）；其中没有可继续的任务。")
+        self.checkpoint_mgr.mark(checkpoint_id, "resumed")
+        prompt = build_react_resume_prompt(task, md.get("react") or {})
+        await self._emit({"type": "task_resumed", "kind": "react", "checkpoint": checkpoint_id,
+                          "task": task[:200],
+                          "done": int((md.get("react") or {}).get("completed_actions") or 0)})
+        logger.info("checkpoint_resume_react", checkpoint=checkpoint_id,
+                    done=(md.get("react") or {}).get("completed_actions", 0))
+        self._resume_origin = {"task": task, "checkpoint": checkpoint_id}
+        try:
+            return await self.run(prompt)
+        finally:
+            self._resume_origin = None
+
+    async def _resume_plan(self, checkpoint_id: str, state: Any, plan: Any,
+                           task: str, progress: dict[str, int]) -> AgentResult:
+        """计划续跑：在会话身份 + 工作目录绑定下只执行剩余目标。"""
+        from automind.core import session_ctx as _sctx
+
+        start = time.perf_counter()
+        sid = getattr(self, "session_id", "") or state.session_id or "default"
+        for msg in state.messages:
+            self.context_mgr.add(msg)
+        ws_plan = self._prepare_workspace(sid)
+        with _sctx.bind_session(sid, run_id=_sctx.new_run_id("resume"),
+                                workspace=ws_plan.path if ws_plan.isolated else None,
+                                sink=self._emit if self.event_sink is not None else None,
+                                project_root=self.config.project_root):
+            self._resume_origin = {"task": task, "checkpoint": checkpoint_id}
+            try:
+                self._begin_checkpoint_record(task)
+            finally:
+                self._resume_origin = None
+            self._agent_state.session_id = sid
+            self._current_plan = plan
+            self._task_deadline = None
+            if self.llm is not None:
+                self.llm.reset()
+            # v1.11.10：续跑同样是"本次任务"，实时用量与预算一起从 0 起算
+            self._reset_usage_total()
+            if getattr(self, "resources", None) is not None:
+                self.resources.tokens.reset()
+            logger.info("checkpoint_resume", checkpoint=checkpoint_id,
+                        total=progress["total"], done=progress["done"],
+                        remaining=progress["remaining"])
+            await self._emit({
+                "type": "plan_resumed", "checkpoint": checkpoint_id,
+                "task": getattr(plan, "task_description", "") or task,
+                "total": progress["total"], "done": progress["done"],
+                "remaining": progress["remaining"],
+            })
+            try:
+                steps = await self._execute_plan(plan)
+            except BaseException as e:
+                await self._checkpoint_interrupted(e)
+                raise
+            result_text = self._build_result_text(plan, steps)
+            ok = all(getattr(s, "success", False) for s in steps) if steps else True
+            md = self._agent_state.metadata
+            md["status"] = "completed" if ok and getattr(
+                getattr(plan, "status", None), "value", "") == "completed" else "partial"
+            md["finished_at"] = time.time()
+            await self._maybe_checkpoint(force=True)
+        done_now = sum(1 for s in steps if getattr(s, "success", False))
+        out = (f"已从断点续跑：原有 {progress['done']}/{progress['total']} 步已完成（未重做），"
+               f"本次继续执行 {len(steps)} 步（成功 {done_now} 步）。\n\n{result_text}")
+        if ws_plan.isolated:
+            self._workspace_plan = ws_plan
+            out += self._workspace_note(ws_plan)
+            await self._emit_workspace_result()
+        return AgentResult(
+            success=ok, output=out, plan=plan, steps_executed=len(steps),
+            token_usage=self.llm.usage if self.llm is not None else TokenUsage(),
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
 
     # ═══════════════════════════════════════════════════════════
     # 自主任务闭环 — 多 Agent 审查 + Loop 验证 + TDD 测试
@@ -2140,3 +3188,173 @@ class _CodeGenerateTool:
             output=result.output,
             error=result.error or None,
         )
+
+
+class _SkillInvokeTool:
+    """工具适配器 — 让模型按名字调用已安装的技能（v1.11.0）。
+
+    Markdown 技能返回其指令正文（模型照着做）；Python 技能执行并返回结果。
+    输入框「引用技能」会把被引用技能的说明注入上下文，并把本工具列为必下发。
+    """
+
+    name = "skill_invoke"
+    description = (
+        "Invoke an installed AutoMind skill by name. Markdown skills return their "
+        "instructions (follow them); Python skills run and return their result. "
+        "Use when the user referenced a skill or a listed skill fits the task."
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Skill name (as listed)."},
+            "input": {"description": "Input for the skill: an object matching its "
+                                     "input schema, or a plain-text request."},
+        },
+        "required": ["name"],
+    }
+
+    def __init__(self, agent: AutoMindAgent) -> None:
+        from automind.core.types import PermissionTier, ToolSource
+        # 技能可能写文件 / 跑命令（project_init、test_runner …），按敏感级走审批策略
+        self.permission_tier = PermissionTier.SENSITIVE
+        self.risk_score = 45
+        self.source = ToolSource.BUILTIN
+        self._agent = agent
+
+    def dry_run_possible(self) -> bool:
+        return False
+
+    def get_execution_plan(self, **kwargs: Any) -> str:
+        return f"[skill_invoke] → {kwargs.get('name', '?')}"
+
+    def to_openai_schema(self) -> dict[str, Any]:
+        return {"name": self.name, "description": self.description,
+                "parameters": self.parameters}
+
+    def to_anthropic_schema(self) -> dict[str, Any]:
+        return {"name": self.name, "description": self.description,
+                "input_schema": self.parameters}
+
+    async def execute(self, **kwargs: Any) -> Any:
+        from automind.core.types import ToolResult
+        from automind.tools.base import resolve_name
+        reg = self._agent.skill_registry
+        asked = str(kwargs.get("name") or kwargs.get("skill") or "").strip()
+        # v1.11.2：技能名同样按"大小写 / 分隔符 / 词序"容错（与工具名一致）
+        name, tips = resolve_name(asked, reg.list_names()) if asked else (None, [])
+        if not name:
+            hint = f"你是不是想用：{'、'.join(tips)}？" if tips else ""
+            known = ", ".join(reg.list_names()[:40])
+            return ToolResult(tool_name=self.name, success=False, output=None,
+                              error=f"没有名为「{asked}」的技能。{hint}已安装：{known}")
+        skill = reg.get(name)
+        # 模型常把技能参数平铺在顶层（skill_invoke(name=…, path=…)）而不是放进 input
+        extra = {k: v for k, v in kwargs.items() if k not in ("name", "skill", "input")}
+        inp, err = normalize_skill_input(skill, kwargs.get("input"), extra)
+        if err:
+            return ToolResult(tool_name=self.name, success=False, output=None,
+                              error=f"技能「{name}」的输入不对：{err}")
+        try:
+            result = await reg.invoke(name, inp, self._agent)
+        except Exception as e:
+            return ToolResult(tool_name=self.name, success=False, output=None,
+                              error=f"技能「{name}」执行失败：{type(e).__name__}: {e}")
+        return ToolResult(tool_name=self.name, success=result.success,
+                          output=result.output, error=result.error or None)
+
+
+def normalize_skill_input(skill: Any, raw: Any, extra: dict[str, Any] | None = None
+                          ) -> tuple[Any, str]:
+    """把模型给的技能输入整理成技能能吃的形状（v1.11.2）。返回 ``(输入, 错误)``。
+
+    Python 技能普遍写成 ``Model(**input_data) if isinstance(input_data, dict) else
+    input_data`` —— 模型传一句纯文本（很常见）就会在技能内部炸成
+    ``'str' object has no attribute ...``，模型看不懂、只会原样重试。这里：
+
+    * JSON 字符串 → 解析成对象；
+    * 纯文本 + 技能有输入模型 → 填进唯一（或第一个）必填的字符串字段；
+    * 平铺在顶层的参数并进输入对象；
+    * 按输入模型预校验，失败时列出缺哪些字段、各是什么类型 —— 一次就能改对。
+    """
+    import json as _json
+
+    extra = dict(extra or {})
+    schema_cls = getattr(skill, "input_schema", None)
+    data: Any = raw
+    if isinstance(data, str):
+        s = data.strip()
+        if s.startswith(("{", "[")):
+            try:
+                data = _json.loads(s)
+            except ValueError:
+                pass
+    if data in (None, ""):
+        data = {}
+    if schema_cls is None:
+        # Markdown 技能 / 无输入模型：原样交给技能
+        if isinstance(data, dict) and extra:
+            data = {**extra, **data}
+        return (data if data != {} or not extra else extra), ""
+
+    try:
+        js = schema_cls.model_json_schema()
+    except Exception:
+        js = {}
+    props: dict[str, Any] = js.get("properties", {}) or {}
+    required: list[str] = list(js.get("required", []) or [])
+    if isinstance(data, str):
+        str_fields = [k for k in (required or list(props))
+                      if (props.get(k) or {}).get("type", "string") == "string"]
+        if not str_fields:
+            return None, (f"需要一个对象，字段：{', '.join(props) or '（无）'}；"
+                          f"收到的是纯文本")
+        data = {str_fields[0]: data}
+    if not isinstance(data, dict):
+        return None, f"需要一个对象（字段：{', '.join(props)}），收到的是 {type(data).__name__}"
+    data = {**{k: v for k, v in extra.items() if k in props}, **data}
+    try:
+        schema_cls.model_validate(data)
+    except Exception as e:
+        missing = [k for k in required if k not in data]
+        fields = "；".join(f"{k}: {(props.get(k) or {}).get('type', 'any')}"
+                          + ("（必填）" if k in required else "") for k in props)
+        head = f"缺少必填字段 {', '.join(missing)}。" if missing else ""
+        return None, f"{head}字段说明 —— {fields}。校验信息：{str(e).splitlines()[0][:200]}"
+    return data, ""
+
+
+def build_react_resume_prompt(task: str, react: dict[str, Any]) -> str:
+    """把检查点里的 ReAct 进度拼成续跑提示（v1.7.7）。
+
+    关键是**给事实而不是给指令**：列出哪些动作已经真实成功、产出了哪些文件、
+    哪一步失败了，模型据此自己决定从哪继续。只说"别重做"而不给清单，模型
+    只能重新读一遍所有文件去猜 —— 那正是用户抱怨的"续跑等于重跑"。
+    """
+    lines = ["【断点续跑】下面这个任务上次执行到一半中断了。以下是**已经真实完成**的进度，"
+             "这些不要重做；如有必要先快速核对关键产物仍在，然后从未完成的地方接着做。",
+             "", "原任务：", task.strip()]
+    acts = [a for a in (react.get("actions") or []) if isinstance(a, dict)]
+    ok = [a for a in acts if a.get("ok")]
+    if ok:
+        lines += ["", f"已成功完成的动作（{len(ok)} 个，按顺序）："]
+        for a in ok[-25:]:
+            args = a.get("args") or {}
+            desc = ", ".join(f"{k}={v}" for k, v in args.items()) if isinstance(args, dict)                 else str(args)
+            tail = f" → {a['artifact']}" if a.get("artifact") else ""
+            lines.append(f"- {a.get('tool')}({desc[:140]}){tail}")
+    arts = [str(x) for x in (react.get("artifacts") or [])][:30]
+    if arts:
+        lines += ["", "已产出/改动的文件：" + "、".join(arts)]
+    fails = react.get("open_failures") or {}
+    if isinstance(fails, dict) and fails:
+        lines += ["", "上次尚未解决的失败："]
+        lines += [f"- {k}：{str(v)[:160]}" for k, v in list(fails.items())[:8]]
+    why = react.get("interrupted_reason") or react.get("stop_reason")
+    if why:
+        lines += ["", f"上次中断原因：{str(why)[:200]}"]
+    last = (react.get("last_thought") or "").strip()
+    if last:
+        lines += ["", "中断前最后的思路：", last[:600]]
+    if not ok and not arts:
+        lines += ["", "（上次还没有任何动作成功完成，请从头开始，但先检查现状以免重复创建。）"]
+    return "\n".join(lines)

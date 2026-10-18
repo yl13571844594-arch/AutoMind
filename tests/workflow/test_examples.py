@@ -28,6 +28,11 @@ def test_examples_exist() -> None:
     names = {p.name for p in YAML_FILES}
     assert "change_request.yaml" in names
     assert "hello.yaml" in names
+    # v1.8.0：agent 步骤与 foreach 的样板（路线图 R-106 / R-107 的验收示例）
+    assert "agent_report.yaml" in names
+    assert "batch_notes.yaml" in names
+    # v1.9.0：branch 条件扩展的样板（社区版）；专业版样板在 pro/ 子目录，由 pro/tests 覆盖
+    assert "triage.yaml" in names
 
 
 @pytest.mark.parametrize("path", YAML_FILES, ids=lambda p: p.name)
@@ -61,9 +66,13 @@ def test_example_tools_are_registered(path: Path) -> None:
     schema = WorkflowLoader().load(path)
     registry = build_cli_registry("builtin")
     names = set(registry.list_names())
-    for step in schema.steps:
+    for step in [s for top in schema.steps for s in (top, *top.substeps)]:
         if step.type == "tool":
             assert step.tool in names, f"{path.name} 里的工具 {step.tool!r} 不在注册表中"
+        if step.type == "agent":
+            # agent 步骤的白名单也得是真工具：写错一个名字，Agent 就少一样能力
+            for tool in step.allowed_tools or []:
+                assert tool in names, f"{path.name} 的 allowed_tools 里 {tool!r} 不存在"
 
 
 def test_change_request_has_human_gate() -> None:
@@ -89,3 +98,25 @@ def test_hello_is_offline_and_self_contained() -> None:
     for step in schema.steps:
         assert step.type == "tool"
         assert step.tool in {"file_write", "file_read"}, step.tool
+
+
+def test_agent_report_matches_roadmap_shape() -> None:
+    """R-106 验收示例：tool 拉数据 → agent 分析写报告 → human 审批 → tool 发送。
+
+    两条硬约束：审批在发送之前；agent 的工具白名单里没有能"往外发"或"跑命令"的工具
+    —— 发送必须是审批之后那个确定的 tool 步骤，而不是 Agent 自己决定发不发。
+    """
+    schema = WorkflowLoader().load(EXAMPLES / "agent_report.yaml")
+    assert [s.type for s in schema.steps] == ["tool", "agent", "human", "tool"]
+    agent = schema.get_step("analyze")
+    assert agent.allowed_tools and not {"terminal", "http_request", "im_integration",
+                                        "email_tool"} & set(agent.allowed_tools)
+    assert agent.max_steps <= 20 and agent.token_budget > 0
+
+
+def test_batch_notes_is_offline_foreach() -> None:
+    schema = WorkflowLoader().load(EXAMPLES / "batch_notes.yaml")
+    each = schema.get_step("cards")
+    assert each.type == "foreach" and each.substeps
+    assert {c.tool for c in each.substeps} <= {"file_write", "file_read"}
+    assert len(schema.inputs["topics"].default) <= 20      # 社区版上限内

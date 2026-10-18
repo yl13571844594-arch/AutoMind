@@ -35,9 +35,24 @@ def _reset_edition():
 
 class TestQuota:
     def test_community_rules(self):
-        assert quota_mod.QUOTA_RULES["community"] == {"daily_tasks": 100, "workspaces": 3}
-        assert quota_mod.QUOTA_RULES["pro"] == {"daily_tasks": None, "workspaces": 30}
-        assert quota_mod.QUOTA_RULES["enterprise"] == {"daily_tasks": None, "workspaces": None}
+        def core(tier):
+            r = quota_mod.QUOTA_RULES[tier]
+            return {"daily_tasks": r["daily_tasks"], "workspaces": r["workspaces"]}
+
+        assert core("community") == {"daily_tasks": 100, "workspaces": 3}
+        assert core("pro") == {"daily_tasks": None, "workspaces": 30}
+        assert core("enterprise") == {"daily_tasks": None, "workspaces": None}
+
+    def test_workflow_rules_match_roadmap(self):
+        """v1.8.0：工作流限额与 docs/WORKFLOW_ROADMAP.md §2.3 逐项一致。"""
+        c, p, e = (quota_mod.QUOTA_RULES[t] for t in ("community", "pro", "enterprise"))
+        assert (c["workflows"], p["workflows"], e["workflows"]) == (20, 200, None)
+        assert (c["workflow_triggers"], p["workflow_triggers"],
+                e["workflow_triggers"]) == (0, 30, None)
+        assert (p["workflow_min_interval"], e["workflow_min_interval"]) == (300, 60)
+        assert (c["workflow_foreach_max"], p["workflow_foreach_max"],
+                e["workflow_foreach_max"]) == (20, 1000, None)
+        assert c["workflow_history"] == 50
 
     def test_consume_and_refund(self):
         quota_mod.reset_for_tests()

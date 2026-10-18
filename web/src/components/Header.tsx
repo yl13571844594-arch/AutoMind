@@ -1,7 +1,8 @@
 // 顶栏：模式切换（3 主模式 + 高级折叠）、审批模式、状态/模型/项目/工作区徽标、
 // 模板 / 引导 / 新会话；下方模式提示条（含激活专家 chip + 每日限额提示）。
-import { App, Select, Tooltip } from 'antd';
-import { useEffect, useState } from 'react';
+import { App, Tooltip } from 'antd';
+import Select from './ui/SafeSelect';
+import { useEffect, useRef, useState } from 'react';
 import { apiDelete, apiPost } from '../api/client';
 import { writeAction } from '../lib/writeAction';
 import { chatSid, EDITION_LABELS, MODE_FEATURE, MODE_LABELS, useApp, type Mode } from '../store/app';
@@ -31,7 +32,9 @@ export default function Header() {
 
   const switchMode = async (m: Mode) => {
     if (!featureOn(MODE_FEATURE[m])) {
-      message.error(`「${MODE_LABELS[m]}」是专业版功能 — 当前为${EDITION_LABELS[edition]}，请安装 automind-pro 并配置许可证`);
+      // v1.11.1：不再只甩一句"去装包配许可证"，直接打开应用内升级面板
+      message.info(`「${MODE_LABELS[m]}」是专业版功能 — 当前为${EDITION_LABELS[edition]}`);
+      openModal('license');
       return;
     }
     await useApp.getState().setMode(m);
@@ -92,12 +95,7 @@ export default function Header() {
       `今日任务 ${quota.daily_used}/${quota.daily_limit} 次（社区版限额，专业版不限）`)
     : null;
 
-  // 快捷键（mod+N）与顶栏按钮共用这一份实现，见 App.tsx 的 newSession
-  useEffect(() => {
-    const fn = () => handleClear();
-    window.addEventListener('automind:new-session', fn);
-    return () => window.removeEventListener('automind:new-session', fn);
-  });
+  // v1.7.6：快捷键 mod+N 改为「新建会话」（见 Sidebar）；这里只保留清空当前模式。
 
   const handleClear = () => {
     modal.confirm({
@@ -117,10 +115,24 @@ export default function Header() {
         useChat.getState().clearMode(mode);
         usePanel.getState().setPlan(null);
         usePanel.getState().setStats({ steps: 0, backtracks: 0, tokens: 0, duration_ms: 0 });
+        // v1.11.10：清空会话后右栏的"本次任务"缓存/上下文也该归零，否则会显示上一段对话的命中率
+        usePanel.getState().resetUsage();
+        // v1.11.11：要等用户回答的问题、子智能体列表同理 —— 会话都没了，它们不再属于任何上下文
+        usePanel.getState().clearQuestion();
+        usePanel.getState().clearSubagents();
         message.info(`已清空${MODE_LABELS[mode]}模式会话`);
       }),
     });
   };
+
+  // v1.11.2：输入框 /clear 指令走同一条确认流程
+  const clearRef = useRef(handleClear);
+  clearRef.current = handleClear;
+  useEffect(() => {
+    const fn = () => clearRef.current();
+    window.addEventListener('automind:clear', fn);
+    return () => window.removeEventListener('automind:clear', fn);
+  }, []);
 
   return (
     <>
@@ -169,8 +181,8 @@ export default function Header() {
         <span style={{ flex: 1 }} />
         <button className="tpl-chip" onClick={() => openModal('templates')}>📚 模板</button>
         <button className="tpl-chip" onClick={() => openModal('tour')}>❓ 引导</button>
-        <button className="tpl-chip" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleClear}>
-          🔄 新会话
+        <button className="tpl-chip" style={{ borderColor: 'var(--accent)', color: 'var(--accent)' }} onClick={handleClear} title="清空当前模式的对话内容（新开话题请用左侧「＋ 新建会话」）">
+          🧹 清空
         </button>
       </div>
 

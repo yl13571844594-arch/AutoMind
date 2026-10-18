@@ -1,0 +1,48 @@
+# 受管控的付款 —— v1.10.0 企业版样板：多级按角色审批 + 凭据引用 + 发布审批
+#
+# 需要企业版（automind-pro + 企业版许可证）。看点：
+#   · approve 步骤：approvers 按顺序逐级审批（mode: all），先财务、再经理；
+#     不是指定角色的人点批准不生效；任一级拒绝 → 按失败策略处理（这里默认 abort）；
+#   · pay 步骤：接口令牌写成 {{ secrets.PAYMENT_API_TOKEN }}，值在「🔑 凭据」里配置，
+#     **不会**出现在报告、日志、运行记录与审计导出里（凭据只能用在 tool 步骤的参数里）；
+#   · 定时触发器只会运行"已发布"的版本：改了这份文件，要重新「提交发布审批」并获批；
+#   · 每次运行都可以导出运行审计（输入、发起人、每步状态与输出摘要、审批人与时间）。
+version: 1
+name: 受管控的付款
+description: 两级审批后调用付款接口，并留下审计记录
+
+inputs:
+  vendor:
+    type: string
+    required: false
+    default: 示例供应商
+    description: 收款方
+  amount:
+    type: number
+    required: false
+    default: 1000
+    description: 金额（元）
+  out_dir:
+    type: string
+    required: false
+    default: examples/06-workflow/out/payments
+    description: 回执输出目录（相对于项目根目录）
+
+triggers:
+  - cron: "0 10 * * 1"
+    description: 每周一上午 10 点
+
+steps:
+  - id: approve
+    type: human
+    prompt: "向「{{ inputs.vendor }}」付款 {{ inputs.amount }} 元，请审批"
+    approvers: [role:finance, role:manager]
+    mode: all
+
+  - id: pay
+    type: tool
+    tool: file_write
+    args:
+      # 真实场景里这一步是 http_request，令牌放在请求头里；样板用写文件代替，离线可跑
+      path: "{{ inputs.out_dir }}/receipt.txt"
+      content: "vendor={{ inputs.vendor }} amount={{ inputs.amount }} auth=Bearer {{ secrets.PAYMENT_API_TOKEN }}"

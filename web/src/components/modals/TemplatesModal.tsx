@@ -1,5 +1,6 @@
 // 📚 模板库：10 个内置模板 + ⭐ 自定义模板（专业版 custom_templates）。
-import { App, Button, Input, Modal, Select, Space, Tag, Typography } from 'antd';
+import { App, Button, Input, Modal, Space, Tag, Typography } from 'antd';
+import Select from '../ui/SafeSelect';
 import { useEffect, useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { writeAction } from '../../lib/writeAction';

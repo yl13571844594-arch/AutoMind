@@ -27,7 +27,19 @@
 | | 📄 审计报告导出（PDF / 打印版） | — | ✅ | ✅ |
 | 协作 | 📄 Web 代码编辑器（Monaco + Diff） | ✅ | ✅ | ✅ |
 | | 👥 任务分配看板 · 操作实时通知 | ✅ | ✅ | ✅ |
-| 用量 | 每日任务次数 | 100 次/天 | 不限 | 不限 |
+| 工作流 | 🔀 工作流引擎与校验 · tool/llm/human/branch/agent/foreach 步骤 | ✅ | ✅ | ✅ |
+| | branch 条件扩展（`>` `<` `>=` `<=` `in` `exists`，v1.9.0） | ✅ | ✅ | ✅ |
+| | Web 工作流视图 · 异步运行与进度 · 停止 · 断点续跑（v1.8.0） | ✅ | ✅ | ✅ |
+| | 已保存工作流数 | 20 个 | 200 个 | 不限 |
+| | foreach 单次最大迭代 | 20 项 | 1000 项 | 不限 |
+| | 运行历史保留 · 📊 工作流看板（v1.9.0） | 最近 50 次 · — | 90 天 · ✅ | 可配置 · ✅ |
+| | ⏰ 触发器（应用内定时 / 入站 webhook）· 失败自动续跑与通知 · 重启续跑策略（v1.9.0） | 外部 cron / CI 调 REST | ✅ | ✅ |
+| | 活跃触发器数 · 定时最小间隔 | — | 30 个 · 5 分钟 | 不限 · 1 分钟 |
+| | ⚡ parallel 并行组 · foreach 逐项并发（v1.9.0） | — | ✅ | ✅ |
+| | 📦 工作流模板库 · 🧭 从执行轨迹生成工作流（v1.10.0） | 起步样板 | ✅ | ✅ |
+| | 🛡 发布审批 · 按工作流权限 · 多级按角色审批 · 运行审计导出（v1.10.0） | — | — | ✅ |
+| | 🔑 凭据保管 `{{ secrets.* }}` · 🚦 按团队并发配额与排队（v1.10.0） | — | — | ✅ |
+| 用量 | 每日任务次数（工作流每次运行计 1 次） | 100 次/天 | 不限 | 不限 |
 | | 工作区数量 | 3 个 | 30 个 | 不限 |
 | 知识库 | 📚 RAG 知识库（上传/分段/embedding/对话自动检索） | 5 文档·10MB | 不限·200MB | 不限·不限 |
 | | 多知识库管理 · Reranker 重排 · 引用溯源 · 定时重嵌入 | — | ✅ | ✅ |
@@ -47,6 +59,15 @@
 | | 独立统计分析服务（analytics-service） | — | — | ✅ |
 
 > 设计原则：**安全不设付费墙** — 鉴权、限流、脱敏、审计全部保留在社区版。
+>
+> 工作流的版本拦截发生在**加载 / 校验阶段**（例如"`parallel` 需要专业版，第 12 行"），
+> 不会让流程跑到一半才因版本不够失败；超出数量上限的工作流仍可列出、校验与试运行。
+> 特性键 `workflow_triggers` / `workflow_parallel` / `workflow_history` 于 v1.9.0 交付并移入
+> `COMMERCIAL_FEATURES`（专业版 / 企业版许可证自动开启，实现在 `automind_pro.workflow_pro`）；
+> v1.10.0 交付 `workflow_from_trace` / `workflow_templates`（专业版）与 `workflow_governance`（企业版），
+> `PLANNED_FEATURES` 至此清空。
+> 限额键（`workflows` / `workflow_triggers` / `workflow_min_interval` / `workflow_history` /
+> `workflow_history_days` / `workflow_foreach_max`）在 `QUOTA_RULES`。详见 `docs/WORKFLOW_ROADMAP.md` 第 2 节。
 
 ## 2. 安装与激活
 
@@ -60,6 +81,16 @@ pip install automind-pro          # 商业渠道获取的 wheel（或源码目�
 set AUTOMIND_LICENSE=AMP-PRO-...  # 或写入 .automind_license / ~/.automind/license
 python -m automind.server --port 8765
 ```
+
+**应用内升级（v1.11.1 起，推荐）**：Web 界面 → 设置 →「⭐ 升级专业版 / 企业版」（或点左上角版本徽标）。
+
+1. 拖入 `automind_pro-*.whl`：解压到 `<数据目录>/extensions/`，启动时自动加入 `sys.path` ——
+   **不需要 pip**，冻结的桌面版同样适用（接口 `POST /api/license/package`，只接受 automind_pro 本身）；
+2. 粘贴许可证：当场离线校验，有效才写入 `~/.automind/license`（接口 `POST /api/license/activate`）；
+3. 就地激活：新特性的路由热挂载、调度循环当场启动，**无需重启**。
+
+`GET /api/license` 返回当前版本、扩展包状态与"卡在哪一步"（`need_package` / `incompatible` / `need_license` / `active`）。
+三个接口都是管理动作：本机直接可用，远程需管理员令牌。环境变量 `AUTOMIND_LICENSE` 优先于界面里填写的许可证。
 
 激活结果可通过 `GET /api/health` 的 `edition` 字段确认
 （`community` / `pro` / `enterprise`）；Web 界面左上角也会显示对应徽标。
@@ -82,6 +113,9 @@ pro/automind_pro/    ← 商业扩展（闭源，独立打包）
   multiagent/        ← 协同模式编排器
   loop_engine.py     ← 循环工程引擎
   scheduler.py       ← 定时任务（路由 + 后台调度）
+  workflow_pro.py    ← 工作流触发器 / 入站 webhook / 并发执行器 / 运行看板（v1.9.0）
+  workflow_governance.py ← 工作流发布审批 / 权限 / 凭据 / 并发配额 / 运行审计（v1.10.0，企业版）
+  workflow_from_trace.py / workflow_templates.py ← 轨迹生成草稿 / 模板库（v1.10.0）
   stats_pro.py       ← 高级统计仪表盘路由
   templates_pro.py   ← 自定义模板（专业版）
   audit_export.py    ← 审计报告导出 PDF（专业版）

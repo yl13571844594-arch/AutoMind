@@ -7,6 +7,7 @@ SQLite 库 ``.automind/automind.db``（WAL 模式，进程内线程安全）：
     kv               通用键值（限额计数 / 知识库设置与热度 / 迁移标记）
     task_history     任务历史（滚动上限由调用方控制）
     chat_sessions    多用户对话会话（sid → messages JSON）
+    conversations    会话目录（v1.7.6：标题/归档/摘要/续接种子，按 owner+工作区隔离）
     team_tasks       团队任务看板
     kb_kbs / kb_docs / kb_chunks   知识库（库 / 文档 / 片段+向量）
     kb_search_log    知识库检索审计日志（企业版）
@@ -42,6 +43,15 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
     messages TEXT NOT NULL,
     updated  TEXT DEFAULT (datetime('now','localtime'))
 );
+CREATE TABLE IF NOT EXISTS conversations (
+    sid       TEXT PRIMARY KEY,
+    owner     TEXT NOT NULL DEFAULT '',
+    workspace TEXT NOT NULL DEFAULT '',
+    data      TEXT NOT NULL,
+    archived  INTEGER NOT NULL DEFAULT 0,
+    updated   REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_conv_scope ON conversations(owner, workspace, archived);
 CREATE TABLE IF NOT EXISTS team_tasks (
     pos  INTEGER PRIMARY KEY AUTOINCREMENT,
     id   TEXT UNIQUE NOT NULL,

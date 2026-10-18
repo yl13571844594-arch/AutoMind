@@ -84,10 +84,6 @@ desktop/Output/
 desktop/icon.ico
 desktop/MicrosoftEdgeWebview2Setup.exe
 
-# 桌面安装器构建产物与第三方引导器（微软官方下载，见 desktop/README.md）
-desktop/Output/
-desktop/MicrosoftEdgeWebview2Setup.exe
-
 # 三平台安装包成品（体积大，走 CI artifacts / GitHub Release 分发，不入库）
 # 注意：只忽略安装包本身，packaging/ 下的构建脚本仍需版本化
 desktop/packaging/**/*.exe
@@ -105,7 +101,31 @@ promo/
 # 因此测试把临时文件放在工作区内，用完自删）。
 examples/06-workflow/hello-output.txt
 examples/06-workflow/cli-*.yaml
+# v1.8.0 示例的运行产物（agent_report / batch_notes）
+examples/06-workflow/out/
+# agent_report.yaml 的示例输入（*.log 默认被忽略，这一份必须随仓库分发）
+!examples/06-workflow/sample-access.log
 .workflow_test_tmp/
 
 # DSH 会话临时文件（诊断输出、缓存清单等，不进版本库）
 .dsh_*
+
+# ── v1.7.5：性能排查 / 冒烟跑的临时工作台 ──
+# 里面的报告与探针只对"当时那一次跑"有意义，入库就是别人的过期噪声。
+# 注意：这里**不**忽略 tests/**，正常测试文件必须入库。
+_perfcheck/
+
+# 仓库根目录的随手探针与临时文件。
+# 这些是排查时在根目录直接落下的产物（`a.txt`、`probe_*.py`、截图等），
+# 前缀锚定 `/` 避免误伤子目录里同名但正当的文件。
+/a.txt
+/probe_*.py
+/probe_*.png
+/probe_*.txt
+/probe_*.json
+/output.txt
+/out.txt
+/err.txt
+
+# connector 验证脚本留下的随机后缀目录（跑一次生成一个，纯临时）
+/connector-verify-*/

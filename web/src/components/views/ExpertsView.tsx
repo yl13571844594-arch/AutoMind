@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
-import { chatSid, useApp } from '../../store/app';
+import { useApp, workspaceSid } from '../../store/app';
 import { AsyncBoundary } from '../ui/AsyncBoundary';
 import { Badge, EmptyState, EntityCard, SectionTitle, ViewHead } from '../ui/Panel';
 
@@ -15,7 +15,7 @@ export default function ExpertsView() {
   // 取数失败时 data 永远是 null，专家市场就**永远转圈**，
   // 界面上"加载慢"和"接口挂了"长得一模一样。
   const st = useAsync<any>(
-    () => apiGet(`/experts?session_id=${encodeURIComponent(chatSid())}`), []);
+    () => apiGet(`/experts?session_id=${encodeURIComponent(workspaceSid())}`), []);
   return (
     <AsyncBoundary state={st} what="专家市场" rows={5}>
       {(data) => <ExpertsBody data={data} reload={st.reload} />}
@@ -126,7 +126,7 @@ function ExpertsBody({ data, reload }: { data: any; reload: () => void }) {
         <Input placeholder="一句话简介" maxLength={80} value={form.desc} onChange={(e) => setForm({ ...form, desc: e.target.value })} />
         <Button type="primary" onClick={async () => {
           if (!form.name.trim() || !form.prompt.trim()) { message.error('名称与角色设定必填'); return; }
-          const r = await apiPost('/experts', { ...form, session_id: chatSid() });
+          const r = await apiPost('/experts', { ...form, session_id: workspaceSid() });
           if (r.error) { message.error(r.error); return; }
           message.success(`专家「${form.name}」已创建`);
           setForm({ icon: '🎓', name: '', desc: '', prompt: '' });

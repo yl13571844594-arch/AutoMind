@@ -5,6 +5,7 @@ import { writeAction } from '../../lib/writeAction';
 import { useAsync } from '../../lib/useAsync';
 import { useApp } from '../../store/app';
 import { AsyncBoundary } from '../ui/AsyncBoundary';
+import { ViewHead } from '../ui/Panel';
 
 const { Text } = Typography;
 
@@ -28,9 +29,8 @@ function AuditBody({ data, reload }: { data: any; reload: () => void }) {
 
   return (
     <div>
-      <Space style={{ width: '100%', justifyContent: 'space-between' }}>
-        <h3>🛡️ 安全审计日志</h3>
-        <Space>
+      <ViewHead icon="🛡️" title="安全审计日志" sub="每一次工具调用的放行 / 需确认 / 高危拦截记录，可筛选与导出。"
+        extra={<Space>
           <Button size="small" title={featureOn('audit_export') ? '导出 PDF 审计报告' : '专业版功能'}
             onClick={() => {
               if (!featureOn('audit_export')) { message.error('「审计报告导出（PDF）」是专业版功能'); return; }
@@ -42,8 +42,7 @@ function AuditBody({ data, reload }: { data: any; reload: () => void }) {
               await apiDelete('/audit'); reload(); message.info('审计日志已清空');
             }),
           })}>清空</Button>
-        </Space>
-      </Space>
+        </Space>} />
       <div className="stat-grid" style={{ margin: '12px 0', gridTemplateColumns: 'repeat(4,1fr)' }}>
         <div className="stat-item"><div className="label">总调用</div><div className="value">{s.total}</div></div>
         <div className="stat-item"><div className="label">放行</div><div className="value ok">{s.allow}</div></div>

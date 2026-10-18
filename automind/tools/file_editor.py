@@ -13,6 +13,66 @@ from automind.tools.write_guard import content_hash as _content_hash
 from automind.tools.write_guard import path_lock
 
 
+def read_text_any(path: Path) -> tuple[str, str]:
+    """读文本：UTF-8 优先，失败再按 GBK（中文 Windows 上大量旧文件是 GBK）。返回 (内容, 编码)。
+
+    写回时用同一编码 —— 不能把用户的 GBK 文件悄悄改成 UTF-8（别的程序会读成乱码）。
+    """
+    for enc in ("utf-8", "gbk"):
+        try:
+            return path.read_text(encoding=enc), enc
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace"), "utf-8"
+
+
+def fuzzy_locate(original: str, old: str, new: str) -> tuple[int, int, str, str] | None:
+    """old_string 精确匹配失败时的容错定位（v1.11.7）。
+
+    依次尝试：① 忽略行尾空白；② 忽略每行首尾空白（整体缩进不同）。必须**唯一命中**。
+    返回 (起, 止, 调整过缩进的 new_string, 说明)；找不到 / 多处命中返回 None。
+    """
+    target = old.splitlines()
+    while target and not target[-1].strip():
+        target.pop()
+    while target and not target[0].strip():
+        target.pop(0)
+    if not target:
+        return None
+    lines = original.splitlines(keepends=True)
+    n = len(target)
+    for label, norm in (("忽略行尾空白", str.rstrip), ("忽略缩进差异", str.strip)):
+        want = [norm(t) for t in target]
+        hits = [i for i in range(len(lines) - n + 1)
+                if all(norm(lines[i + k].rstrip("\r\n")) == want[k] for k in range(n))]
+        if len(hits) != 1:
+            continue
+        i = hits[0]
+        start = sum(len(x) for x in lines[:i])
+        end = start + sum(len(x) for x in lines[i:i + n])
+        span_nl = lines[i + n - 1][len(lines[i + n - 1].rstrip("\r\n")):]
+        new_text = new
+        if norm is str.strip:
+            # 按"文件里第一行的缩进 vs old 里第一行的缩进"整体平移 new_string 的缩进
+            file_first = lines[i].rstrip("\r\n")
+            fi = file_first[:len(file_first) - len(file_first.lstrip())]
+            first_old = next(t for t in old.splitlines() if t.strip())
+            oi = first_old[:len(first_old) - len(first_old.lstrip())]
+            shifted = []
+            for ln in new.splitlines():
+                if ln.startswith(oi):
+                    shifted.append(fi + ln[len(oi):])
+                elif ln.strip():
+                    shifted.append(fi + ln.lstrip())
+                else:
+                    shifted.append(ln)
+            new_text = "\n".join(shifted)
+        if span_nl and not new_text.endswith(("\n", "\r\n")):
+            new_text += "\n"
+        return start, end, new_text, f"old_string 未精确匹配，已按「{label}」唯一定位后替换"
+    return None
+
+
 class FileChangeJournal:
     """全局文件改动日志 — 记录每次写入/编辑的前像，支持撤销回滚。
 
@@ -153,6 +213,9 @@ class _RootGuard:
             # 会话私有工作目录优先：同一相对路径在不同会话里落到不同目录
             p = (session_root or self._root) / p
         resolved = p.resolve()
+        if session_root is not None:
+            from automind.core.workspace import remap_into_workspace
+            resolved = remap_into_workspace(resolved, self._root, session_root)
         # 放行两种合法根：project_root，以及**被显式采纳的**会话隔离目录。
         # 隔离目录由服务端/测试显式传入（workspace.prepare / contextvar），
         # 不是模型可控的输入；这里如实放行，而不是用"必须在 project_root 之内"
@@ -163,9 +226,24 @@ class _RootGuard:
         for root in allowed:
             if resolved == root or root in resolved.parents:
                 return self._guard_platform_secrets(resolved, path)
-        raise PermissionError(
-            f"路径越界：'{path}' 解析到允许范围之外，已拒绝访问。"
-        )
+        raise PermissionError(self.out_of_scope_message(path, allowed))
+
+    def out_of_scope_message(self, path: str | Path,
+                             roots: list[Path] | None = None) -> str:
+        """越界时的统一话术：**说清基准目录**，而不是只说"越界了"。
+
+        v1.7.5：原先只有一句"路径越界：'x' 解析到允许范围之外" —— 模型不知道
+        基准在哪，只能猜。而同一个错误在 ``data_tools`` 里又是另一种写法
+        （"path 超出项目目录范围"），两处口径不一致。现在共用这一个函数。
+        """
+        roots = roots if roots is not None else [self._root]
+        shown = "、".join(str(r) for r in roots if r is not None) or "(未设置)"
+        # 措辞里保留"超出"：既有调用方/用例是照这个词判定的，而这里加的
+        # 是**补充信息**（基准目录 + 该怎么写），不该顺带改掉判定依据。
+        return (f"路径越界：'{path}' 超出允许的目录范围（不在允许的目录内）。"
+                f"允许的根目录是：{shown}。"
+                f"请改用**相对项目根的相对路径**（例如 src/app.py），"
+                f"或项目内的绝对路径。")
 
     @staticmethod
     def _guard_platform_secrets(resolved: Path, original: str | Path) -> Path:
@@ -239,7 +317,7 @@ class FileReadTool(AbstractTool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read."},
+            "path": {"type": "string", "description": "Path to the file to read. Relative to the project root (e.g. `src/app.py`); an absolute path inside the project also works."},
             "encoding": {"type": "string", "description": "File encoding (default: utf-8)."},
             "offset": {"type": "integer",
                        "description": "Start line (1-based). Use with limit for large files."},
@@ -258,26 +336,98 @@ class FileReadTool(AbstractTool):
     def __init__(self, project_root: str | Path | None = None) -> None:
         self._guard = _RootGuard(project_root)
 
+    @staticmethod
+    def _decode_file(path: Path, encoding: str) -> tuple[str, str, str]:
+        """读文本：先按请求编码，再按 UTF-8 / GBK 系列回退（v1.11.13）。
+
+        中文 Windows 上大量 .txt/.csv/.md 是 GBK/GB18030；模型默认按 UTF-8
+        读会直接 `UnicodeDecodeError`，于是一次本可成功的 file_read 白跑。
+        返回 ``(内容, 实际编码, 提示)``；全部失败抛最后一个异常。
+        """
+        candidates = [encoding] if encoding else []
+        for enc in ("utf-8-sig", "utf-8", "gb18030", "gbk", "latin-1"):
+            if enc not in candidates:
+                candidates.append(enc)
+        last_error: Exception | None = None
+        for enc in candidates:
+            try:
+                text = path.read_text(encoding=enc)
+            except (UnicodeDecodeError, LookupError) as e:
+                last_error = e
+                continue
+            except OSError as e:
+                raise e
+            if enc != encoding:
+                return text, enc, (f"文件不是 {encoding} 编码，已按 {enc} 成功读取；"
+                                   f"后续写入请沿用 encoding={enc}")
+            return text, enc, ""
+        if last_error is not None:
+            raise last_error
+        return path.read_text(encoding=encoding), encoding, ""
+
+    @staticmethod
+    def _suggest_similar(path: Path, limit: int = 3) -> list[str]:
+        """文件不存在时给几条最像的路径，省掉一次盲目重试。"""
+        import difflib
+
+        parent = path.parent
+        try:
+            names = [p.name for p in parent.iterdir() if p.is_file()][:500]
+        except OSError:
+            return []
+        close = difflib.get_close_matches(path.name, names, n=limit, cutoff=0.55)
+        out = [str(parent / name) for name in close]
+        # 命中大小写不同但同名的文件也算
+        lower = {name.casefold(): name for name in names}
+        match = lower.get(path.name.casefold())
+        if match and str(parent / match) not in out:
+            out.insert(0, str(parent / match))
+        return out[:limit]
+
     async def execute(self, **kwargs: Any) -> ToolResult:
         encoding = kwargs.get("encoding", "utf-8")
         try:
             path = self._guard.resolve(kwargs["path"])
         except PermissionError as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
+        if not path.exists():
+            similar = self._suggest_similar(path)
+            hint = ("；同目录下相近的文件：" + "、".join(similar)) if similar else ""
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=(f"文件不存在：{path}{hint}。"
+                       f"请先用 file_search 确认路径，或写相对项目根/会话工作副本的路径。"),
+                output={"path": str(path), "missing": True, "similar": similar},
+            )
+        if path.is_dir():
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=(f"这是一个目录而不是文件：{path}。"
+                       f"读取目录请用 file_search（pattern='*.py'）或 terminal（dir/ls）。"),
+                output={"path": str(path), "is_dir": True},
+            )
         try:
-            content = path.read_text(encoding=encoding)
+            content, used_encoding, note = self._decode_file(path, encoding)
         except Exception as e:
-            return ToolResult(tool_name=self.name, success=False, error=str(e))
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=(f"读取失败（已尝试 {encoding}/utf-8/gb18030/gbk）："
+                       f"{type(e).__name__}: {e}。若文件很大或不是文本，"
+                       f"可用 terminal 的 python 脚本按二进制读取。"),
+            )
 
         total_size = len(content)
         lines = content.splitlines(keepends=True)
         total_lines = len(lines)
         out: dict[str, Any] = {"path": str(path), "size": total_size,
                                "total_lines": total_lines,
+                               "encoding": used_encoding,
                                # 内容指纹：可原样回传给 file_write/file_edit 的
                                # expected_hash，声明"我只覆盖我读到的那一版"，
                                # 从而确定性拦住并发覆盖（见 tools/write_guard.py）
                                "content_hash": _content_hash(content)}
+        if note:
+            out["note"] = note
         # 登记"本会话读过"，同名文件后续被别的会话改写才能被检出为冲突
         _write_guard().note_read(str(path))
 
@@ -327,7 +477,7 @@ class FileWriteTool(AbstractTool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to write."},
+            "path": {"type": "string", "description": "Path to the file to write. Relative to the project root (e.g. `src/app.py`); an absolute path inside the project also works."},
             "content": {"type": "string", "description": "Content to write."},
             "encoding": {"type": "string", "description": "File encoding (default: utf-8)."},
             "expected_hash": {
@@ -346,13 +496,31 @@ class FileWriteTool(AbstractTool):
         self._guard = _RootGuard(project_root)
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        content = kwargs["content"]
+        raw_content = kwargs["content"]
+        if raw_content is None:
+            raw_content = ""
+        if not isinstance(raw_content, str):
+            # 模型偶尔把对象/数组直接塞进 content；写文件先序列化成文本，
+            # 而不是让 write_text 抛 TypeError 白跑一次
+            import json as _json
+
+            if isinstance(raw_content, (dict, list, tuple)):
+                raw_content = _json.dumps(raw_content, ensure_ascii=False, indent=2)
+            else:
+                raw_content = str(raw_content)
+        content = raw_content
         encoding = kwargs.get("encoding", "utf-8")
         expected = kwargs.get("expected_hash") or None
         try:
             path = self._guard.resolve(kwargs["path"])
         except PermissionError as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
+        if path.exists() and path.is_dir():
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=f"目标是一个目录而不是文件：{path}。请指定文件名后重试。",
+                output={"path": str(path), "is_dir": True},
+            )
 
         guard = _write_guard()
         conflict = guard.check(str(path), expected_hash=expected)
@@ -417,7 +585,7 @@ class FileEditTool(AbstractTool):
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to edit."},
+            "path": {"type": "string", "description": "Path to the file to edit. Relative to the project root (e.g. `src/app.py`); an absolute path inside the project also works."},
             "old_string": {"type": "string", "description": "The exact text to replace."},
             "new_string": {"type": "string", "description": "The text to replace it with."},
             "replace_all": {
@@ -444,6 +612,11 @@ class FileEditTool(AbstractTool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         old = kwargs["old_string"]
         new = kwargs["new_string"]
+        # 模型偶尔把数字/对象当字符串传；先转成文本，避免 .count() 直接抛类型错
+        if not isinstance(old, str):
+            old = "" if old is None else str(old)
+        if not isinstance(new, str):
+            new = "" if new is None else str(new)
         replace_all = kwargs.get("replace_all", False)
         if old == new:
             return ToolResult(
@@ -472,11 +645,22 @@ class FileEditTool(AbstractTool):
                               replace_all: bool, conflict: dict[str, Any]) -> ToolResult:
         """持锁执行实际的替换（读—改—写必须在同一把锁内才谈得上原子）。"""
         try:
-            original = path.read_text(encoding="utf-8")
+            original, enc = read_text_any(path)
         except Exception as e:
             return ToolResult(tool_name=self.name, success=False, error=str(e))
 
         count = original.count(old)
+        tolerant = ""
+        if count == 0:
+            # v1.11.7：精确匹配失败时，按"忽略行尾空白 / 忽略整体缩进差异"再找一次。
+            # 模型复述代码时最常丢的就是行尾空格与缩进层级 —— 唯一命中才替换，
+            # 多处命中或找不到仍按原样报错（宁可让模型重试，也不改错地方）。
+            hit = fuzzy_locate(original, old, new)
+            if hit is not None:
+                start, end, new, tolerant = hit
+                old = original[start:end]
+                count = 1
+                replace_all = False
         if count == 0:
             hint = self._nearest_match_hint(original, old)
             return ToolResult(
@@ -492,7 +676,10 @@ class FileEditTool(AbstractTool):
                 error=f"old_string found {count} times. Use replace_all=true or provide more context.",
             )
 
-        modified = original.replace(old, new, -1 if replace_all else 1) if replace_all else original.replace(old, new, 1)
+        if tolerant:
+            modified = original[:start] + new + original[end:]     # 按定位到的区间拼接，不再二次搜索
+        else:
+            modified = original.replace(old, new, -1 if replace_all else 1) if replace_all else original.replace(old, new, 1)
 
         # 备份原始内容（工具级回滚 + 全局撤销日志）
         self._backups[str(path)] = original
@@ -501,7 +688,7 @@ class FileEditTool(AbstractTool):
         # 计算 diff
         diff = self._compute_diff(original, modified, path.name)
 
-        path.write_text(modified, encoding="utf-8")
+        path.write_text(modified, encoding=enc)
         guard = _write_guard()
         guard.note_write(str(path), self.name)
         self._diff_history.append({
@@ -516,6 +703,10 @@ class FileEditTool(AbstractTool):
             "replacements": count if replace_all else 1,
             "content_hash": _content_hash(modified),
         }
+        if tolerant:
+            out["match_note"] = tolerant
+        if enc != "utf-8":
+            out["encoding"] = enc
         if conflict.get("foreign"):
             out["conflict"] = conflict
             out["warning"] = _conflict_note(conflict)

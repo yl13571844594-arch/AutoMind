@@ -1,0 +1,8 @@
+{
+  "name": "fs_lock_guard",
+  "version": "1.0.0",
+  "description": "文件占用重试：Excel/Word/PDF/CSV/图片/写文件被其它程序占用（WinError 32/5、EBUSY、database is locked）时退避重试，失败给出可操作提示。",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks",
+  "priority": 30
+}

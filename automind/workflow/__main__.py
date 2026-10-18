@@ -170,6 +170,23 @@ def print_dry_run_plan(schema: WorkflowSchema, run: WorkflowRun) -> None:
             print(f"      左侧渲染为 {_short(detail.get('left_preview'))}，"
                   f"右侧为 {_short(detail.get('right'))}")
             print(f"      成立 → {detail.get('then')}；否则 → {detail.get('else')}")
+        elif step.type == "agent":
+            tools = detail.get("allowed_tools")
+            print("交给 Agent 自主完成（试运行不会调用模型）")
+            print(f"      目标开头：{_short(detail.get('goal_preview'))}")
+            print("      可用工具："
+                  + ("仅只读工具（未声明 allowed_tools）" if tools is None
+                     else ("、".join(tools) or "无")))
+            print(f"      最多 {detail.get('max_steps')} 步"
+                  + (f"，token 预算 {detail.get('token_budget')}"
+                     if detail.get("token_budget") else ""))
+            if not detail.get("agent_injected"):
+                print("      ⚠ 命令行不接模型：真跑含 agent 步骤的工作流请用 Web 界面或 REST 接口")
+        elif step.type == "foreach":
+            print(f"逐项执行（共 {detail.get('items')} 项，上限 {detail.get('limit') or '不限'}）")
+            for it in detail.get("preview") or []:
+                names = "、".join(f"{r['id']}" for r in it.get("steps") or [])
+                print(f"      第 {it.get('index', 0) + 1} 项：{names}")
         else:
             print(step.type)
     print("")

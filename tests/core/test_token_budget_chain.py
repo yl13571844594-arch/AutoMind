@@ -154,8 +154,15 @@ async def test_budget_warning_is_not_repeated_every_call(monkeypatch):
 
 
 async def test_budget_exceeded_refuses_the_call(monkeypatch, caplog):
-    """预算用完必须**拒绝本次调用**（RuntimeError 由 LLM 层抛出并中止）。"""
+    """预算用完必须**拒绝本次调用**。
+
+    v1.7.5：抛的异常从裸 ``RuntimeError`` 换成 ``BudgetExhaustedError`` ——
+    调用方（ReAct 循环）据此就地收尾并交出部分交付清单，而不是让任务在半途
+    丢掉全部成果。**"必须拦下"这个验收点不变**，只是类型更明确。
+    """
     import logging
+
+    from automind.core.exceptions import BudgetExhaustedError
 
     agent, events = _agent(budget=1000)
 
@@ -165,7 +172,8 @@ async def test_budget_exceeded_refuses_the_call(monkeypatch, caplog):
     monkeypatch.setattr(agent, "_compress_context", _noop)
     await _feed(agent, prompt=900, completion=200)      # 110%
 
-    with caplog.at_level(logging.ERROR, logger="automind.agent"), pytest.raises(RuntimeError):
+    with caplog.at_level(logging.ERROR, logger="automind.agent"), \
+            pytest.raises(BudgetExhaustedError):
         await agent.llm.pre_call_hook()
 
     assert any(e.get("type") == "budget_exceeded" for e in events)

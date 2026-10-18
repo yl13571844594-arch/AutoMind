@@ -1,12 +1,15 @@
 // 各类消息气泡：普通消息 / 流式 / 打字 / 执行过程 / 协同 / 循环 / 续跑按钮 / 欢迎页。
 import { App } from 'antd';
 import { memo, useRef, useState } from 'react';
+import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { copyText } from '../../lib/clipboard';
 import { esc, isSafeUrl, renderMarkdown, splitStream } from '../../lib/markdown';
-import { MODE_LABELS, useApp } from '../../store/app';
-import type { ChatItem, LoopIter, MaStep, PlanRow, TraceItem } from '../../store/chat';
+import { MODE_LABELS, useApp, type Mode } from '../../store/app';
+import { useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem } from '../../store/chat';
 import { TEMPLATES } from '../../lib/templates';
 import { useUi } from '../../store/ui';
+import { usePanel } from '../../store/panel';
+import WorkflowRunCard from '../workflow/WorkflowRunCard';
 
 function Avatar({ role, icon }: { role: 'user' | 'agent'; icon?: string }) {
   return <div className="avatar">{icon || (role === 'user' ? '我' : 'AM')}</div>;
@@ -105,6 +108,19 @@ export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
           {item.images && item.images.length > 0 && (
             <div className="mm-thumbs">
               {item.images.filter(isSafeUrl).map((u, i) => <img key={i} src={u} alt="img" />)}
+            </div>
+          )}
+          {/* v1.7.7：本条消息携带的 overrides（模式/专家/附件）及服务端回执 */}
+          {item.chips && item.chips.length > 0 && (
+            <div className="ov-chips">
+              {item.chips.map((c) => (
+                <span key={c.key} className={`ov-chip ${c.state}`}
+                  title={c.state === 'fail' ? `未生效：${c.note || ''}`
+                    : c.state === 'pending' ? '等待服务端确认…' : '已生效'}>
+                  {c.label}
+                  <i>{c.state === 'ok' ? '✓' : c.state === 'fail' ? '✕' : '…'}</i>
+                </span>
+              ))}
             </div>
           )}
           {/* 徽标放在正文上方：它是这条消息的"结论"，读到正文之前就该看见 */}
@@ -310,6 +326,226 @@ export const LoopBubble = memo(function LoopBubble({ item }: { item: Extract<Cha
   );
 });
 
+/**
+ * 隔离工作副本的产物卡片（v1.7.7）。
+ *
+ * 此前产物"藏"在 .automind/workspaces/<会话> 里，回复里只有一个路径和一句
+ * "调用工作区导出"——而导出根本没有入口。现在：列出改了哪些文件，一键应用到
+ * 项目（冲突先问，可在「↩️ 文件改动」撤销）、导出，或删除副本释放磁盘。
+ */
+export const WorkspaceBubble = memo(function WorkspaceBubble({ item }: {
+  item: Extract<ChatItem, { kind: 'workspace' }>;
+}) {
+  const { message, modal } = App.useApp();
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState('');
+  const files = [...item.added.map((f) => ({ f, t: '新增' })), ...item.modified.map((f) => ({ f, t: '修改' }))];
+  const owner = (localStorage.getItem('automind_sid') || '');
+  const patch = (p: Partial<Extract<ChatItem, { kind: 'workspace' }>>) => {
+    const cm = useChat.getState();
+    for (const m of Object.keys(cm.messages) as any[]) {
+      if ((cm.messages as any)[m]?.some((i: any) => i.id === item.id)) {
+        cm.update(m, item.id, (i: any) => ({ ...i, ...p }));
+      }
+    }
+    cm.persist();
+  };
+
+  // v1.11.6：先预览「写到哪个项目根、哪些是覆盖」，确认后按相对路径整份覆盖回去
+  const doApply = async () => {
+    setBusy('apply');
+    try {
+      const r = await apiPost(`/session-workspaces/${encodeURIComponent(item.sid)}/apply`, { owner });
+      if (r.error) { message.error(r.error); return; }
+      const applied = [...new Set([...(item.applied || []), ...(r.applied || [])])];
+      patch({ applied, conflicts: r.overwritten_changed || [] });
+      const failed: { path: string; error: string }[] = r.failed || [];
+      const lines = [`已把 ${(r.applied || []).length} 个文件按相对路径应用到 ${r.project}`];
+      if (r.backup_dir) lines.push(`被覆盖的原文件已备份到 ${r.backup_dir}`);
+      if (failed.length) {
+        modal.warning({
+          title: `${failed.length} 个文件未能应用`,
+          content: <div style={{ maxHeight: 220, overflow: 'auto' }}>
+            {lines.map((l) => <div key={l}>{l}</div>)}
+            <ul>{failed.map((f) => <li key={f.path}><span className="mono">{f.path}</span>：{f.error}</li>)}</ul>
+          </div>,
+        });
+      } else {
+        message.success(lines.join('；') + '（可在「↩️ 文件改动」撤销）', 6);
+      }
+    } catch (e: any) {
+      message.error(`应用失败：${e?.friendly || e?.message || e}`);
+    } finally { setBusy(''); }
+  };
+
+  const apply = async () => {
+    setBusy('apply');
+    let plan: any;
+    try {
+      plan = await apiGet(`/session-workspaces/${encodeURIComponent(item.sid)}/apply-plan?owner=${encodeURIComponent(owner)}`);
+    } catch (e: any) {
+      message.error(`读取副本失败：${e?.friendly || e?.message || e}`); setBusy(''); return;
+    }
+    setBusy('');
+    if (!plan?.ok) { message.error(plan?.error || '读取副本失败'); return; }
+    const list: { path: string; action: string; changed_in_project: boolean }[] = plan.files || [];
+    if (!list.length) { message.info('副本里没有待应用的改动'); patch({ applied: files.map((x) => x.f) }); return; }
+    const over = list.filter((f) => f.action === 'overwrite');
+    const touched = list.filter((f) => f.changed_in_project);
+    modal.confirm({
+      title: `应用到项目：新建 ${list.length - over.length} 个，覆盖 ${over.length} 个`,
+      width: 560,
+      content: <div>
+        <div className="hint-text">目标项目根（按副本里的相对路径写入，同目录同名文件直接覆盖）：</div>
+        <div className="mono" style={{ wordBreak: 'break-all', marginBottom: 6 }}>{plan.project}</div>
+        <div style={{ maxHeight: 220, overflow: 'auto', fontSize: '.86em' }}>
+          {list.map((f) => (
+            <div key={f.path} className="mono">
+              <span className={`ws-tag ${f.action === 'overwrite' ? 'mod' : 'add'}`}>{f.action === 'overwrite' ? '覆盖' : '新建'}</span>
+              {f.path}{f.changed_in_project && <span className="ws-bad">项目里也改过</span>}
+            </div>
+          ))}
+        </div>
+        {touched.length > 0 && <div style={{ color: 'var(--yellow)', marginTop: 6 }}>
+          ⚠ {touched.length} 个文件在任务期间项目里也被改过，覆盖前会自动备份。</div>}
+        <div className="hint-text" style={{ marginTop: 6 }}>覆盖前原文件会备份到副本的 _apply_backup 目录，文本文件还可在「↩️ 文件改动」一键撤销。</div>
+      </div>,
+      okText: '确认覆盖到项目', cancelText: '取消',
+      onOk: doApply,
+    });
+  };
+
+  const exportAll = async () => {
+    setBusy('export');
+    try {
+      const r = await apiPost(`/session-workspaces/${encodeURIComponent(item.sid)}/export`, { owner });
+      if (r.ok) message.success(`已导出 ${r.count} 个文件到：${r.dir}`, 6);
+      else message.error(r.error || '导出失败');
+    } catch (e: any) { message.error(`导出失败：${e?.friendly || e?.message || e}`); } finally { setBusy(''); }
+  };
+
+  const removeCopy = () => modal.confirm({
+    title: '删除这个会话的隔离副本？',
+    content: '副本里未应用到项目的改动将被丢弃。下次在该会话跑任务时会重新创建副本。',
+    okText: '删除', okButtonProps: { danger: true },
+    onOk: async () => {
+      try {
+        await apiDelete(`/session-workspaces/${encodeURIComponent(item.sid)}?owner=${encodeURIComponent(owner)}`);
+        patch({ removed: true });
+        message.info('已删除隔离副本');
+      } catch (e: any) { message.error(`删除失败：${e?.friendly || e?.message || e}`); }
+    },
+  });
+
+  const appliedAll = !!item.applied && files.every(({ f }) => item.applied!.includes(f));
+  return (
+    <div className="msg agent">
+      <Avatar role="agent" />
+      <div className="col">
+        <div className="bubble ws-card">
+          <div className="ws-card-head">
+            <b>📁 隔离副本产物</b>
+            <span className="hint-text">新增 {item.added.length} · 修改 {item.modified.length}
+              {item.deleted.length ? ` · 删除 ${item.deleted.length}（不会同步到项目）` : ''}</span>
+          </div>
+          <div className="hint-text mono ws-card-path" title={item.path}>{item.path}</div>
+          <div className="ws-card-files">
+            {(open ? files : files.slice(0, 5)).map(({ f, t }) => (
+              <div key={f} className="mono">
+                <span className={`ws-tag ${t === '新增' ? 'add' : 'mod'}`}>{t}</span>{f}
+                {item.applied?.includes(f) && <span className="ws-ok">✓ 已应用</span>}
+                {item.conflicts?.includes(f) && <span className="ws-bad">已覆盖你的改动（有备份）</span>}
+              </div>
+            ))}
+            {files.length > 5 && (
+              <a onClick={() => setOpen(!open)}>{open ? '收起' : `展开全部 ${files.length} 个`}</a>
+            )}
+          </div>
+          {item.removed ? <div className="hint-text">副本已删除</div> : (
+            <div className="ws-card-acts">
+              <button className="err-btn primary" disabled={!!busy || appliedAll} onClick={apply}>
+                {appliedAll ? '✓ 已全部应用' : busy === 'apply' ? '应用中…' : '⤵ 应用到项目'}
+              </button>
+              <button className="err-btn" disabled={!!busy} onClick={exportAll}>📦 导出</button>
+              <button className="err-btn" disabled={!!busy} onClick={removeCopy}>🗑 删除副本</button>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/**
+ * 📦 交付卡片（v1.11.11 presented_files）—— 模型用 present 工具明确声明的交付物。
+ *
+ * 为什么单独一张卡片而不是塞进回复正文：交付物要能**点开**（预览 / 代码标签 / 复制路径），
+ * 纯 Markdown 链接做不到这一点；而且随消息落盘后，翻历史记录时仍能一键打开当时的产物。
+ * 只存路径与说明：文件内容随时可能再被改，点开时现读才是最新的。
+ */
+const OPEN_PREVIEW_RE = /\.(?:html?|svg|png|jpe?g|gif|webp|bmp|ico)$/i;
+
+export const DeliverableBubble = memo(function DeliverableBubble({ item }: {
+  item: Extract<ChatItem, { kind: 'deliverable' }>;
+}) {
+  const { message } = App.useApp();
+  const files = item.files || [];
+  const nameOf = (f: { path: string; name?: string }) =>
+    f.name || f.path.split(/[\\/]/).pop() || f.path;
+  // 打开方式：HTML/图片类交给预览弹窗（服务端按文件 MIME 返回；SVG 可内嵌渲染），
+  // 其它文件切到「代码」标签用编辑器打开。绝对路径与相对路径两端都接受（服务端校验项目边界）。
+  const openFile = (path: string) => {
+    if (OPEN_PREVIEW_RE.test(path)) {
+      useUi.getState().openPreview({ url: `/api/preview/file?path=${encodeURIComponent(path)}`, label: path });
+    } else {
+      usePanel.getState().openInCode(path);
+    }
+  };
+  const copyPath = async (path: string) => {
+    const ok = await copyText(path);
+    ok ? message.success('已复制文件路径') : message.error('复制失败');
+  };
+
+  return (
+    <div className="msg agent">
+      <Avatar role="agent" icon="📦" />
+      <div className="col">
+        <div className="bubble dlv-card">
+          <div className="dlv-head">
+            <b>📦 交付文件</b>
+            <span className="hint-text">{item.count || files.length} 个 · 点击打开</span>
+          </div>
+          {files.map((f) => (
+            <div key={f.path} className="dlv-row">
+              <span className="dlv-main" title={f.path}>
+                <a className="dlv-name" onClick={() => openFile(f.path)}>{nameOf(f)}</a>
+                {f.description && <span className="dlv-desc">{f.description}</span>}
+                <span className="dlv-path mono">{f.path}</span>
+              </span>
+              <button className="dlv-copy" title="复制文件路径" onClick={() => copyPath(f.path)}>⧉</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+});
+
+/** v1.8.0 工作流运行卡片（对话区）：进度实时来自 store/workflow，与「工作流」视图一致。 */
+export const WorkflowBubble = memo(function WorkflowBubble({ item }: {
+  item: Extract<ChatItem, { kind: 'workflow' }>;
+}) {
+  return (
+    <div className="msg agent">
+      <Avatar role="agent" icon="🔀" />
+      <div className="col" style={{ minWidth: 0, flex: 1 }}>
+        <WorkflowRunCard runId={item.runId} compact
+          onOpen={() => useApp.getState().setView('workflow')} />
+      </div>
+    </div>
+  );
+});
+
 export const ResumeBubble = memo(function ResumeBubble({ item, onResume }: {
   item: Extract<ChatItem, { kind: 'resume' }>; onResume: () => void;
 }) {
@@ -337,8 +573,9 @@ function diagnose(err: string): string | null {
     return '模型侧限流或额度不足 —— 稍等片刻再重试，或在设置里换一个模型。';
   if (/timeout|timed out|超时/.test(e))
     return '请求超时 —— 网络或模型侧较慢，可直接重试；长任务建议拆小。';
-  if (/connect|network|dns|ssl|proxy|econn/.test(e))
-    return '网络连不通 —— 检查代理/中转地址是否可达，再重试。';
+  if (/connect|network|dns|ssl|proxy|econn|无法连接模型服务|502|503|504|bad gateway/.test(e))
+    return '模型服务连不上（已自动重连多次仍失败）—— 检查代理/VPN 与中转地址是否可达；'
+      + '可在「⚙ 设置 → 🤖 模型」里点「测试连接」确认。恢复后点「接着做」，已完成的步骤不会重跑。';
   if (/context length|maximum context|too many tokens/.test(e))
     return '上下文超长 —— 新开会话或精简输入后重试。';
   return null;
@@ -415,38 +652,80 @@ export const ErrorBubble = memo(function ErrorBubble({ item, onResume, onRetry }
   );
 });
 
+// v1.11.4 初始界面：从"一个写满字的气泡"改为欢迎页 —— 品牌标题、五种模式卡片
+// （点一下就切过去）、快速开始模板卡片、未配置模型时的醒目引导、新输入方式提示。
+const WELCOME_MODES: { m: Mode; icon: string; desc: string; feature?: string }[] = [
+  { m: 'chat', icon: '💬', desc: '像聊天一样问答，支持图片与知识库检索' },
+  { m: 'work', icon: '⚙️', desc: '自主规划并执行：建项目、跑命令、改文件' },
+  { m: 'coding', icon: '💻', desc: '读写代码、调试、重构、补测试' },
+  { m: 'multi', icon: '🤝', desc: '多个智能体分工协作完成复杂任务', feature: 'multi_agent' },
+  { m: 'loop', icon: '🔁', desc: '行动 → 观察 → 修正，循环直到达标', feature: 'loop_engine' },
+];
+
 export function WelcomeBubble({ onTemplate, onAllTemplates }: {
   onTemplate: (i: number) => void; onAllTemplates: () => void;
 }) {
   const featureOn = useApp((s) => s.featureOn);
+  const mode = useApp((s) => s.mode);
+  const status = useApp((s) => s.status);
+  const needSetup = !!status && !status.llm_ready;
+  const pickMode = (m: Mode, feature?: string) => {
+    if (feature && !featureOn(feature)) { useUi.getState().openModal('license'); return; }
+    useApp.getState().setMode(m);
+  };
   return (
-    <div className="msg agent">
-      <Avatar role="agent" />
-      <div className="col">
-        <div className="bubble">
-          <b>👋 欢迎使用 AutoMind 通用自动化 Agent</b><br /><br />
-          顶部可切换五种模式：<br />
-          • 💬 <b>对话</b> — 像聊天一样问答交流（支持图片输入 / 知识库自动检索）<br />
-          • ⚙️ <b>工作</b> — 自主规划并执行任务（建项目、跑命令、改文件）<br />
-          • 💻 <b>编程</b> — 聚焦代码：阅读、编写、调试、重构、测试<br />
-          • 🤝 <b>协同</b> — 多智能体分工协作{featureOn('multi_agent') ? '' : ' 🔒专业版'}<br />
-          • 🔁 <b>循环</b> — 自主"行动-观察-修正"闭环{featureOn('loop_engine') ? '' : ' 🔒专业版'}<br /><br />
-          <span className="hint-text" style={{ fontSize: '.92em' }}>
-            📚 侧边栏「知识库」可上传 PDF/Word/MD/TXT，对话时自动检索引用。<br />
-            ⚙ 首次使用请先点击左下角 <b>「⚙ 设置」→「🔑 API Keys」</b> 配置模型。<br />
-            支持 OpenAI / Claude / DeepSeek / Kimi / 百炼 / 智谱 / 豆包 / Gemini / Grok / Ollama 及自定义中转代理。
-          </span>
-          <div style={{ marginTop: 12, borderTop: '1px dashed var(--border)', paddingTop: 10 }}>
-            <span className="hint-text">🚀 快速开始（点击模板一键填入）：</span>
-            <div className="tpl-chips">
-              {TEMPLATES.slice(0, 5).map((t, i) => (
-                <button key={i} className="tpl-chip" onClick={() => onTemplate(i)}>{t.icon} {t.title}</button>
-              ))}
-              <button className="tpl-chip" onClick={onAllTemplates}>📚 全部模板…</button>
-            </div>
+    <div className="welcome">
+      <div className="wl-hero">
+        <div className="wl-logo" aria-hidden="true" />
+        <h1>你好，我是 <span className="wl-grad">AutoMind</span></h1>
+        <p>本地运行的通用自动化 Agent —— 能对话、能干活、能写代码，数据不出你的电脑。</p>
+      </div>
+
+      {needSetup && (
+        <div className="wl-setup">
+          <span className="wl-setup-ico">🔑</span>
+          <div className="wl-setup-text">
+            <b>还差一步：配置模型</b>
+            <span>支持 OpenAI / Claude / DeepSeek / Kimi / 百炼 / 智谱 / 豆包 / Gemini / Ollama 及自定义中转</span>
           </div>
+          <button className="wl-btn primary" onClick={() => useUi.getState().openModal('apikeys')}>去配置 API Key</button>
         </div>
-        <div className="time">现在</div>
+      )}
+
+      <div className="wl-sec">选择工作模式</div>
+      <div className="wl-modes">
+        {WELCOME_MODES.map(({ m, icon, desc, feature }) => {
+          const locked = !!feature && !featureOn(feature);
+          return (
+            <button key={m} className={'wl-mode' + (mode === m ? ' on' : '') + (locked ? ' locked' : '')}
+              onClick={() => pickMode(m, feature)} title={locked ? '专业版功能：点击了解升级' : `切换到${MODE_LABELS[m]}模式`}>
+              <span className="wl-mode-ico">{icon}</span>
+              <span className="wl-mode-name">{MODE_LABELS[m]}{locked && <i>专业版</i>}{mode === m && <i className="cur">当前</i>}</span>
+              <span className="wl-mode-desc">{desc}</span>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="wl-sec">快速开始 <span>点一下填入输入框</span></div>
+      <div className="wl-tpls">
+        {TEMPLATES.slice(0, 5).map((t, i) => (
+          <button key={i} className="wl-tpl" onClick={() => onTemplate(i)}>
+            <span className="wl-tpl-ico">{t.icon}</span>
+            <span className="wl-tpl-text"><b>{t.title}</b><span>{t.desc}</span></span>
+          </button>
+        ))}
+        <button className="wl-tpl more" onClick={onAllTemplates}>
+          <span className="wl-tpl-ico">📚</span>
+          <span className="wl-tpl-text"><b>全部模板</b><span>浏览更多场景</span></span>
+        </button>
+      </div>
+
+      <div className="wl-tips">
+        <span><kbd>/</kbd> 调用指令、技能与工具</span>
+        <span><kbd>@</kbd> 引用文件或对话</span>
+        <span><kbd>Shift</kbd>+<kbd>Enter</kbd> 换行</span>
+        <span>📚 侧栏「知识库」上传文档后自动检索</span>
       </div>
     </div>
   );

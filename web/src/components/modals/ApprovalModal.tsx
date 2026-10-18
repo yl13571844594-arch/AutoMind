@@ -84,30 +84,78 @@ export default function ApprovalModal() {
     setApproval(null);
   };
 
-  const hasParams = Object.keys(source).length > 0;
+  // 工作流的 human 步骤：要批的是一段说明文字，不是工具参数 —— 整段展示、不提供"改参数"
+  const wf = approval.workflow;
+  const humanStep = !!wf && approval.tool === 'workflow_approval';
+  // v1.11.0 计划模式：要批的是整份计划（可以直接改步骤再批准）
+  const planReview = approval.tool === 'plan_review';
+  const hasParams = Object.keys(source).length > 0 && !humanStep;
+  const title = planReview ? '📋 计划审批（计划模式）' : humanStep ? '🔀 工作流人工审批' : '🙋 工具调用审批';
 
   return (
     <Modal
-      title="🙋 工具调用审批" open closable={false} width={editing ? 640 : 520}
+      title={title} open closable={false}
+      width={editing || humanStep || planReview ? 640 : 520}
       footer={
         <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
-          <Button danger onClick={() => respond(false)}>拒绝</Button>
+          <Button danger onClick={() => respond(false)}>{planReview ? '放弃此计划' : '拒绝'}</Button>
           {hasParams && !editing && (
-            <Button onClick={() => setEditing(true)}>✎ 修改参数</Button>
+            <Button onClick={() => setEditing(true)}>{planReview ? '✎ 修改计划' : '✎ 修改参数'}</Button>
           )}
           {editing && (
             <>
               <Button onClick={() => setEditing(false)}>取消修改</Button>
               <Button type="primary" disabled={!changed.length}
                       onClick={() => respond(true, true)}>
-                {changed.length ? `改 ${changed.length} 项并批准` : '未做修改'}
+                {!changed.length ? '未做修改' : planReview ? '按修改后的计划执行' : `改 ${changed.length} 项并批准`}
               </Button>
             </>
           )}
-          {!editing && <Button type="primary" onClick={() => respond(true)}>批准</Button>}
+          {!editing && <Button type="primary" onClick={() => respond(true)}>{planReview ? '批准并执行' : '批准'}</Button>}
         </div>
       }
     >
+      {wf && (
+        <div className="wf-approval-src">
+          来自工作流 <b>{wf.name}</b> 第 {wf.stepIndex || '?'} 步 <code>{wf.stepId}</code>
+          {wf.stepType === 'agent' ? '（Agent 步骤内部的工具调用）' : ''}
+          {!!wf.required?.length && (
+            <div style={{ marginTop: 4 }}>
+              👤 这一级需要 <b>{wf.required.join(' 或 ')}</b> 审批
+              {(wf.levels || 1) > 1 ? `（第 ${wf.level}/${wf.levels} 级，逐级都要通过）` : ''}
+              ；其他身份点批准不会生效
+            </div>
+          )}
+          <span className="hint-text mono" style={{ marginLeft: 6 }}>{wf.runId}</span>
+        </div>
+      )}
+      {planReview && !editing ? (
+        <div style={{ border: '1px solid var(--accent)', borderRadius: 10, padding: 12 }}>
+          <div style={{ fontSize: '.85em', color: 'var(--text2)' }}>{approval.reason}</div>
+          <pre className="wf-approval-prompt">{String((source as any).plan ?? '')}</pre>
+          <div className="hint-text" style={{ marginTop: 6 }}>
+            可以直接改步骤（删掉不要的、调整顺序、补充约束）后执行；放弃则一步都不会执行。
+            退出计划模式：点输入框上的「📋 计划模式 ✕」。
+          </div>
+          {left !== null && (
+            <div style={{ marginTop: 8, fontSize: '.8em', fontWeight: 600,
+              color: left <= 60 ? 'var(--red)' : 'var(--text3)' }}>
+              ⏳ 剩余 {fmtLeft(left)} —— 超时将按配置处置（默认放弃）
+            </div>
+          )}
+        </div>
+      ) : humanStep ? (
+        <div style={{ border: '1px solid var(--yellow)', borderRadius: 10, padding: 12 }}>
+          <div style={{ fontSize: '.85em', color: 'var(--text2)' }}>{approval.reason}</div>
+          <pre className="wf-approval-prompt">{String((source as any).prompt ?? '')}</pre>
+          {left !== null && (
+            <div style={{ marginTop: 8, fontSize: '.8em', fontWeight: 600,
+              color: left <= 60 ? 'var(--red)' : 'var(--text3)' }}>
+              ⏳ 剩余 {fmtLeft(left)} —— 超时将按配置处置（默认拒绝），该步骤按失败策略处理
+            </div>
+          )}
+        </div>
+      ) : (
       <div style={{ border: '1px solid var(--yellow)', borderRadius: 10, padding: 12 }}>
         <b>{approval.tool}</b>{' '}
         <Tag color={approval.tier === 'dangerous' ? 'red'
@@ -136,7 +184,8 @@ export default function ApprovalModal() {
         {editing && (
           <div style={{ marginTop: 10 }}>
             <div className="hint-text" style={{ marginBottom: 8 }}>
-              改完点「改 N 项并批准」，Agent 将<b>按修改后的参数</b>执行这一步。
+              {planReview ? <>一行一步。改完点「按修改后的计划执行」，Agent 将<b>按你的步骤</b>重新规划后执行。</>
+                : <>改完点「改 N 项并批准」，Agent 将<b>按修改后的参数</b>执行这一步。</>}
             </div>
             {Object.keys(source).map((k) => {
               const multiline = toText(source[k]).length > 60
@@ -164,6 +213,7 @@ export default function ApprovalModal() {
           </div>
         )}
       </div>
+      )}
     </Modal>
   );
 }

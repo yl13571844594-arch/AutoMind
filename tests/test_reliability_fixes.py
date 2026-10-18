@@ -419,18 +419,39 @@ class TestBudgetEnforcement:
         return a
 
     def test_over_budget_blocks_call(self, monkeypatch):
-        """验收点：超预算必须被拦下，而不是继续烧钱。"""
+        """验收点：超预算必须被拦下，而不是继续烧钱。
+
+        v1.7.5：异常类型从裸 ``RuntimeError`` 换成 ``BudgetExhaustedError``
+        （可被 ReAct 循环接住并优雅收尾）。"必须拦下"这个验收点不变。
+        """
         import asyncio
+
+        from automind.core.exceptions import BudgetExhaustedError
+
         a = self._agent(monkeypatch, budget=100, used=150)
+        # v1.11.0：默认会先续开预算窗口（见 tests/planning/test_budget_windows.py）；
+        # 这里验的是"续开次数用完之后必须拦下"，所以关掉续开
+        a.config.execution.budget_auto_continue = 0
         events = []
         a.event_sink = lambda e: (events.append(e), asyncio.sleep(0))[1]
 
         hook = a.llm.pre_call_hook
         assert hook is not None, "pre_call_hook 未被挂上"
-        with pytest.raises(RuntimeError, match="budget"):
+        with pytest.raises(BudgetExhaustedError, match="预算"):
             asyncio.run(hook())
         assert any(e["type"] == "budget_exceeded" for e in events), \
             f"未推送超预算事件：{[e.get('type') for e in events]}"
+
+    def test_over_budget_rolls_a_new_window_by_default(self, monkeypatch):
+        """v1.11.0：默认配置下窗口用尽不再拦下，而是续开新窗口（长任务不中断）。"""
+        import asyncio
+
+        a = self._agent(monkeypatch, budget=100, used=150)
+        events = []
+        a.event_sink = lambda e: (events.append(e), asyncio.sleep(0))[1]
+        asyncio.run(a.llm.pre_call_hook())
+        assert any(e["type"] == "budget_window" for e in events)
+        assert a.resources.tokens.tokens_used.total == 0
 
     def test_under_budget_passes(self, monkeypatch):
         import asyncio

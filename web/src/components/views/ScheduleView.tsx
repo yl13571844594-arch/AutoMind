@@ -1,10 +1,13 @@
 // ⏰ 定时任务（专业版 scheduler；社区版显示升级卡片）。
-import { App, Button, Card, Input, Select, Space, Tag, Typography } from 'antd';
+import { App, Button, Card, Input, Space, Tag, Typography } from 'antd';
+import Select from '../ui/SafeSelect';
 import { useState } from 'react';
 import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { useAsync } from '../../lib/useAsync';
 import { ErrorPanel } from '../ui/AsyncBoundary';
 import { MODE_LABELS, useApp } from '../../store/app';
+import { useUi } from '../../store/ui';
+import { ViewHead } from '../ui/Panel';
 
 const { Text } = Typography;
 
@@ -29,10 +32,12 @@ export default function ScheduleView() {
   if (locked) {
     return (
       <div>
-        <h3>⏰ 定时任务</h3>
+        <ViewHead icon="⏰" title="定时任务" sub="按固定频率自动执行任务，后台调度并记录每次结果。" />
         <Card size="small" style={{ marginTop: 12 }}>
           🔒 <b>定时任务</b>（按固定间隔自动执行任意模式的任务、后台调度与结果记录）为<b>专业版</b>功能
-          <div className="hint-text" style={{ marginTop: 4 }}>安装 automind-pro 并配置许可证（AUTOMIND_LICENSE）后重启服务即可解锁</div>
+          <div className="hint-text" style={{ marginTop: 4 }}>在应用内上传扩展包并激活许可证即可解锁，无需重启</div>
+          <Button type="primary" size="small" style={{ marginTop: 10 }}
+            onClick={() => useUi.getState().openModal('license')}>⭐ 升级 / 激活许可证</Button>
         </Card>
       </div>
     );
@@ -40,7 +45,7 @@ export default function ScheduleView() {
 
   return (
     <div>
-      <h3>⏰ 定时任务</h3>
+      <ViewHead icon="⏰" title="定时任务" sub="按固定频率自动执行任务，后台调度并记录每次结果。" />
       <Card size="small" style={{ marginTop: 10 }}>
         <Input placeholder="名称（可选）" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         <Input.TextArea style={{ marginTop: 8 }} rows={2} placeholder="要定时执行的任务内容..."

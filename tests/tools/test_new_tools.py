@@ -240,10 +240,20 @@ class TestOutboundGuards:
         r = run(ImIntegrationTool().execute(text="hi"))
         assert not r.success and r.output.get("blocked")
 
-    def test_websearch_needs_config(self, monkeypatch):
+    def test_websearch_fails_clearly_when_no_backend_available(self, monkeypatch):
+        """v1.11.12：没 Key 时会先试免密钥 Bing；两个后端都不通才判失败。"""
+        import automind.tools.net_tools as nt
+
         monkeypatch.delenv("AUTOMIND_SEARCH_PROVIDER", raising=False)
+        monkeypatch.setattr(nt, "_deepseek_search_key", lambda: "")
+
+        async def _no_network(*args, **kwargs):
+            return None, "network down"
+
+        monkeypatch.setattr(nt, "_search_bing", _no_network)
         r = run(WebSearchTool().execute(query="x"))
         assert not r.success and r.output.get("needs_config")
+        assert "DeepSeek" in (r.error or "")
 
 
 # ── 日历 ────────────────────────────────────────────────────
@@ -292,8 +302,27 @@ class TestRegistrationAndGating:
         names = {t.name for t in a.tool_registry._tools.values()}
         expected = {"excel_tool", "word_tool", "pdf_tool", "email_tool",
                     "web_search", "http_request", "db_query", "file_search",
-                    "archive", "notify", "calendar", "im_integration"}
+                    "file_multi_edit", "archive", "notify", "calendar",
+                    "im_integration"}
         assert expected <= names, f"未注册：{expected - names}"
+
+    def test_file_multi_edit_registered_and_works(self, tmp_path):
+        """v1.11.12：FileMultiEditTool 早就实现了却从未注册 —— 工具面板里
+        根本没有 file_multi_edit，模型写批量编辑时只能一个个文件来。"""
+        from automind.tools.file_editor import FileMultiEditTool
+
+        p1, p2 = tmp_path / "a.txt", tmp_path / "b.txt"
+        p1.write_text("old-a\n", encoding="utf-8")
+        p2.write_text("old-b\n", encoding="utf-8")
+        tool = FileMultiEditTool(project_root=tmp_path)
+        r = run(tool.execute(edits=[
+            {"path": str(p1), "old_string": "old-a", "new_string": "new-a"},
+            {"path": str(p2), "old_string": "old-b", "new_string": "new-b"},
+        ]))
+        assert r.success, r.error
+        assert r.output["total"] == 2 and r.output["succeeded"] == 2
+        assert p1.read_text(encoding="utf-8").strip() == "new-a"
+        assert p2.read_text(encoding="utf-8").strip() == "new-b"
 
     def test_pro_actions_gated_in_community(self, tmp_path):
         """社区版下进阶动作必须被挡，并给出升级引导。"""

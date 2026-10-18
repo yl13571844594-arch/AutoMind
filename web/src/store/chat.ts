@@ -17,6 +17,13 @@ export interface LoopIter { iter: number; max: number; action?: string; obs?: st
 // 否则任务结束时会被"未确认兜底"误判成"没纳入"，那是对用户撒谎。
 export type InjectState = 'received' | 'applied' | 'promoted' | 'dropped' | 'rejected';
 
+// v1.7.7 输入框 overrides 的回执 chip：发送时是 pending，task_start 带回服务端
+// 回执后变成 ok / fail（fail 带原因）。挂在用户那条消息上并随消息落盘 ——
+// "这条是用哪个专家/模式/附件跑的"事后回看时还得查得到。
+export interface MsgChip {
+  key: string; label: string; state: 'pending' | 'ok' | 'fail'; note?: string;
+}
+
 export type ChatItem =
   // 插入补充（injected）另带一组状态位：已纳入本轮的 / 确认没纳入的 / 被拒的。
   // 拆成独立字段而不是一个枚举，是为了让"有没有效"也能跟着消息一起落盘 ——
@@ -26,6 +33,7 @@ export type ChatItem =
       kind: 'msg'; id: string; role: 'user' | 'agent'; md: string; images?: string[]; meta?: string;
       injected?: boolean; applied?: boolean; promoted?: boolean; dropped?: boolean; rejected?: boolean;
       injectNote?: string;
+      chips?: MsgChip[];
     }
   | { kind: 'welcome'; id: string }
   | { kind: 'stream'; id: string; buf: string }
@@ -36,6 +44,21 @@ export type ChatItem =
   | { kind: 'multi'; id: string; steps: MaStep[]; done: boolean }
   | { kind: 'loop'; id: string; iters: LoopIter[]; stopReason?: string; done: boolean; traces: TraceItem[]; traceDropped?: number }
   | { kind: 'resume'; id: string; why: string }
+  // v1.8.0 工作流运行卡片：只存 run_id，进度从 store/workflow 实时读取
+  | { kind: 'workflow'; id: string; runId: string; name: string }
+  // v1.11.11 交付卡片（presented_files）：模型用 present 工具声明"这些是交付物"。
+  // 只存路径与说明 —— 文件内容可能很大且随时被改，点开时再读，卡片本身保持轻量、可持久化。
+  | {
+      kind: 'deliverable'; id: string;
+      files: { path: string; name?: string; description?: string }[];
+      count?: number;
+    }
+  // v1.7.7 隔离工作副本的产物卡片：改了哪些文件 + 应用到项目 / 导出 / 删除副本
+  | {
+      kind: 'workspace'; id: string; sid: string; path: string;
+      added: string[]; modified: string[]; deleted: string[];
+      applied?: string[]; conflicts?: string[]; removed?: boolean;
+    }
   // 任务失败/中断。**自带任务快照**（task/taskMode）而不是只指向易失的 lastTask：
   // 这样重启应用后历史里的失败卡片仍然能续跑，不会变成一个点了报
   // "没有可继续的任务"的死按钮。
@@ -53,7 +76,28 @@ const TOTAL = 1200 * 1024;
 function storageKey(): string {
   const sid = localStorage.getItem('automind_sid') || 'default';
   const suffix = localStorage.getItem('automind_ws_suffix') || '';
-  return 'automind_msgs_' + sid + suffix;
+  // v1.7.6 多会话：默认会话后缀为空，键与旧版完全一致（升级后历史不丢）
+  let conv = '';
+  try { conv = localStorage.getItem('automind_conv' + suffix) || ''; } catch { /* ignore */ }
+  if (!/^_c[a-z0-9]{1,16}$/.test(conv)) conv = '';
+  return 'automind_msgs_' + sid + suffix + conv;
+}
+
+/** 读取任意会话的本地消息（归档时把过程记录带给服务端生成摘要）。 */
+export function readConversationMessages(convSuffix: string): Partial<Record<Mode, ChatItem[]>> {
+  const sid = localStorage.getItem('automind_sid') || 'default';
+  const suffix = localStorage.getItem('automind_ws_suffix') || '';
+  try {
+    return JSON.parse(localStorage.getItem('automind_msgs_' + sid + suffix + convSuffix) || '{}') || {};
+  } catch { return {}; }
+}
+
+/** 删除会话时一并清掉它的本地消息与草稿。 */
+export function dropConversationStorage(convSuffix: string): void {
+  const sid = localStorage.getItem('automind_sid') || 'default';
+  const suffix = localStorage.getItem('automind_ws_suffix') || '';
+  const k = 'automind_msgs_' + sid + suffix + convSuffix;
+  try { localStorage.removeItem(k); localStorage.removeItem(k + '_side'); } catch { /* ignore */ }
 }
 
 function loadPersisted(): Partial<Record<Mode, ChatItem[]>> {
@@ -105,6 +149,7 @@ interface ChatState {
   setMessages: (mode: Mode, items: ChatItem[]) => void;
   reload: () => void;
   markInjected: (id: string, state: InjectState, note?: string) => void;
+  setChips: (id: string, patch: (chips: MsgChip[]) => MsgChip[]) => void;
   setTaskMode: (m: Mode | null) => void;
   setLastTask: (t: { text: string; mode: Mode } | null) => void;
   setPendingImages: (imgs: string[]) => void;
@@ -210,6 +255,23 @@ export const useChat = create<ChatState>((set, get) => ({
       return changed ? { messages } : s;
     });
     // 落盘：状态是用户事后回看时的依据，丢了刷新一下就像从没生效过
+    get().persist();
+  },
+
+  // 按消息 id 在所有模式里找（同 markInjected：回执回来时用户可能已切走模式）
+  setChips: (id, patch) => {
+    set((s) => {
+      const messages: Partial<Record<Mode, ChatItem[]>> = { ...s.messages };
+      let changed = false;
+      for (const k of Object.keys(messages) as Mode[]) {
+        const list = messages[k];
+        if (!list || !list.some((i) => i.id === id)) continue;
+        messages[k] = list.map((i) => (i.id === id && i.kind === 'msg'
+          ? { ...i, chips: patch(i.chips || []) } : i));
+        changed = true;
+      }
+      return changed ? { messages } : s;
+    });
     get().persist();
   },
 

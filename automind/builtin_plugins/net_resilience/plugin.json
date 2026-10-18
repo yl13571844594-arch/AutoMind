@@ -1,0 +1,8 @@
+{
+  "name": "net_resilience",
+  "version": "1.0.0",
+  "description": "网络韧性：下载依赖 / 克隆代码 / GET 请求遇到网络中断时，先等网络恢复再按退避自动重试（pip / npm 第二次起改用国内镜像），并提供 net_check、wait_for_network 两个工具",
+  "author": "AutoMind Team",
+  "entry_point": "hooks:get_hooks",
+  "priority": 40
+}
