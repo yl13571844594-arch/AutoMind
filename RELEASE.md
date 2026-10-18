@@ -82,9 +82,9 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 
 | 产物 | 大小 | sha256 |
 |---|---|---|
-| `automind_agent-1.11.13-py3-none-any.whl` | 1625 KB | `a68e3be87fe827ef36c17afeb488857d5af52fac9df7f382087366f4236fcfc5` |
-| `automind_agent-1.11.13.tar.gz` | 1563 KB | `f389839497270246c5066954da2564cc247f818e23bad61f102aee480ab09a6e` |
-| `automind-community-1.11.13-src.zip` | 4602 KB | `ab0241732741732278d144a7578672fe06212c0596d227dbd5280b3c7a475200` |
+| `automind_agent-1.11.13-py3-none-any.whl` | 1625 KB | `c13dd3b2f91a712677d67d8a0dd85fedbe4e1143958ebf94030131c788ef95c2` |
+| `automind_agent-1.11.13.tar.gz` | 1563 KB | `380a998302b6f143ea637e381dc679e656db5feae02ed5035bd89cda1c88d4cd` |
+| `automind-community-1.11.13-src.zip` | 4602 KB | `14d5d935b3fc4e5d11a927c84b287c1357ce1541322db26363278c04d1ff11c3` |
 
 三平台与 Release 附件（[v1.11.13](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.13)）：
 
