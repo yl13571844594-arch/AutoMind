@@ -78,6 +78,29 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > 上传 PyPI 仍需先按「上传 PyPI（社区版）」一节配好 Trusted Publisher，
 > 或用本机 twine（`dist/automind_agent-1.7.4-*` 已就绪）。
 
+**v1.11.13 已构建（2026-10-18，社区版）**：
+
+| 产物 | 大小 | sha256 |
+|---|---|---|
+| `automind_agent-1.11.13-py3-none-any.whl` | 1625 KB | `a68e3be87fe827ef36c17afeb488857d5af52fac9df7f382087366f4236fcfc5` |
+| `automind_agent-1.11.13.tar.gz` | 1563 KB | `f389839497270246c5066954da2564cc247f818e23bad61f102aee480ab09a6e` |
+| `automind-community-1.11.13-src.zip` | 4602 KB | `ab0241732741732278d144a7578672fe06212c0596d227dbd5280b3c7a475200` |
+
+三平台与 Release 附件（[v1.11.13](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.13)）：
+
+| 平台 | 文件 | sha256 |
+|---|---|---|
+| Windows 安装包（Certum 签名 + RFC3161） | `AutoMind-Setup-1.11.13.exe` | `6b1d889c7ec26b710aa94515215158f2c46ba5848ed92ebc940fb60b7a6d66ff` |
+| Windows 便携版 | `AutoMind-1.11.13-win64-portable.zip` | `c8a84dbc14874dcbe947be84a4326efbcb15a9a134df700284186ecb8ffbee5e` |
+| macOS 通用 DMG | `AutoMind-1.11.13.dmg` | `d5b04641c6a907239845d66b473404655774372d7b77caece0d5c6858bb5a669` |
+| Linux deb | `automind_1.11.13_amd64.deb` | `184a90197a2026bdb46694ea2dd562fbddfdbbedf911026ce3f2323d11909cc7` |
+
+> v1.11.13 核验：Windows `AutoMind.exe` 与 `AutoMind-Setup-1.11.13.exe`
+> 均为 `Valid`，发布者 `西安心途启境科技有限公司`，带 RFC3161 时间戳；
+> `/api/health` 返回 version=1.11.13、edition=community；macOS CI 已做
+> universal 合并校验；Linux 包冒烟测试通过。PyPI 自动发布因项目尚未配置
+> Trusted Publisher（OIDC）而失败，本轮 wheel/sdist 已作为 Release 附件提供。
+
 ## 构建桌面三平台安装包
 
 | 平台 | 怎么来 | 产物 | 签名 |
