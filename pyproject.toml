@@ -76,6 +76,8 @@ full = [
     "uvicorn>=0.29.0",
     "httpx>=0.27.0",
     "websockets>=12.0",
+    # IM 机器人（飞书/企业微信）消息加密解密所需；缺了只能处理未加密渠道
+    "cryptography>=42.0",
     "tiktoken>=0.7.0",
     "rich>=13.0",
     "openai>=1.30.0",
@@ -95,6 +97,8 @@ full = [
 ]
 dev = [
     "automind-agent[web]",   # 测试需 Web 栈（fastapi/uvicorn/httpx/openai）
+    # IM 机器人加密渠道测试（飞书/企业微信）：不装则 4 个 crypto 用例只能 skip
+    "cryptography>=42.0",
     "pypdf>=4.0",            # RAG 知识库 PDF 解析测试
     # 办公工具的依赖也进 dev：否则 CI 上 excel/word/calendar 的往返用例
     # 只会走"缺库时给安装提示"那条分支，真正的读写逻辑一行都没被跑到。
@@ -123,6 +127,8 @@ dev = [
 #   Linux=WebKit2GTK（需系统包 gir1.2-webkit2-4.1 + PyGObject，CI 里 apt 安装）。
 desktop = [
     "automind-agent[web]",
+    # 桌面版里的 IM 机器人需要处理加密消息（飞书/企业微信）；打包时一并带上
+    "cryptography>=42.0",
     "pyinstaller>=6.3",
     "pywebview>=5.0",
     "pystray>=0.19",

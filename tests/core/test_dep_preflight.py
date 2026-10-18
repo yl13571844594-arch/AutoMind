@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 from typing import Any
 
@@ -37,7 +38,12 @@ class TestChecks:
         rows = dp.check_binaries()
         assert rows, "至少要检查 ffmpeg / ffprobe / tesseract / git"
         names = {r["name"] for r in rows}
-        assert {"ffmpeg", "ffprobe", "tesseract", "git"} <= names
+        # tesseract 行只在 pytesseract（外壳）已安装时检查 —— CI 的 dev extra
+        # 刻意不装 pytesseract（缺系统引擎），这里不能假设它一定出现。
+        expected = {"ffmpeg", "ffprobe", "git"}
+        if importlib.util.find_spec("pytesseract") is not None:
+            expected.add("tesseract")
+        assert expected <= names
         for r in rows:
             assert r["kind"] == "binary"
             if not r["ok"]:

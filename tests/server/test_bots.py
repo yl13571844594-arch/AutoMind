@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import json
 import time
 from typing import Any
@@ -15,6 +16,12 @@ import automind.server as srv
 from automind.bots import BotManager, HttpReq, Incoming
 from automind.bots import crypto as bc
 from automind.bots.channels import CHANNELS, ChannelError, split_utf8
+
+#: IM 加密渠道（飞书/企业微信）依赖可选的 cryptography；未安装时跳过这几个用例，
+#: 而不是让整个测试文件失败（普通文本渠道不受影响）。
+_requires_crypto = pytest.mark.skipif(
+    importlib.util.find_spec("cryptography") is None,
+    reason="需要可选依赖 cryptography（pip install cryptography）")
 
 AES_KEY = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG"   # 43 位
 
@@ -34,6 +41,7 @@ def run(coro):
 # ── 加解密 ──────────────────────────────────────────────────────
 
 
+@_requires_crypto
 def test_wx_crypt_roundtrip():
     wx = bc.WXCrypt("tok", AES_KEY, "corp1")
     enc = wx.encrypt("<xml><Content>你好</Content></xml>")
@@ -42,6 +50,7 @@ def test_wx_crypt_roundtrip():
         bc.WXCrypt("tok", AES_KEY, "other").decrypt(enc)
 
 
+@_requires_crypto
 def test_feishu_crypt_roundtrip():
     assert bc.feishu_decrypt("k", bc.feishu_encrypt("k", '{"a":1}')) == '{"a":1}'
 
@@ -62,6 +71,7 @@ def test_feishu_url_verification_and_token():
         run(ch.handle(bot, _req(body={"type": "url_verification", "challenge": "c1", "token": "bad"})))
 
 
+@_requires_crypto
 def test_feishu_encrypted_message_event():
     ch = CHANNELS["feishu"]
     bot = _bot("feishu", encrypt_key="ek")
@@ -99,6 +109,7 @@ def test_dingtalk_signature():
         run(ch.handle(bot, _req(body=body, headers={"timestamp": ts, "sign": "bad"})))
 
 
+@_requires_crypto
 def test_wecom_url_verify_and_message():
     ch = CHANNELS["wecom"]
     bot = _bot("wecom", corp_id="corp1", agent_id="1000002", secret="s", token="tok",
