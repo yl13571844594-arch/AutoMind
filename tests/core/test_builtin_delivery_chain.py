@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 
 from automind.core.plugin import PluginManager
-from automind.core.types import PermissionTier, ToolSource, ToolResult
+from automind.core.types import PermissionTier, ToolResult, ToolSource
 
 _PLUGINS = Path(__file__).resolve().parents[2] / "automind" / "builtin_plugins"
 

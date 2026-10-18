@@ -155,7 +155,7 @@ class TestEnabledStatePersists:
         agent = _FakeAgent()
         srv._restore_plugins(agent)
         assert set(agent.plugin_manager.loaded_names()) == {"cost_tracker"} | _V1119_NEW | {"net_resilience"}
-        assert _V1119_NEW <= set(srv._read_config()["known_plugins"])
+        assert set(srv._read_config()["known_plugins"]) >= _V1119_NEW
 
     def test_known_but_disabled_builtin_stays_off(self, _isolated_config):
         srv = _isolated_config

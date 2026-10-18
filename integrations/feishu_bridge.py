@@ -51,13 +51,13 @@ try:
     )
 except ImportError:  # pragma: no cover - 缺依赖时给人话，而不是一堆 traceback
     print("缺少依赖：pip install lark-oapi", file=sys.stderr)
-    raise SystemExit(2)
+    raise SystemExit(2) from None
 
 try:
     import requests
 except ImportError:  # pragma: no cover
     print("缺少依赖：pip install requests", file=sys.stderr)
-    raise SystemExit(2)
+    raise SystemExit(2) from None
 
 # Windows 控制台默认是 GBK，中文日志会直接抛 UnicodeEncodeError 把进程弄挂。
 # 这跟"桥接挂了"长得一模一样，但原因完全无关 —— 提前收口掉。
@@ -176,7 +176,7 @@ def send_text(chat_id: str, text: str) -> None:
     """
     chunks = [text[i:i + CHUNK] for i in range(0, max(len(text), 1), CHUNK)][:MAX_CHUNKS]
     if len(text) > CHUNK * MAX_CHUNKS:
-        chunks.append(f"…（输出过长，已截断，完整内容见 AutoMind 界面）")
+        chunks.append("…（输出过长，已截断，完整内容见 AutoMind 界面）")
     for piece in chunks:
         body = (CreateMessageRequestBody.builder()
                 .receive_id(chat_id)
