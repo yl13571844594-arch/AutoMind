@@ -155,12 +155,11 @@ pip install "automind-agent[web]"     # Web + OpenAI-compatible backends
 # Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
 ```
 
-> ✅ **Downloads**: desktop installers live on
+> ✅ **PyPI is up to date with v1.11.13**: `pip install -U "automind-agent[web]"` gets
+> the same version as this repository. Desktop installers live on
 > [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`),
 > and each release ships a `SHA256SUMS` file you can check with `sha256sum -c`.
-> The v1.11.13 PyPI wheel/sdist are attached to the same release; syncing to the
-> PyPI index requires a one-time Trusted Publisher setup by the maintainer.
 
 ```bash
 # Start the Web workbench (recommended)

@@ -75,8 +75,10 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > 校验和名字、`env_detector` 捕获 `OSError`、Web 静态资源为本次前端构建产物；
 > 三份产物内均无绝对路径泄漏（`Administrator`/`Desktop` 零命中）。
 
-> 上传 PyPI 仍需先按「上传 PyPI（社区版）」一节配好 Trusted Publisher，
-> 或用本机 twine（`dist/automind_agent-1.7.4-*` 已就绪）。
+> v1.11.13 的 PyPI 发布已完成：`automind_agent-1.11.13-py3-none-any.whl` /
+> `automind_agent-1.11.13.tar.gz` 已上传 PyPI（sha256 与本地构建一致）。
+> 后续 tag 发布由仓库 Secret `PYPI_API_TOKEN` 自动完成；也可继续按「上传 PyPI」
+> 一节改用 Trusted Publisher（更推荐，零令牌）。
 
 **v1.11.13 已构建（2026-10-18，社区版）**：
 
@@ -98,8 +100,8 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > v1.11.13 核验：Windows `AutoMind.exe` 与 `AutoMind-Setup-1.11.13.exe`
 > 均为 `Valid`，发布者 `西安心途启境科技有限公司`，带 RFC3161 时间戳；
 > `/api/health` 返回 version=1.11.13、edition=community；macOS CI 已做
-> universal 合并校验；Linux 包冒烟测试通过。PyPI 自动发布因项目尚未配置
-> Trusted Publisher（OIDC）而失败，本轮 wheel/sdist 已作为 Release 附件提供。
+> universal 合并校验；Linux 包冒烟测试通过；PyPI 1.11.13 已上传并可通过
+> `pip install "automind-agent[web]==1.11.13"` 安装。
 
 ## 构建桌面三平台安装包
 
@@ -206,6 +208,11 @@ python pro/tools/issue_license.py verify AMP2-xxxx-...      # 签完自己验一
 > **正式发布不要设置它**。
 
 ## 上传 PyPI（社区版）
+
+**v1.11.13（2026-10-18）**：PyPI 已发布。仓库已配置加密 Secret
+`PYPI_API_TOKEN`，`.github/workflows/publish.yml` 通过该 Secret 上传；
+下次发版推送 tag 即可自动发布。更推荐逐步切换为下面的 Trusted Publisher
+（OIDC、无令牌）方式。
 
 **方式 A · GitHub Actions 可信发布（推荐，零令牌）**
 

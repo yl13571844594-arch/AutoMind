@@ -70,3 +70,7 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # 首选 Token 方式（仓库 Secret，已配置）；若以后改用 PyPI Trusted
+          # Publisher，可删掉 password 并保留上面的 id-token: write。
+          password: ${{ secrets.PYPI_API_TOKEN }}
