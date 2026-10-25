@@ -80,6 +80,35 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > 后续 tag 发布由仓库 Secret `PYPI_API_TOKEN` 自动完成；也可继续按「上传 PyPI」
 > 一节改用 Trusted Publisher（更推荐，零令牌）。
 
+> **v1.11.18 已发布（2026-10-25）**：PyPI `automind_agent-1.11.18` 已上传；
+> GitHub Release 已包含 Windows 签名安装包 / 便携版、macOS 通用 DMG、Linux deb、
+> wheel/sdist、社区源码包与 `SHA256SUMS`。后续 tag 发布由仓库 Secret
+> `PYPI_API_TOKEN` 自动完成（工作流已接线）。
+
+**v1.11.18 已构建（2026-10-25，社区版）**：
+
+| 产物 | 大小 | sha256 |
+|---|---|---|
+| `automind_agent-1.11.18-py3-none-any.whl` | 1802 KB | `8d8c699432cca7c7eaba7dce7934c41756da2b0d735dc0b8600914f5cc005989` |
+| `automind_agent-1.11.18.tar.gz` | 1775 KB | `5f63b9062f9317d427c452c2eeff8d2e467aec7e715f456a7f794fb87eb9c317` |
+| `automind-community-1.11.18-src.zip` | 5960 KB | `7c6186cd75b428ce86065db7daa45a7dc8176cf10d446d5094f2a30a9b4c65b2` |
+
+三平台与 Release 附件（[v1.11.18](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.18)）：
+
+| 平台 | 文件 | sha256 |
+|---|---|---|
+| Windows 安装包（Certum 签名 + RFC3161） | `AutoMind-Setup-1.11.18.exe` | `e8bd147cf4264e51553004e6d01d7a7834d636038fc876d0a87bac2ff03e7770` |
+| Windows 便携版 | `AutoMind-1.11.18-win64-portable.zip` | `54c768b0bba029043aa7f51b9f2a2cd1c6669566ce2d6d2dd72f8b674858eeff` |
+| macOS 通用 DMG | `AutoMind-1.11.18.dmg` | `1a83fa99d444968089f56ce039e766180541fa170a7bf6a469ade2b7c4313c9a` |
+| Linux deb | `automind_1.11.18_amd64.deb` | `a37ea09b33d34b66e3a34a61354f043a94bf70b59af789c5462e8706d1d55758` |
+
+> v1.11.18 核验：Windows `AutoMind.exe` 与 `AutoMind-Setup-1.11.18.exe`
+> 均为 `Valid`，发布者 `西安心途启境科技有限公司`，带 RFC3161 时间戳；
+> 安装后在正常 Windows 会话运行 `--server-only`，`/api/health` 返回
+> version=1.11.18、edition=community；macOS CI 完成 lipo 合并并校验
+> `x86_64 arm64` 双架构；Linux deb 构建 + 冒烟测试通过；PyPI 1.11.18 已发布。
+> 社区源码包已排除商业扩展与运营手册/配图，审计通过。
+
 **v1.11.13 已构建（2026-10-18，社区版）**：
 
 | 产物 | 大小 | sha256 |
@@ -110,7 +139,7 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 | 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.18`，`tests/test_version_consistency.py` 全绿 |
 | 前端 `automind/static/dist/` | **本版未改前端源码，无需重建**（沿用 v1.11.17 构建产物） |
 | 商业扩展包 `automind_pro-1.11.18-py3-none-any.whl` / 一键升级包 `.ampkg` | **均已重建**：`pro/dist/automind_pro-1.11.18-py3-none-any.whl`（119,601 B，sha256 `f8b4fe284cf27ad37c6e806f545101e6c17f487b98e8377e5406997bc43fb04b`），旧 1.11.17 wheel 已移除（避免 `doctor` 误报过期 wheel）；`.ampkg` 两份均为 1.11.18 wheel：`dist/upgrades/AutoMind-PRO-acme-20271231.ampkg`（118,303 B）与 `AutoMind-ENT-bigcorp-00000000.ampkg`（118,313 B），旧包归档到 `dist/upgrades/archive-1.11.17/`；`issue_license.py doctor` **12/12 全绿** |
-| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建/未上传**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **已构建并发布**：见上文 v1.11.18 表格；PyPI 1.11.18 与 GitHub Release（Windows 签名安装包 / 便携版 / macOS 通用 DMG / Linux deb / wheel / sdist / 源码包 / SHA256SUMS）均已上线 |
 | 老客户升级 | 本版未改商业扩展包功能：已按 v1.11.17 换发过 `.ampkg` 的客户可继续使用（面板对不同号会提示）；发行方已重建 v1.11.18 同号 wheel 与 `.ampkg`，需要严格同号时直接换发。公钥未轮换，旧许可证仍有效 |
 | 本轮变更 | 评测执行器无人值守审批（`approve_all` 默认 + `--approval-mode` 覆盖 + 报告标注）与任务超时硬收敛；环境探测改在任务工作区执行（修掉"系统提示把进程所在仓库误报成项目"的误导）；`tool_called` 断言路径等价；`file_write` 磁盘回读校验 + 中文写入提示词纪律；`pwsh` 原生后台通道 / `subagent_list` 的 `agent_id` / 团队共享任务工具 `team_task` |
 | 本轮验证 | `pytest` 全量 **3019 条用例通过（exit 0）**、`ruff check .` 通过、`tests/test_version_consistency.py` 10 passed；`pro/tests` 全量通过、`issue_license.py doctor` **12/12 全绿**；新增 `tests/eval/test_eval_approval.py`、`tests/tools/test_file_write_verify.py`、`tests/tools/test_background_pwsh.py`、`tests/tools/test_subagent_detail.py`、`tests/tools/test_team_task_tool.py`、`tests/context/test_env_detector_cwd.py` + 团队注册/迁移测试；标准工具评测复跑 **7/7 通过**（251.0s / 186,243 token，原失败两条见 `CHANGELOG.md`） |
