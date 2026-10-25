@@ -36,7 +36,10 @@ INCLUDE_FILES = [
 # 目录内仍需排除的模式
 EXCLUDE_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
                  "node_modules"}
-EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".rar", ".key", ".pem"}
+# 发行方内部生成的图文手册与配图不属于社区源码（体积大且含商业运营流程）；
+# 生成脚本仍随 docs 保留，需要时可本机重新生成。
+EXCLUDE_DIR_PATHS = {("docs", "manual_assets")}
+EXCLUDE_SUFFIXES = {".pyc", ".pyo", ".rar", ".key", ".pem", ".docx"}
 # 任何情况下都不允许进包的敏感/商业标记
 FORBIDDEN_NAMES = {"automind_pro", ".automind_config.json", ".automind_license",
                    ".env", "LICENSE-COMMERCIAL.md"}
@@ -62,6 +65,8 @@ def _iter_source_files():
                 continue
             rel = p.relative_to(ROOT)
             if set(rel.parts) & EXCLUDE_PARTS:
+                continue
+            if any(rel.parts[:len(prefix)] == prefix for prefix in EXCLUDE_DIR_PATHS):
                 continue
             if p.suffix.lower() in EXCLUDE_SUFFIXES:
                 continue
@@ -98,7 +103,8 @@ def audit(version: str) -> None:
     print(">> 审计发布产物 ...")
     bad: list[str] = []
     markers = ("automind_pro", "pro/automind_pro", ".automind_config.json",
-               ".automind_license", "LICENSE-COMMERCIAL")
+               ".automind_license", "LICENSE-COMMERCIAL", ".docx",
+               "manual_assets/", "商业运营升级与发证操作手册")
     for art in DIST.glob(f"*{version}*"):
         names: list[str] = []
         if art.suffix == ".zip" or art.name.endswith(".whl"):

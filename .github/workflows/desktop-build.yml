@@ -130,6 +130,10 @@ jobs:
       - name: Install arm64 deps
         run: |
           python -m pip install --upgrade pip
+          # cryptography 50.x 起不再提供 macOS universal2 wheel；Intel 片在
+          # Rosetta 下只能从源码构建出 arm64 产物，导致 PyInstaller 合并失败。
+          # 固定到仍带 universal2 wheel 的 46.x，arm64/x86_64 两片才能 lipo。
+          pip install "cryptography>=42,<47"
           pip install -e ".[desktop]"
       - name: Generate icons
         working-directory: desktop
@@ -150,6 +154,9 @@ jobs:
           VPY="$RUNNER_TEMP/venv-x86/bin/python"
           echo "x86 venv archs: $(lipo -archs "$VPY" 2>/dev/null || echo n/a)"
           arch -x86_64 "$VPY" -m pip install --upgrade pip
+          # 同上：Intel 片必须拿到 universal2/x86_64 的 cryptography wheel，
+          # 不能让 pip 选到只有 arm64 的 50.x。
+          arch -x86_64 "$VPY" -m pip install "cryptography>=42,<47"
           arch -x86_64 "$VPY" -m pip install -e "..[desktop]"
           arch -x86_64 "$VPY" -m PyInstaller automind.spec --noconfirm
           echo "x86_64 archs: $(lipo -archs dist/AutoMind.app/Contents/MacOS/AutoMind)"
