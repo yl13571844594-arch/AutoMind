@@ -80,6 +80,35 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > 后续 tag 发布由仓库 Secret `PYPI_API_TOKEN` 自动完成；也可继续按「上传 PyPI」
 > 一节改用 Trusted Publisher（更推荐，零令牌）。
 
+> **v1.11.18 已发布（2026-10-25）**：PyPI `automind_agent-1.11.18` 已上传；
+> GitHub Release 已包含 Windows 签名安装包 / 便携版、macOS 通用 DMG、Linux deb、
+> wheel/sdist、社区源码包与 `SHA256SUMS`。后续 tag 发布由仓库 Secret
+> `PYPI_API_TOKEN` 自动完成（工作流已接线）。
+
+**v1.11.18 已构建（2026-10-25，社区版）**：
+
+| 产物 | 大小 | sha256 |
+|---|---|---|
+| `automind_agent-1.11.18-py3-none-any.whl` | 1802 KB | `8d8c699432cca7c7eaba7dce7934c41756da2b0d735dc0b8600914f5cc005989` |
+| `automind_agent-1.11.18.tar.gz` | 1775 KB | `5f63b9062f9317d427c452c2eeff8d2e467aec7e715f456a7f794fb87eb9c317` |
+| `automind-community-1.11.18-src.zip` | 5960 KB | `7c6186cd75b428ce86065db7daa45a7dc8176cf10d446d5094f2a30a9b4c65b2` |
+
+三平台与 Release 附件（[v1.11.18](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.18)）：
+
+| 平台 | 文件 | sha256 |
+|---|---|---|
+| Windows 安装包（Certum 签名 + RFC3161） | `AutoMind-Setup-1.11.18.exe` | `e8bd147cf4264e51553004e6d01d7a7834d636038fc876d0a87bac2ff03e7770` |
+| Windows 便携版 | `AutoMind-1.11.18-win64-portable.zip` | `54c768b0bba029043aa7f51b9f2a2cd1c6669566ce2d6d2dd72f8b674858eeff` |
+| macOS 通用 DMG | `AutoMind-1.11.18.dmg` | `1a83fa99d444968089f56ce039e766180541fa170a7bf6a469ade2b7c4313c9a` |
+| Linux deb | `automind_1.11.18_amd64.deb` | `a37ea09b33d34b66e3a34a61354f043a94bf70b59af789c5462e8706d1d55758` |
+
+> v1.11.18 核验：Windows `AutoMind.exe` 与 `AutoMind-Setup-1.11.18.exe`
+> 均为 `Valid`，发布者 `西安心途启境科技有限公司`，带 RFC3161 时间戳；
+> 安装后在正常 Windows 会话运行 `--server-only`，`/api/health` 返回
+> version=1.11.18、edition=community；macOS CI 完成 lipo 合并并校验
+> `x86_64 arm64` 双架构；Linux deb 构建 + 冒烟测试通过；PyPI 1.11.18 已发布。
+> 社区源码包已排除商业扩展与运营手册/配图，审计通过。
+
 **v1.11.13 已构建（2026-10-18，社区版）**：
 
 | 产物 | 大小 | sha256 |
