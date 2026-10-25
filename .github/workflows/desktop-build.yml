@@ -10,6 +10,11 @@ name: Build Desktop Installers
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "已有 Release tag（如 v1.11.18）；填了就把 DMG/deb 直接附加到该 Release"
+        required: false
+        default: ""
   push:
     tags: ["v*.*.*"]
 
@@ -212,9 +217,10 @@ jobs:
           name: AutoMind-macOS-DMG
           path: desktop/Output/AutoMind-*.dmg
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: desktop/Output/AutoMind-*.dmg
 
   # ── Linux .deb（Debian / Ubuntu，amd64）───────────────
@@ -273,7 +279,8 @@ jobs:
           name: AutoMind-Linux-deb
           path: desktop/Output/automind_*_amd64.deb
       - name: Attach to release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release_tag || github.ref_name }}
           files: desktop/Output/automind_*_amd64.deb
