@@ -213,12 +213,9 @@ pip install "automind-agent[web]==1.11.18"     # current version · Web + OpenAI
 # Upgrade: pip install -U "automind-agent[web]==1.11.18"; use [full] for every backend
 ```
 
-> ✅ **v1.11.18 is ready**: this repository, the Pro extension and the manual are all at v1.11.18.
-> The Community wheel/sdist, the PyPI upload and the three desktop installers are a **source-level
-> release** and are produced by the pipeline in [RELEASE.md](RELEASE.md) — install from source or use
-> the offline bundle until they are published; afterwards `pip install -U "automind-agent[web]"`
-> picks up exactly this release.
-> Installers live on [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+> ✅ **v1.11.18 is released**: PyPI is up to date, so `pip install -U "automind-agent[web]"` picks up
+> exactly this release. Desktop installers live on
+> [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`), and each release ships a
 > `SHA256SUMS` file you can check with `sha256sum -c`.
 >

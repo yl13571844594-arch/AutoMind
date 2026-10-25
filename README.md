@@ -188,10 +188,8 @@ pip install "automind-agent[web]==1.11.18"     # 当前版本 · Web + OpenAI �
 # 升级：pip install -U "automind-agent[web]==1.11.18"；全部模型后端换成 [full]
 ```
 
-> ✅ **v1.11.18 已就绪**：本仓库代码、商业扩展包与手册已统一到 v1.11.18；
-> 社区版 wheel / sdist、PyPI 与三平台安装包为**源码级发版**，按 [RELEASE.md](RELEASE.md)
-> 的发布流程构建上传 —— 上传前请从源码安装或使用离线包，发布后 `pip install -U "automind-agent[web]"` 拿到的就是本版本。
-> 桌面安装包发布后见 [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+> ✅ **v1.11.18 已发布**：PyPI 已同步，`pip install -U "automind-agent[web]"` 拿到的就是本版本；
+> 桌面安装包见 [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > （Windows `.exe` 已代码签名 · macOS `.dmg` 通用二进制 · Linux `.deb`），
 > 三平台包的 `SHA256SUMS` 随 Release 一并提供，可直接 `sha256sum -c` 校验。
 >
