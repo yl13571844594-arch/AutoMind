@@ -239,6 +239,107 @@ class TestAssertions:
                             tmp_path)
         assert r.passed is False and "file_read" in r.actual
 
+    def test_tool_called_relative_path_still_matches_exactly(self, tmp_path):
+        """相对路径精确相等的老行为不变。"""
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {"path": "hello.txt"}}])
+        r = check_assertion(Assertion("tool_called", {
+            "name": "file_write", "args": {"path": "hello.txt"}}), out, tmp_path)
+        assert r.passed, r.actual
+
+    def test_tool_called_accepts_absolute_path_inside_workspace(self, tmp_path):
+        """模型把工作区内文件写成绝对路径 → 与相对路径语义等价，判通过。
+
+        这是全量复跑暴露的断言假阴性：``smoke_write_file`` 里文件确实写对了
+        （``file_exists`` 与输出断言全过），但 ``args: {path: hello.txt}`` 用
+        字符串精确比较，绝对路径就被判成"参数不匹配"。
+        """
+        target = tmp_path / "hello.txt"
+        target.write_text("hello automind", encoding="utf-8")
+        a = Assertion("tool_called", {"name": "file_write", "args": {"path": "hello.txt"}})
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {"path": str(target)}}])
+        assert check_assertion(a, out, tmp_path).passed is True
+
+    @pytest.mark.parametrize("arg_name",
+                             ["path", "file", "file_path", "target", "target_path",
+                              "PATH", "File_Path"])
+    def test_tool_called_path_arg_name_variants(self, tmp_path, arg_name):
+        """path 类参数名（含大小写差异）都做等价匹配。"""
+        target = tmp_path / "a.txt"
+        target.write_text("x", encoding="utf-8")
+        a = Assertion("tool_called", {"name": "file_write",
+                                      "args": {arg_name: "a.txt"}})
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {arg_name: str(target)}}])
+        assert check_assertion(a, out, tmp_path).passed is True
+
+    def test_tool_called_rejects_absolute_path_outside_workspace(self, tmp_path):
+        """工作区外绝对路径不得命中（否则断言就成了"任意路径都算过"）。"""
+        outside = tmp_path.parent / "outside_hello.txt"
+        a = Assertion("tool_called", {"name": "file_write", "args": {"path": "hello.txt"}})
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {"path": str(outside)}}])
+        r = check_assertion(a, out, tmp_path)
+        assert r.passed is False
+        # 失败信息仍要回显实际参数（不能只说"不匹配"）
+        assert "参数不匹配" in r.actual and "outside_hello.txt" in r.actual
+
+    def test_tool_called_absolute_and_escaping_expected_values_are_not_relaxed(
+            self, tmp_path):
+        """期望值本身是绝对路径 / 含 ``..`` 时不退让（与 file_exists 越界规则一致）。"""
+        ws = tmp_path / "ws"
+        ws.mkdir()
+        other = tmp_path / "elsewhere.txt"
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {"path": str(other)}}])
+
+        absolute = Assertion("tool_called", {
+            "name": "file_write", "args": {"path": str(tmp_path / "hello.txt")}})
+        assert check_assertion(absolute, out, ws).passed is False
+
+        escaping = Assertion("tool_called", {
+            "name": "file_write", "args": {"path": "../elsewhere.txt"}})
+        assert check_assertion(escaping, out, ws).passed is False
+
+    def test_tool_called_path_equivalence_does_not_relax_other_args(self, tmp_path):
+        """只有 path 类参数做等价匹配；其它参数（encoding 等）仍严格比较。"""
+        target = tmp_path / "hello.txt"
+        target.write_text("hello", encoding="utf-8")
+        a = Assertion("tool_called", {"name": "file_write",
+                                      "args": {"path": "hello.txt", "encoding": "gbk"}})
+        mismatch = EvalOutcome(tool_calls=[{
+            "name": "file_write",
+            "arguments": {"path": str(target), "encoding": "utf-8"}}])
+        r = check_assertion(a, mismatch, tmp_path)
+        assert r.passed is False, "路径等价不能顺带放宽 encoding 等非路径参数"
+
+        same = EvalOutcome(tool_calls=[{
+            "name": "file_write",
+            "arguments": {"path": str(target), "encoding": "gbk"}}])
+        assert check_assertion(a, same, tmp_path).passed is True
+
+        # 名为 name / tool 的参数也是普通参数，必须严格相等（避免"路径等价"被滥用）
+        named = Assertion("tool_called", {
+            "name": "file_write",
+            "args": {"path": "hello.txt", "tool": "x"}})
+        wrong_tool = EvalOutcome(tool_calls=[{
+            "name": "file_write",
+            "arguments": {"path": str(target), "tool": "y"}}])
+        assert check_assertion(named, wrong_tool, tmp_path).passed is False
+
+    def test_check_tool_called_without_root_falls_back_to_strict(self, tmp_path):
+        """``root=None``（老直接调用点）必须退回严格的字符串比较。"""
+        from automind.eval.assertions import _check_tool_called
+
+        target = tmp_path / "hello.txt"
+        target.write_text("x", encoding="utf-8")
+        a = Assertion("tool_called", {"name": "file_write", "args": {"path": "hello.txt"}})
+        out = EvalOutcome(tool_calls=[{"name": "file_write",
+                                       "arguments": {"path": str(target)}}])
+        assert _check_tool_called(a, out).passed is False
+        assert _check_tool_called(a, out, tmp_path).passed is True
+
     def test_max_seconds_and_max_tokens(self, tmp_path):
         assert check_assertion(Assertion("max_seconds", {"value": 5}),
                                EvalOutcome(seconds=1.0), tmp_path).passed
@@ -402,7 +503,11 @@ class TestExecutorPlumbing:
         cfg = make_agent_config(tmp_path, provider="deepseek", model="deepseek-chat")
         assert str(tmp_path) in cfg.project_root
         assert cfg.llm.provider == "deepseek"
-        assert cfg.execution.approval_mode == "auto", "评测不该卡在人工审批上"
+        # 本轮评测修复：默认值由 auto 改为 approve_all —— 评测是无人值守场景，
+        # auto 下 terminal 命令会返回 ASK_USER，而审批通道缺失时执行器
+        # fail-closed 拒绝，模型反复重试（实测 237s 超时 / 43.7 万 token）。
+        # 详情与回归覆盖见 tests/eval/test_eval_approval.py。
+        assert cfg.execution.approval_mode == "approve_all", "评测无人值守，需自动放行"
 
 
 # ═══════════════════════════════════════════════════════════════

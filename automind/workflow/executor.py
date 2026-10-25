@@ -175,17 +175,23 @@ class StepReport:
     retries: int = 0
     #: 执行这一行时的行号 —— 报告能直接指回文件
     line: int = 0
+    #: 本步骤消耗的 token（v1.11.16）：{"prompt": n, "completion": n, "total": n}。
+    #: 此前只把 agent 的 token 塞在 detail 里、整轮没有汇总，看板因此永远显示 0。
+    tokens: dict[str, int] = field(default_factory=dict)
     #: 补充信息（工具名、跳转去向、审批结果等），便于审计与排障
     detail: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "id": self.id, "type": self.type, "status": self.status,
             "started_at": self.started_at, "finished_at": self.finished_at,
             "duration_ms": round(self.duration_ms, 1), "output_digest": self.output_digest,
             "error": self.error, "retries": self.retries, "line": self.line,
             "detail": jsonable(self.detail),
         }
+        if self.tokens:
+            data["tokens"] = dict(self.tokens)
+        return data
 
 
 @dataclass
@@ -214,6 +220,11 @@ class WorkflowRun:
     #: 断点续跑（v1.8.0，R-104）：本轮接的是哪一次运行、哪些步骤直接沿用了上次的结果
     resumed_from: str = ""
     resumed_steps: list[str] = field(default_factory=list)
+    #: 整轮 token 汇总（v1.11.16）：{"prompt": n, "completion": n, "total": n}。
+    #: 看板（pro 的 workflow_history）读的就是它；此前 executor 从不写这个字段，
+    #: 导致"平均 token"永远是 0 —— 这不是没数据，是数据没汇总上来。
+    tokens: dict[str, int] = field(
+        default_factory=lambda: {"prompt": 0, "completion": 0, "total": 0})
 
     # ── 统计 ──────────────────────────────────────────
 
@@ -281,6 +292,7 @@ class WorkflowRun:
                 "cancelled": self.cancelled, "ok": self.ok,
                 "exit_code": self.exit_code,
             },
+            "tokens": dict(self.tokens),
             "steps": [s.as_dict() for s in self.steps],
         }
         if self.resumed_from:
@@ -295,13 +307,15 @@ class WorkflowRun:
                           ensure_ascii=False, indent=indent, default=str)
 
     def summary_line(self) -> str:
+        tokens = int(self.tokens.get("total") or 0)
         return (f"工作流「{self.workflow}」{_status_zh(self.status)}："
                 f"共 {self.total} 步，成功 {self.succeeded}、失败 {self.failed}、"
                 f"跳过 {self.skipped}"
                 + (f"、取消 {self.cancelled}" if self.cancelled else "")
                 + (f"（其中 {len(self.resumed_steps)} 步沿用上次结果）"
                    if self.resumed_steps else "")
-                + f"，耗时 {self.duration_ms / 1000:.2f}s")
+                + f"，耗时 {self.duration_ms / 1000:.2f}s"
+                + (f"，消耗 {tokens} tokens" if tokens else ""))
 
 
 def _status_zh(status: str) -> str:
@@ -510,6 +524,8 @@ class WorkflowExecutor:
         self._base_context: dict[str, Any] = {}
         self._current_id: str = ""
         self._cancelled = False
+        #: 整轮 token 汇总（v1.11.16）：每次 llm / agent 调用后累加，收尾时写进报告
+        self._tokens: dict[str, int] = {"prompt": 0, "completion": 0, "total": 0}
         #: 快照序号：并行组里多个子步骤几乎同时落盘时，旧快照不能覆盖新快照
         self._snapshot_seq = 0
 
@@ -547,9 +563,17 @@ class WorkflowExecutor:
         started = time.perf_counter()
         self._context = self._build_context()
         finished = False
+        #: 整轮硬超时（v1.11.16）：0 = 不限。步骤级 timeout 管"单步最多多久"，
+        #: 这里兜的是"整份流程无论卡在第几步都必须停下"—— 重试、循环展开、并行组
+        #: 都可能把总时长拖得比任何单步都长，只有整轮上限能保证无人值守任务不挂死。
+        run_timeout = float(getattr(self.schema, "timeout_seconds", 0.0) or 0.0)
 
         try:
-            await self._execute_steps(run)
+            if run_timeout > 0:
+                async with asyncio.timeout(run_timeout):
+                    await self._execute_steps(run)
+            else:
+                await self._execute_steps(run)
         except asyncio.CancelledError:
             self._cancelled = True
             run.status = RUN_CANCELLED
@@ -563,6 +587,21 @@ class WorkflowExecutor:
             # run_end 事件）—— 在已取消的任务里 await 会立刻再抛一次，
             # 把"记录取消"这件事本身也一起丢掉。
             raise
+        except TimeoutError:
+            # 整轮超时（v1.11.16）：与"被父任务取消"区分开 —— 这是我们自己
+            # 限时到了。状态记 aborted（不是 cancelled）：流程是被中止的，
+            # 不是有人叫停的，报告与通知据此给出不同的处置建议。
+            run.status = RUN_ABORTED
+            run.error = (f"工作流超时：超过整轮上限 {run_timeout:g}s 未完成，已中止。"
+                         "可调大 timeout_seconds，或给慢步骤单独设 timeout / "
+                         "把长任务拆成多次运行")
+            current = self._records.get(self._current_id)
+            if current is not None and current.status in (STATUS_STARTED, STATUS_CANCELLED):
+                current.status = STATUS_ABORTED
+                current.error = run.error
+            self._mark_remaining(run, aborted=True)
+            logger.warning("workflow_run_timeout", workflow=self.schema.name,
+                           timeout=run_timeout)
         except Exception as exc:                     # 执行器自身的 bug / 未预期异常
             run.status = RUN_FAILED
             run.error = f"执行器内部错误（{type(exc).__name__}）：{exc}"
@@ -630,6 +669,33 @@ class WorkflowExecutor:
             self._records[step.id] = record
             await self._emit_step_end(record)
             await self._checkpoint()
+
+            # 失败降级分支（v1.11.16）：on_failure: fallback(<步骤id>)。
+            # 与 branch 的区别：branch 是"条件选路"，这里是"失败才走的路"；
+            # 跳转区间内的步骤**不执行**（它们多依赖失败步骤的输出），
+            # 在报告里标 skipped 并写明原因。当前步骤仍记 failed ——
+            # 降级路径跑通 ≠ 原来的失败没发生，整轮至少是 partial。
+            if record.status == STATUS_FAILED and step.on_failure.kind == "fallback":
+                target = step.on_failure.fallback
+                resolved = self.schema.index_of(target)
+                if resolved < 0 or resolved <= index:
+                    record.status = STATUS_ABORTED
+                    record.error = (f"on_failure: fallback 目标 {target!r} 无法到达"
+                                    "（不存在或不在当前步骤之后），控制流无法继续，已中止整轮")
+                    aborted = True
+                    break
+                record.detail["fallback"] = target
+                record.detail.setdefault("on_failure", step.on_failure.raw)
+                self._skip_range(
+                    index + 1, resolved,
+                    f"前序步骤 {step.id} 失败，已按 on_failure: fallback 跳转到 {target}，"
+                    "本步骤未执行")
+                await self._emit("fallback_taken", {
+                    "step": step.id, "target": target, "run_id": run.run_id})
+                logger.warning("workflow_fallback_taken", workflow=self.schema.name,
+                               step=step.id, target=target, error=record.error)
+                index = resolved
+                continue
 
             if record.status == STATUS_ABORTED and not jump:
                 aborted = True
@@ -743,7 +809,16 @@ class WorkflowExecutor:
                 record.status = STATUS_FAILED
                 record.error = f"未知的步骤类型：{step.type}"
             else:
-                await self._dry_run_step(step, record)
+                try:
+                    # 步骤级 if / unless（v1.11.16）：试运行时只渲染预览、不据此跳过 ——
+                    # 真跑时才有的步骤输出在 dry-run 里是占位对象，拿它判定条件等于
+                    # 让试运行报告一个假的执行路径；但"条件里引用错了变量"必须现在暴露。
+                    self._dry_run_conditions(step, record)
+                except TemplateError as exc:
+                    record.status = STATUS_FAILED
+                    record.error = f"试运行渲染失败：{exc.format()}"
+                else:
+                    await self._dry_run_step(step, record)
             record.duration_ms = (time.perf_counter() - started) * 1000
             record.finished_at = _now()
             return record, None
@@ -757,29 +832,37 @@ class WorkflowExecutor:
                 record.finished_at = _now()
                 return record, None
 
-            if step.timeout:
-                # 超时是**步骤级**的硬上限，与工具自身的 timeout 参数是两回事：
-                # 工具超时管"这一次调用"，步骤超时还兜住"多次重试的总时长"。
-                async with asyncio.timeout(step.timeout):
-                    await self._attempts(step, record, handler)
-            else:
-                await self._attempts(step, record, handler)
-            # 跳转目标由 branch 步骤自己写进 detail["goto"]：用一个显式的
-            # "执行期协议字段"而不是让每个 handler 返回不同形状的值，
-            # 避免"忘了解包元组"这类只有跑到那条分支才会暴露的错误。
-            if step.type == "branch" and record.status == STATUS_OK:
-                target_id = record.detail.get("goto")
-                resolved = self.schema.index_of(str(target_id)) if target_id else -1
-                if resolved < 0:
-                    # 跳转目标不存在 = **控制流坏了**，不是"这一步的业务失败"。
-                    # 此时无论 on_failure 写什么都必须中止：按顺序往下走会让
-                    # 两条互斥分支都执行（实测过这个后果），而那是"报告全绿、
-                    # 实际多做了事"的静默错误。加载期已经拦过，这里是第二道闸。
-                    record.status = STATUS_ABORTED
-                    record.error = (f"branch 的跳转目标不存在：{target_id!r}；"
-                                    "控制流无法继续，已中止整轮（不接受 on_failure 放行）")
+            if step.if_condition or step.unless_condition:
+                self._apply_condition_gate(step, record)
+                if record.status == STATUS_SKIPPED:
+                    record.duration_ms = (time.perf_counter() - started) * 1000
+                    record.finished_at = _now()
+                    return record, None
+
+            if record.status != STATUS_FAILED:
+                if step.timeout:
+                    # 超时是**步骤级**的硬上限，与工具自身的 timeout 参数是两回事：
+                    # 工具超时管"这一次调用"，步骤超时还兜住"多次重试的总时长"。
+                    async with asyncio.timeout(step.timeout):
+                        await self._attempts(step, record, handler)
                 else:
-                    jump = resolved
+                    await self._attempts(step, record, handler)
+                # 跳转目标由 branch 步骤自己写进 detail["goto"]：用一个显式的
+                # "执行期协议字段"而不是让每个 handler 返回不同形状的值，
+                # 避免"忘了解包元组"这类只有跑到那条分支才会暴露的错误。
+                if step.type == "branch" and record.status == STATUS_OK:
+                    target_id = record.detail.get("goto")
+                    resolved = self.schema.index_of(str(target_id)) if target_id else -1
+                    if resolved < 0:
+                        # 跳转目标不存在 = **控制流坏了**，不是"这一步的业务失败"。
+                        # 此时无论 on_failure 写什么都必须中止：按顺序往下走会让
+                        # 两条互斥分支都执行（实测过这个后果），而那是"报告全绿、
+                        # 实际多做了事"的静默错误。加载期已经拦过，这里是第二道闸。
+                        record.status = STATUS_ABORTED
+                        record.error = (f"branch 的跳转目标不存在：{target_id!r}；"
+                                        "控制流无法继续，已中止整轮（不接受 on_failure 放行）")
+                    else:
+                        jump = resolved
         except TimeoutError:
             record.status = STATUS_FAILED
             record.error = (f"步骤超时：超过 {step.timeout:g}s 未完成。"
@@ -823,6 +906,89 @@ class WorkflowExecutor:
             record.error = self._redact(record.error)
             record.detail = self._redact(record.detail)
         return record, jump
+
+    # ── 步骤级条件（v1.11.16）────────────────────────────
+
+    @staticmethod
+    def _conditions_of(step: StepSpec) -> list[tuple[str, str]]:
+        """该步骤声明的条件列表（最多一个；if / unless 二者互斥）。"""
+        out: list[tuple[str, str]] = []
+        if step.if_condition:
+            out.append(("if", step.if_condition))
+        if step.unless_condition:
+            out.append(("unless", step.unless_condition))
+        return out
+
+    def _apply_condition_gate(self, step: StepSpec, record: StepReport) -> None:
+        """按 ``if`` / ``unless`` 决定这一步执不执行（真实运行）。
+
+        语义只有两条，且**没有"条件求值失败就放行"的路径**：
+
+          * ``if``     条件成立 → 执行；不成立 → ``skipped``；
+          * ``unless`` 条件成立 → ``skipped``；不成立 → 执行；
+          * 条件**无法判定**（数值比较遇到非数字、in 的右侧不是列表等）→ ``failed``
+            —— 与 branch 同一条理由：判不了就继续走，等于让执行路径变成掷硬币。
+
+        被跳过的步骤也会把 ``output=None`` 写进上下文：后面的步骤若引用它，
+        会**明确报错**（而不是拿到空串后一路往下走）。
+        """
+        for field_name, text in self._conditions_of(step):
+            operator, left, right = _split_condition(text)
+            if operator is None:
+                record.status = STATUS_FAILED
+                record.error = f"步骤条件无法解析：{field_name}: {text!r}"
+                record.detail["condition"] = {"field": field_name, "text": text,
+                                              "error": "条件语法无法解析"}
+                return
+            try:
+                matched, lhs, rhs = self._evaluate_condition(
+                    step, operator, left, right, field_name=field_name)
+            except _ConditionError as exc:
+                record.status = STATUS_FAILED
+                record.error = f"步骤条件无法判定（{field_name}）：{exc}"
+                record.detail["condition"] = {"field": field_name, "text": text,
+                                              "operator": operator, "error": str(exc)}
+                return
+            detail = {"field": field_name, "text": text, "operator": operator,
+                      "matched": matched, "left": lhs, "right": rhs}
+            should_run = matched if field_name == "if" else not matched
+            detail["should_run"] = should_run
+            record.detail["condition"] = detail
+            if not should_run:
+                record.status = STATUS_SKIPPED
+                record.error = (f"{field_name} 条件不满足，该步骤已跳过"
+                                f"（{text} → 左侧 {lhs!r}"
+                                + (f"，右侧 {rhs!r}" if rhs or operator != "exists" else "")
+                                + "）")
+                self._record_output(step, None, error=record.error)
+                logger.info("workflow_step_condition_skip", step=step.id,
+                            field=field_name, matched=matched)
+                return
+            return                                  # 只有一个条件，命中了就执行
+
+    def _dry_run_conditions(self, step: StepSpec, record: StepReport) -> None:
+        """试运行时把条件两侧渲染出来做预览；渲染错误照常抛 TemplateError。"""
+        for field_name, text in self._conditions_of(step):
+            operator, left, right = _split_condition(text)
+            preview: dict[str, Any] = {"field": field_name, "text": text,
+                                       "operator": operator or ""}
+            path_name = f"steps.{step.id}.{field_name}"
+            if operator is None:
+                record.detail[f"condition_{field_name}"] = preview
+                continue
+            if operator == "exists":
+                preview["present"] = self._exists(left)
+            else:
+                preview["left_preview"] = to_text(render(
+                    left, self._context, position=step.position,
+                    path_name=path_name, strict=self.strict_templates))[:120]
+                if operator in LIST_OPS and parse_literal_list(right) is not None:
+                    preview["right"] = right
+                else:
+                    preview["right"] = to_text(render(
+                        right, self._context, position=step.position,
+                        path_name=path_name, strict=self.strict_templates))[:120]
+            record.detail[f"condition_{field_name}"] = preview
 
     def _handler_for(self, step_type: str) -> Callable[..., Awaitable[None]] | None:
         return {
@@ -984,6 +1150,12 @@ class WorkflowExecutor:
         messages.append({"role": "user", "content": prompt})
 
         response = await self.llm.generate(messages)
+        # token 统计（v1.11.16）：响应里带了多少就记多少；不同 SDK 的字段名不统一，
+        # 由 _response_tokens 归一化。拿不到就记 0 —— 不猜、不按字数估算。
+        usage = _response_tokens(response)
+        if usage["total"]:
+            record.tokens = dict(usage)
+            self._add_tokens(usage["prompt"], usage["completion"])
         text = _extract_text(response)
         if text is None:
             record.status = STATUS_FAILED
@@ -1109,6 +1281,11 @@ class WorkflowExecutor:
             "stop_reason": str(out.get("stop_reason") or ""),
         }
         denied = list(out.get("denied_tools") or [])
+        # token 统计（v1.11.16）：agent_runner 的 D6 输出里带 tokens（见 agent_step.py）
+        agent_tokens = int(out.get("tokens") or 0)
+        if agent_tokens:
+            record.tokens = {"prompt": 0, "completion": 0, "total": agent_tokens}
+            self._add_tokens(0, agent_tokens)
         record.detail.update({
             "goal_chars": len(goal), "goal_digest": digest_of(goal),
             "stop_reason": result["stop_reason"],
@@ -1217,8 +1394,13 @@ class WorkflowExecutor:
                     "id": child.id, "status": child_record.status,
                     "error": child_record.error,
                     "duration_ms": round(child_record.duration_ms, 1)})
-                if child_record.status == STATUS_OK:
-                    entry["outputs"][child.id] = (item_ctx["steps"].get(child.id) or {}).get("output")
+                if child_record.status in (STATUS_OK, STATUS_SKIPPED):
+                    # 子步骤被 if / unless 条件跳过（v1.11.16）不算这一项失败：
+                    # "条件不成立所以没做"是流程设计的一部分，不是故障 ——
+                    # 与真正的 failed / aborted 必须分开记。
+                    if child_record.status == STATUS_OK:
+                        entry["outputs"][child.id] = (item_ctx["steps"].get(child.id)
+                                                      or {}).get("output")
                     continue
                 entry["status"] = STATUS_FAILED
                 if child_record.status == STATUS_ABORTED:
@@ -1274,8 +1456,13 @@ class WorkflowExecutor:
                              "resumed": bool(child_record.detail.get("resumed"))})
             if child_record.status == STATUS_OK:
                 output[child.id] = (steps_ctx.get(child.id) or {}).get("output")
-        failed = [c for c in children if c["status"] != STATUS_OK]
+        failed = [c for c in children if c["status"] not in (STATUS_OK, STATUS_SKIPPED)]
+        skipped_children = [c["id"] for c in children if c["status"] == STATUS_SKIPPED]
         record.detail.update({"max_concurrency": step.max_concurrency, "children": children})
+        if skipped_children:
+            # 条件跳过的子步骤在组里既不算成功也不算失败：报告里如实列出来，
+            # 让评审方看到"这一路本来就不会跑"（而不是悄无声息地少一行）。
+            record.detail["skipped_children"] = skipped_children
         self._record_output(step, output)
         record.output_digest = digest_of(output)
         if not failed:
@@ -1283,7 +1470,9 @@ class WorkflowExecutor:
             return
         record.status = STATUS_FAILED
         first = next((c for c in failed if c["status"] != STATUS_SKIPPED), failed[0])
-        not_started = sum(1 for c in failed if c["status"] == STATUS_SKIPPED)
+        not_started = sum(1 for c in children
+                          if c["status"] == STATUS_SKIPPED
+                          and "未启动" in str(c.get("error") or ""))
         record.error = (f"并行组 {len(failed)}/{len(children)} 个子步骤未成功"
                         f"（首个：{first['id']} —— {first['error']}）"
                         + (f"；{not_started} 个因 abort 未启动" if not_started else ""))
@@ -1407,9 +1596,13 @@ class WorkflowExecutor:
                                  f"branch 步骤 {step.id} 判定为假，本步骤属于 then 分支，未执行")
 
     def _evaluate_condition(self, step: StepSpec, operator: str, left: str,
-                            right: str) -> tuple[bool, str, str]:
-        """按 conditions.py 的语义判定；返回 ``(是否成立, 左侧文本, 右侧文本)``。"""
-        path_name = f"steps.{step.id}.condition"
+                            right: str, *, field_name: str = "condition"
+                            ) -> tuple[bool, str, str]:
+        """按 conditions.py 的语义判定；返回 ``(是否成立, 左侧文本, 右侧文本)``。
+
+        ``field_name`` 只用于报错路径（branch.condition / if / unless 共用同一份实现）。
+        """
+        path_name = f"steps.{step.id}.{field_name}"
         if operator == "exists":
             present = self._exists(left)
             return present, ("存在" if present else "不存在"), ""
@@ -1609,7 +1802,13 @@ class WorkflowExecutor:
                 for child in step.substeps:
                     child_record = StepReport(id=child.id, type=child.type,
                                               line=child.position.line)
-                    await self._dry_run_step(child, child_record)
+                    try:
+                        self._dry_run_conditions(child, child_record)
+                    except TemplateError as exc:
+                        child_record.status = STATUS_FAILED
+                        child_record.error = f"试运行渲染失败：{exc.format()}"
+                    else:
+                        await self._dry_run_step(child, child_record)
                     rows.append({"id": child.id, "status": child_record.status,
                                  "error": child_record.error,
                                  "detail": jsonable(child_record.detail)})
@@ -1632,7 +1831,13 @@ class WorkflowExecutor:
         rows = []
         for child in step.substeps:
             child_record = StepReport(id=child.id, type=child.type, line=child.position.line)
-            await self._dry_run_step(child, child_record)
+            try:
+                self._dry_run_conditions(child, child_record)
+            except TemplateError as exc:
+                child_record.status = STATUS_FAILED
+                child_record.error = f"试运行渲染失败：{exc.format()}"
+            else:
+                await self._dry_run_step(child, child_record)
             rows.append({"id": child.id, "type": child.type, "status": child_record.status,
                          "error": child_record.error, "detail": jsonable(child_record.detail)})
             if child_record.status != STATUS_OK:
@@ -1675,6 +1880,15 @@ class WorkflowExecutor:
         if isinstance(value, tuple):
             return tuple(self._redact(v) for v in value)
         return value
+
+    def _add_tokens(self, prompt: int = 0, completion: int = 0) -> dict[str, int]:
+        """把一次模型调用的 token 用量累加进整轮统计（v1.11.16）。"""
+        prompt = max(0, int(prompt or 0))
+        completion = max(0, int(completion or 0))
+        self._tokens["prompt"] += prompt
+        self._tokens["completion"] += completion
+        self._tokens["total"] = self._tokens["prompt"] + self._tokens["completion"]
+        return dict(self._tokens)
 
     def _record_output(self, step: StepSpec, output: Any, *, error: str = "",
                        dry_run: bool = False) -> None:
@@ -1729,6 +1943,8 @@ class WorkflowExecutor:
                 entry = self._context.get("steps", {}).get(step.id) or {}
                 run.outputs[step.id] = self._redact(entry.get("output"))
         run.resumed_steps = list(self._resumed)
+        # 整轮 token 汇总（v1.11.16）：看板 / 通知都从报告读它。
+        run.tokens = dict(self._tokens)
         if self.run_cancelled and run.status == RUN_CANCELLED:
             run.error = run.error or "工作流被取消"
 
@@ -1925,6 +2141,36 @@ def _extract_text(response: Any) -> str | None:
         return response
     text = getattr(response, "text", None)
     return text if isinstance(text, str) else None
+
+
+def _response_tokens(response: Any) -> dict[str, int]:
+    """从 LLM 响应里归一化出 token 用量（v1.11.16）。
+
+    ``LLMResponse`` 有 ``prompt_tokens`` / ``completion_tokens``；部分 SDK 用
+    ``usage`` / ``token_usage`` 子对象。取不到一律记 0：**不按字符数估算** ——
+    估算值和真实用量混在一起，看板上的趋势就失去意义了。
+    """
+
+    def _int(value: Any) -> int:
+        try:
+            return max(0, int(value or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    prompt = _int(getattr(response, "prompt_tokens", 0))
+    completion = _int(getattr(response, "completion_tokens", 0))
+    if not (prompt or completion):
+        usage = getattr(response, "usage", None) or getattr(response, "token_usage", None)
+        if isinstance(usage, dict):
+            prompt = _int(usage.get("prompt_tokens") or usage.get("input_tokens"))
+            completion = _int(usage.get("completion_tokens") or usage.get("output_tokens"))
+        elif usage is not None:
+            prompt = _int(getattr(usage, "prompt_tokens", 0)
+                          or getattr(usage, "input_tokens", 0))
+            completion = _int(getattr(usage, "completion_tokens", 0)
+                              or getattr(usage, "output_tokens", 0))
+    return {"prompt": prompt, "completion": completion,
+            "total": prompt + completion}
 
 
 def _os_env() -> dict[str, str]:

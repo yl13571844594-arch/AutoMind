@@ -2,7 +2,7 @@
 // 事件驱动地更新 Zustand store；断线指数退避重连（封顶 30s）。
 import { message } from 'antd';
 import { apiGet } from './api/client';
-import { chatSid, isMySid, MODE_LABELS, useApp, type Mode } from './store/app';
+import { chatSid, isMySid, MODE_LABELS, useApp, workspaceSid, type Mode } from './store/app';
 import { settleChips } from './lib/overrides';
 import {
   uid, useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem,
@@ -120,7 +120,12 @@ let boundSid = '';
 export function bindSession(): void {
   if (!wsReady()) return;
   const sid = chatSid();
-  try { ws!.send(JSON.stringify({ action: 'bind', session_id: sid })); boundSid = sid; } catch { /* ignore */ }
+  // v1.11.15：同时声明**工作区级** sid（member_id）。团队在线成员按它聚合 ——
+  // 同一浏览器多个标签页的会话 sid 各不相同，只用 session_id 会被显示成多个人。
+  try {
+    ws!.send(JSON.stringify({ action: 'bind', session_id: sid, member_id: workspaceSid() }));
+    boundSid = sid;
+  } catch { /* ignore */ }
   // 待办按会话存在服务端；绑定（含切会话/重连）后拉一次，右栏才不会显示上一个会话的清单
   void loadTodos();
 }
@@ -504,6 +509,9 @@ function finalizeAll(mode: Mode, data?: any) {
 
 function appendResult(mode: Mode, data: any) {
   const meta: string[] = [];
+  // v1.11.16：这一轮是"接着上次跑"而不是从头跑 —— 在结果消息上留个记号
+  if (data.resumed_from) meta.push('↻ 续跑');
+  if (data.success === false && data.resumable) meta.push('⏸ 已保存断点');
   if (data.interaction && data.interaction !== 'chat') {
     if (data.steps) meta.push(`${data.steps}步`);
     if (data.backtracks) meta.push(`${data.backtracks}回溯`);
@@ -579,6 +587,12 @@ function setRunning(on: boolean) {
 }
 
 // ── 事件分发 ───────────────────────────────────────────
+/** 会让团队看板数据变化的事件（v1.11.15）：收到即通知 TeamView 节流刷新。 */
+const TEAM_BOARD_KINDS = new Set([
+  'task_created', 'task_updated', 'task_moved', 'task_commented',
+  'task_claimed', 'task_deleted',
+]);
+
 function handle(data: any) {
   const mode = taskMode();
   // 观测中心：同一份事件流就地累积成执行 DAG（实时，无需轮询后端）
@@ -618,11 +632,17 @@ function handle(data: any) {
         }
       }
       if (data.resume) {
+        // v1.11.16：四种断点（plan/react/multi/loop）的进度单位不同，文案分开写
         const r = data.resume;
-        execTrace(mode, '↻ 从断点续跑',
-          r.kind === 'plan'
-            ? `原计划 ${r.done ?? 0}/${r.total ?? 0} 步已完成，只执行剩余 ${r.remaining ?? 0} 步`
-            : `已完成的 ${r.done ?? 0} 个动作不会重做，带着进度接着执行`, 'action');
+        const p = r.progress || {};
+        const label = r.kind === 'plan'
+          ? `原计划 ${r.done ?? p.done ?? 0}/${r.total ?? p.total ?? 0} 步已完成，只执行剩余 ${r.remaining ?? p.remaining ?? 0} 步`
+          : r.kind === 'multi'
+            ? `协同已完成 ${p.steps_done ?? r.steps_done ?? r.done ?? 0}/${p.steps_total ?? r.steps_total ?? r.total ?? 0} 个角色步骤，跳过不重做`
+            : r.kind === 'loop'
+              ? `已跑完 ${p.iterations ?? r.iterations ?? 0} 轮，从下一轮继续`
+              : `已完成的 ${r.done ?? p.completed_actions ?? 0} 个动作不会重做，带着进度接着执行`;
+        execTrace(mode, '↻ 从断点续跑', label, 'action');
       }
       break;
 
@@ -630,9 +650,25 @@ function handle(data: any) {
       panel().patchProgress({ label: `↻ 续跑：剩余 ${data.remaining ?? 0} 步` });
       break;
 
-    case 'task_resumed':
-      panel().patchProgress({ label: '↻ 带着已完成进度续跑中…' });
+    case 'task_resumed': {
+      // v1.11.16：multi/loop 的续跑事件也走这里（kind=run_mode），
+      // 进度条文案按形态给出"从哪继续"，而不是一句含糊的"续跑中"
+      const kind = String(data.kind || '');
+      const p = data.progress || {};
+      if (kind === 'multi') {
+        const done = Number(p.steps_done ?? data.done ?? 0);
+        const total = Number(p.steps_total ?? data.total ?? 0);
+        panel().patchProgress({ label: `↻ 协同续跑：跳过已完成 ${done}${total ? `/${total}` : ''} 个角色步骤…` });
+      } else if (kind === 'loop') {
+        const it = Number(p.iterations ?? data.iterations ?? 0);
+        panel().patchProgress({ label: `↻ 循环续跑：从第 ${it + 1} 轮继续…` });
+      } else if (kind === 'react') {
+        panel().patchProgress({ label: `↻ 带着已完成的 ${data.done ?? 0} 个动作续跑中…` });
+      } else {
+        panel().patchProgress({ label: '↻ 带着已完成进度续跑中…' });
+      }
       break;
+    }
 
     // v1.7.7 隔离工作副本的产物：渲染成可操作卡片（应用到项目 / 导出 / 删除副本）
     case 'workspace_result':
@@ -670,7 +706,11 @@ function handle(data: any) {
       break;
 
     case 'loop_iter_start':
-      panel().patchProgress({ cur: data.iter || 0, total: data.max || 0, label: '本轮执行中…' });
+      panel().patchProgress({
+        cur: data.iter || 0, total: data.max || 0,
+        // v1.11.16：续跑时第一轮是"接着上次的轮次"，不是从第 1 轮重来
+        label: data.resumed ? `↻ 从第 ${data.iter} 轮继续…` : '本轮执行中…',
+      });
       if (!live.loop) startLoop(mode);
       chat().update(mode, live.loop!, (i: any) => ({
         ...i, iters: [...i.iters, { iter: data.iter, max: data.max } as LoopIter],
@@ -840,12 +880,57 @@ function handle(data: any) {
     }
 
     case 'budget_exceeded': {
+      // v1.11.16：预算耗尽的收尾现在会**留下可续跑检查点**（multi/loop 也支持）。
+      /// 文案必须指向真正的续跑入口 —— 只说"发送继续"会让用户以为要再打一遍字。
+      const runMode = String(data.run_mode || '');
+      const modeLabel = runMode === 'multi' ? '协同' : runMode === 'loop' ? '循环' : '';
       panel().patchProgress({ label: '🪙 Token 预算已用尽，正在交付已完成部分' });
       execTrace(taskMode(), '🪙 Token 预算已用尽',
         `累计 ${fmtTok(data.total_used ?? data.used)}（${Number(data.windows || 1)} 个窗口）。`
-        + '不再开新步骤，已完成的部分照常交付；发送「继续」即可接着做。'
+        + '不再开新步骤，已完成的部分照常交付；已自动保存断点，'
+        + '点对话区上方的「从断点续跑」即可接着做（续跑会重新计一份预算）。'
         + '如需一次跑更久，可在 设置 → 执行治理 调大「单任务 Token 预算」或「预算窗口自动续开次数」', 'error');
-      message.warning({ key: 'budget-exceeded', content: 'Token 预算已用尽：已完成的部分会照常交付，发送「继续」即可接着做', duration: 6 });
+      message.warning({
+        key: 'budget-exceeded',
+        content: `Token 预算已用尽${modeLabel ? `（${modeLabel}）` : ''}：`
+          + '已完成的部分会照常交付，断点已保存 —— 点上方「从断点续跑」接着做',
+        duration: 8,
+      });
+      break;
+    }
+
+    // v1.11.16：multi / loop 的预算耗尽（run_multi / run_loop 发出）。
+    // 与普通 budget_exceeded 的区别：这里**已经写好可续跑检查点**（checkpoint_id），
+    // 文案必须直接指向「从断点续跑」，而不是让用户以为要重新打一遍字。
+    case 'budget_exhausted': {
+      const runMode = String(data.run_mode || '');
+      const modeLabel = runMode === 'multi' ? '协同' : runMode === 'loop' ? '循环' : '';
+      panel().patchProgress({ label: `🪙 ${modeLabel}Token 预算已用尽，断点已保存` });
+      execTrace(taskMode(), `🪙 ${modeLabel}Token 预算已用尽`,
+        `累计 ${fmtTok(data.total_used ?? data.used)}（${Number(data.windows || 1)} 个窗口）。`
+        + '已自动保存断点，点对话区上方的「从断点续跑」接着做（已完成的部分已写进交付内容，续跑不会重做）', 'error');
+      if (data.resumable !== false) {
+        message.warning({
+          key: 'budget-exhausted',
+          content: `Token 预算已用尽${modeLabel ? `（${modeLabel}）` : ''}：断点已保存 —— 点上方「从断点续跑」接着做`,
+          duration: 8,
+        });
+      }
+      break;
+    }
+
+    // v1.11.16（budget 成员新增）：multi/loop 被异常/预算中断、且已留下检查点。
+    // 这不是普通报错：任务确实做了一半，必须明确告诉用户"从哪继续"。
+    case 'run_interrupted': {
+      const runMode = String(data.run_mode || '');
+      const modeLabel = runMode === 'multi' ? '协同' : runMode === 'loop' ? '循环' : '';
+      panel().patchProgress({ label: `⏸ ${modeLabel || '任务'}中断，已保存断点` });
+      execTrace(taskMode(), `⏸ ${modeLabel || '任务'}任务中断，已保存断点`,
+        `${esc(String(data.error || data.stop_reason || '未知原因'))}`
+        + '<br>点对话区上方的「从断点续跑」接着做，已完成的步骤不会重做', 'error');
+      if (data.resumable !== false) {
+        message.warning(`${modeLabel || ''}任务中断，已保存断点：点上方「从断点续跑」接着做`, 6);
+      }
       break;
     }
 
@@ -894,14 +979,24 @@ function handle(data: any) {
 
     case 'team_activity': {
       panel().pushTeam(data);
+      // v1.11.15：任务增删改/评论/认领都让团队看板刷新一次。看板侧会再做防抖，
+      // 所以一轮任务里连发多条事件也不会把接口打爆。
+      if (TEAM_BOARD_KINDS.has(String(data.kind || ''))) panel().bumpTeam();
       if (data.sid && !isMySid(data.sid)) {
         if (data.kind === 'task_done') {
           message.info(`👥 同事完成了任务「${data.task}」${data.changed_files ? `（涉及 ${data.changed_files} 个文件改动）` : ''}`);
           panel().bumpRefresh();
-        } else if (data.kind === 'task_assigned') {
+        } else if (data.kind === 'task_assigned' || data.kind === 'task_created') {
           message.info(`👥 新团队任务：「${data.title}」${data.assignee ? ` → ${data.assignee}` : ''}`);
         }
       }
+      break;
+    }
+
+    // v1.11.15：在线成员变化（连接 / 断开 / 改名）→ 团队视图成员条实时更新。
+    // 这是纯旁路信息：解析失败最多是成员条不刷新，绝不影响任务主流程。
+    case 'team_presence': {
+      panel().setTeamPresence(Array.isArray(data.members) ? data.members : []);
       break;
     }
 
@@ -1185,7 +1280,15 @@ function handle(data: any) {
       chat().setLastTask(null);
       chat().persist();
       setRunning(false);
-      notifyDone('ok', mode, data);
+      // v1.11.16：预算耗尽/中断的收尾是 success=false + 可续跑断点。
+      // 不能静默当成功：明确提示断点位置，同时保留部分交付内容。
+      if (data.success === false && data.resumable) {
+        message.warning(
+          (data.resumed_from ? '续跑' : '本轮')
+          + '未全部完成（预算耗尽/中断），已保存断点：点对话区上方的「从断点续跑」接着做',
+          8);
+      }
+      notifyDone(data.success === false ? 'fail' : 'ok', mode, data);
       break;
 
     case 'task_error':

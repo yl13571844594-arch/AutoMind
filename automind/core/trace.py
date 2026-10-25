@@ -32,6 +32,7 @@ import json
 import os
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -53,28 +54,60 @@ _TRUNCATE_KEYS = ("output", "prompt", "reply", "text", "delta", "content", "deta
                   "issues", "reason", "feedback", "error", "stderr", "stdout")
 _PER_FIELD_MAX = 4000
 
+#: 执行治理配置提供者（v1.11.16）。服务端在 Agent 就绪后注入，让轨迹开关
+#: 读**运行时**配置；否则 _cfg() 只能新造一份 ExecutionConfig()，用户在
+#: 「设置 → 执行治理」里改 trace_enabled / trace_max_runs 永远到不了记录器。
+_config_provider: Callable[[], Any] | None = None
 
-def _cfg() -> dict[str, Any]:
-    """从 ExecutionConfig / 环境变量取轨迹开关（环境变量优先）。"""
+
+def set_config_provider(provider: Callable[[], Any] | None) -> None:
+    """注册"当前运行时 ExecutionConfig"的取值函数（传 None 清除）。"""
+    global _config_provider
+    _config_provider = provider
+
+
+def _live_execution() -> Any | None:
+    provider = _config_provider
+    if provider is None:
+        return None
+    try:
+        return provider()
+    except Exception:                     # pragma: no cover - 防御性
+        return None
+
+
+def _values_from_execution(ex: Any) -> dict[str, Any]:
+    """从 ExecutionConfig 取轨迹相关配置；缺字段用与默认配置一致的值。"""
+    def _get(name: str, default: Any) -> Any:
+        value = getattr(ex, name, None)
+        return default if value is None else value
+
     out = {
-        "enabled": True,
-        "dir": str(traces_dir()),
-        "max_run_bytes": 8 * 1024 * 1024,
-        "max_runs": 20,
+        "enabled": bool(_get("trace_enabled", True)),
+        "dir": str(_get("trace_dir", traces_dir()) or traces_dir()),
+        "max_run_bytes": int(_get("trace_max_run_bytes", 8 * 1024 * 1024)),
+        "max_runs": int(_get("trace_max_runs", 20)),
         "max_total_bytes": 256 * 1024 * 1024,
     }
-    try:
-        from automind.core.config import ExecutionConfig
+    return out
 
-        ex = ExecutionConfig()
-        out.update({
-            "enabled": bool(ex.trace_enabled),
-            "dir": ex.trace_dir or out["dir"],
-            "max_run_bytes": int(ex.trace_max_run_bytes),
-            "max_runs": int(ex.trace_max_runs),
-        })
-    except Exception:
-        pass
+
+def _cfg() -> dict[str, Any]:
+    """取轨迹配置：运行时注入的 ExecutionConfig 优先，其次一份默认配置，
+    最后环境变量 ``AUTOMIND_TRACE`` / ``AUTOMIND_TRACE_DIR`` 兜底覆盖。"""
+    ex = _live_execution()
+    if ex is None:
+        try:
+            from automind.core.config import ExecutionConfig
+
+            ex = ExecutionConfig()
+        except Exception:                 # pragma: no cover - 防御性
+            ex = None
+    out = _values_from_execution(ex) if ex is not None else {
+        "enabled": True, "dir": str(traces_dir()),
+        "max_run_bytes": 8 * 1024 * 1024, "max_runs": 20,
+        "max_total_bytes": 256 * 1024 * 1024,
+    }
     env_on = os.environ.get("AUTOMIND_TRACE")
     if env_on is not None:
         out["enabled"] = env_on.strip().lower() not in ("0", "false", "off", "no")
@@ -82,6 +115,26 @@ def _cfg() -> dict[str, Any]:
     if env_dir:
         out["dir"] = env_dir
     return out
+
+
+def apply_execution_config(ex: Any) -> dict[str, Any]:
+    """把执行治理参数实时下发给**已存在**的轨迹记录器（v1.11.16）。
+
+    此前记录器是懒构造 + 构造后不再更新，``trace_enabled`` 关掉后下一条事件
+    照样落盘、``trace_max_runs`` 调小也要等重启 —— 设置界面显示"已保存"，
+    实际什么都没变。返回生效值供 API `effective` 说明与测试断言。
+    """
+    values = _values_from_execution(ex)
+    rec = _default
+    if rec is not None:
+        rec.enabled = bool(values["enabled"])
+        rec.max_runs = max(0, int(values["max_runs"]))
+        rec.max_run_bytes = max(1, int(values["max_run_bytes"]))
+        # 目录不热切：一次任务的事件已经写在旧目录里，热切会让同一份证据
+        # 分成两个文件；trace_dir 也不在「执行治理」面板内。
+    return {"enabled": bool(values["enabled"]),
+            "max_runs": int(values["max_runs"]),
+            "dir": str(rec.root) if rec is not None else str(values["dir"])}
 
 
 def _sanitize(value: Any, key: str = "") -> Any:

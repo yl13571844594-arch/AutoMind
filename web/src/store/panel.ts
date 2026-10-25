@@ -115,6 +115,49 @@ export interface BrowserFrame {
   at: number;
 }
 
+// ── v1.11.15 团队协作：在线成员 / 总结 ─────────────────────────
+
+/**
+ * 在线成员（WS ``team_presence`` 推送）。
+ *
+ * 服务端按 **sid 聚合**：同一浏览器开多个标签页只出现一条（``tabs`` 是页面数）。
+ * ``total/done/doing/overdue`` 是该成员的任务负载，由服务端按任务摘要合并，
+ * 可能是 0（新成员或名字与任务负责人不一致）。
+ */
+export interface TeamMember {
+  sid: string;
+  name: string;
+  online: boolean;
+  last_seen?: string;
+  joined?: string;
+  tabs?: number;
+  /** true = 有任务但当前不在线的负责人（服务端补的离线条目） */
+  offline_assignee?: boolean;
+  total?: number;
+  done?: number;
+  doing?: number;
+  overdue?: number;
+}
+
+/** 团队总览（``GET /api/team/tasks`` 的 summary 或 ``GET /api/team/summary``）。 */
+export interface TeamSummary {
+  total?: number;
+  by_status?: Record<string, number>;
+  by_priority?: Record<string, number>;
+  overdue?: number;
+  done_today?: number;
+  done_7d?: number;
+  by_assignee?: {
+    assignee: string; total: number; done: number; doing: number; overdue: number;
+  }[];
+  recent_activity?: {
+    time: string; kind: string; actor: string; detail: string;
+    task_id: string; task_title: string;
+  }[];
+  completion_rate?: number;
+  today?: string;
+}
+
 export type RightTab = 'summary' | 'panel' | 'browser' | 'code';
 
 //: 只留最近这么多帧：每帧 ~15-40KB 的 base64，留多了长任务会把内存吃起来
@@ -149,6 +192,11 @@ interface PanelState {
     };
   };
   teamFeed: any[];
+  /** v1.11.15：在线成员（team_presence）与团队总览（TeamView 统计卡用） */
+  teamMembers: TeamMember[];
+  teamSummary: TeamSummary;
+  /** v1.11.15：团队看板刷新信号 —— team_activity 到达时 +1，TeamView 节流重拉 */
+  teamRev: number;
 
   progress: TaskProgress | null;
 
@@ -181,6 +229,11 @@ interface PanelState {
   bumpRefresh: () => void;
   setApproval: (a: PanelState['approval']) => void;
   pushTeam: (d: any) => void;
+  /** v1.11.15：整表替换在线成员（WS team_presence） */
+  setTeamPresence: (members: TeamMember[]) => void;
+  setTeamSummary: (s: TeamSummary) => void;
+  /** 团队数据变了（任务增删改/评论/认领）→ 看板节流刷新 */
+  bumpTeam: () => void;
 
   // ── v1.11.11 ──
   /** 模型维护的待办（todo_updated 事件 / GET /api/todo 初始化） */
@@ -209,6 +262,9 @@ export const usePanel = create<PanelState>((set) => ({
   refreshTick: 0,
   approval: null,
   teamFeed: [],
+  teamMembers: [],
+  teamSummary: {},
+  teamRev: 0,
   progress: null,
   rightTab: 'summary',
   rightCollapsed: initialRightCollapsed(),
@@ -264,6 +320,11 @@ export const usePanel = create<PanelState>((set) => ({
   bumpRefresh: () => set((st) => ({ refreshTick: st.refreshTick + 1 })),
   setApproval: (a) => set({ approval: a }),
   pushTeam: (d) => set((st) => ({ teamFeed: [d, ...st.teamFeed].slice(0, 50) })),
+  // v1.11.15：在线成员整表替换（服务端已按 sid 聚合，前端不再二次合并）；
+  // 团队总览同理。两者都不参与任务主流程，坏数据最多是某块面板不更新。
+  setTeamPresence: (members) => set({ teamMembers: Array.isArray(members) ? members : [] }),
+  setTeamSummary: (s) => set({ teamSummary: (s && typeof s === 'object') ? s : {} }),
+  bumpTeam: () => set((st) => ({ teamRev: st.teamRev + 1 })),
 
   // ── v1.11.11 待办 / 提问 / 子智能体 / 压缩 ──
   // 计数优先用服务端给的（它按整表统计，口径与我们一致）；缺了就本地数，

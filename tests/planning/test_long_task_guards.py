@@ -451,12 +451,19 @@ class TestTaskBudget:
         assert ex.cache_hits == 1
 
     def test_agent_exposes_the_deadline_to_both_executors(self):
-        """接线检查：agent 必须把预算真的传下去，否则配置是个摆设。"""
+        """接线检查：agent 必须把预算真的传下去，否则配置是个摆设。
+
+        v1.11.16 起墙钟截止时刻（含 ``max_task_seconds``）统一由
+        ``_begin_task_budget`` 设置，``_run_impl_bound`` 只负责调用它 ——
+        断言拆成"任务入口调用了统一预算引导" + "引导里真的设了 deadline"。
+        """
         import inspect
 
         from automind import agent as agent_mod
         src = inspect.getsource(agent_mod.AutoMindAgent._run_impl_bound)
-        assert "_task_deadline" in src and "max_task_seconds" in src
+        assert "_begin_task_budget()" in src, "任务入口必须调用统一预算引导"
+        budget_src = inspect.getsource(agent_mod.AutoMindAgent._begin_task_budget)
+        assert "_task_deadline" in budget_src and "max_task_seconds" in budget_src
         src_react = inspect.getsource(agent_mod.AutoMindAgent._run_react)
         assert "deadline=self._task_deadline" in src_react
         # v1.7.5：计划的实际执行体从 _run_plan_execute 拆到了 _execute_plan

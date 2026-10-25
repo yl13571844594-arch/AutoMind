@@ -25,8 +25,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from automind.core import offline
 from automind.core.logging import get_logger
+from automind.core.offline import EgressBlocked
 from automind.core.types import PermissionTier, ToolResult
+from automind.tools._toolkit import BlockedTarget, check_url
 from automind.tools.base import AbstractTool
 
 logger = get_logger("automind.tools.browser")
@@ -649,6 +652,14 @@ class BrowserTool(AbstractTool):
             return self._fail("navigate 需要 url")
         if not url.startswith(("http://", "https://", "file://", "about:", "data:")):
             url = "https://" + url
+        # 出网策略（v1.11.14）：offline / allowlist 下导航到公网前当场拒绝，
+        # 不启动浏览器、不发请求。内网地址（localhost / 私网 IP / 内网短域名）
+        # 在策略层默认放行 —— 内网 Web 系统自动化是合法场景。
+        if url.startswith(("http://", "https://")):
+            try:
+                offline.check_egress(url, tool=self.name)
+            except EgressBlocked as e:
+                return self._fail(f"{e}\n（浏览器未导航：出网被策略拒绝，本次没有任何网络请求。）")
         resp = await page.goto(url, wait_until="domcontentloaded")
         # 单页应用的内容在 DOMContentLoaded 之后才渲染：再等一小会网络空闲，但不死等
         try:
@@ -829,21 +840,65 @@ class WebFetchTool(AbstractTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         import re
+        from urllib.parse import urljoin
 
-        url = kwargs.get("url", "")
+        url = str(kwargs.get("url", ""))
         max_chars = int(kwargs.get("max_chars", 4000) or 4000)
         if not url.startswith(("http://", "https://")):
             return ToolResult(tool_name=self.name, success=False,
                               error="url 必须以 http:// 或 https:// 开头")
+        # 补齐 SSRF 校验（v1.11.14 之前这道闸是缺失的）+ 出网策略。
+        # 注意这里**不传 allow_private**：读取网页默认只允许公网目标，
+        # 想读内网页面请用 browser 工具（场景明确、权限档位更高）。
+        try:
+            check_url(url, tool=self.name)
+        except EgressBlocked as e:
+            return ToolResult(tool_name=self.name, success=False, error=str(e),
+                              output={"blocked": True, "egress_denied": True,
+                                      "policy_mode": e.policy_mode,
+                                      "policy": offline.policy_status()})
+        except BlockedTarget as e:
+            return ToolResult(tool_name=self.name, success=False, error=str(e),
+                              output={"blocked": True})
         try:
             import httpx
         except ImportError:
             return ToolResult(tool_name=self.name, success=False,
                               error="缺少 httpx 库，请先 pip install httpx")
+        hops: list[str] = []
         try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True,
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False,
                                          headers={"User-Agent": "AutoMind/1.0"}) as client:
-                resp = await client.get(url)
+                current = url
+                for _ in range(5):
+                    resp = await client.get(current)
+                    location = resp.headers.get("location")
+                    if resp.status_code in (301, 302, 303, 307, 308) and location:
+                        nxt = urljoin(current, str(location))
+                        # 逐跳校验：公网 URL 可以 302 到 127.0.0.1 或白名单外的域
+                        try:
+                            check_url(nxt, tool=self.name)
+                        except EgressBlocked as e:
+                            return ToolResult(
+                                tool_name=self.name, success=False, error=str(e),
+                                output={"blocked": True, "egress_denied": True,
+                                        "policy_mode": e.policy_mode,
+                                        "policy": offline.policy_status(),
+                                        "redirects": hops,
+                                        "redirect_target": offline.sanitize_target(nxt)})
+                        except BlockedTarget as e:
+                            return ToolResult(
+                                tool_name=self.name, success=False,
+                                error=f"重定向目标被拒绝（{e}）。原始地址：{current}",
+                                output={"blocked": True, "redirects": hops})
+                        hops.append(nxt)
+                        current = nxt
+                        continue
+                    break
+                else:
+                    return ToolResult(tool_name=self.name, success=False,
+                                      error="重定向次数过多（>5）",
+                                      output={"redirects": hops})
                 resp.raise_for_status()
                 html = resp.text
         except Exception as e:
@@ -862,5 +917,6 @@ class WebFetchTool(AbstractTool):
         return ToolResult(
             tool_name=self.name, success=True,
             output={"title": title, "text": text[:max_chars],
-                    "links": list(dict.fromkeys(links)), "url": str(resp.url)},
+                    "links": list(dict.fromkeys(links)), "url": str(resp.url),
+                    "redirects": hops, "policy_mode": offline.policy_mode()},
         )

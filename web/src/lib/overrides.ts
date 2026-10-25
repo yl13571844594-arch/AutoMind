@@ -7,6 +7,8 @@
 //   mcp / skills —— v1.11.0 引用 MCP 连接器 / 技能（与专家同构，本条生效）
 //   plan / goal  —— v1.11.0 计划模式 / 长期目标：来自输入框的常驻开关（store/refs），
 //                   发送时并进来，不随发送清空
+//   model        —— v1.11.15 输入框模型选择（常驻，见 store/modelChoice）：
+//                   发送时并入 overrides.model_mode/provider/model，不随发送清空
 // 服务端在 task_start 里回一份逐项回执，用户消息上的 chip 据此变绿/变红。
 import { apiGet, apiPost } from '../api/client';
 import { MODE_LABELS, type Mode } from '../store/app';
@@ -23,6 +25,12 @@ export interface Mention {
   title?: string;
   token: string;
 }
+/** v1.11.15 本条消息的模型选择（常驻；default 表示不带 model_mode 字段）。 */
+export interface PendingModel {
+  mode: 'manual' | 'auto';
+  provider?: string;
+  model?: string;
+}
 export interface PendingOverrides {
   mode?: Mode;
   expert?: { id: string; name: string };   // id '' = 本条不用专家
@@ -33,11 +41,12 @@ export interface PendingOverrides {
   goal?: { id: string; title: string };    // 长期目标（常驻，发送时并入）
   mentions?: Mention[];                    // v1.11.2 @文件 / @目录 / @对话
   tools?: string[];                        // v1.11.2 / 指令点名的工具（含插件 / MCP 单个工具）
+  model?: PendingModel;                    // v1.11.15 模型选择（常驻，发送时并入）
 }
 
 export const EMPTY_OVERRIDES: PendingOverrides = { attachments: [] };
 
-/** 本条（一次性）设置是否非空 —— 不含常驻的计划模式 / 目标。 */
+/** 本条（一次性）设置是否非空 —— 不含常驻的模型选择 / 计划模式 / 目标。 */
 export function hasOverrides(o: PendingOverrides): boolean {
   return !!(o.mode || o.expert || o.attachments.length || o.mcp?.length || o.skills?.length
     || o.mentions?.length || o.tools?.length);
@@ -51,7 +60,7 @@ export function toggleIn(list: string[] | undefined, v: string): string[] {
 
 /** 发给服务端的 overrides 字段（没有就不带）。 */
 export function toWire(o: PendingOverrides): Record<string, any> | undefined {
-  if (!hasOverrides(o) && !o.plan && !o.goal) return undefined;
+  if (!hasOverrides(o) && !o.plan && !o.goal && !o.model) return undefined;
   const w: Record<string, any> = {};
   if (o.mode) w.mode = o.mode;
   if (o.expert) w.expert = o.expert.id;
@@ -66,6 +75,13 @@ export function toWire(o: PendingOverrides): Record<string, any> | undefined {
   }
   if (o.plan) w.plan_review = true;
   if (o.goal) w.goal = o.goal.id;
+  if (o.model) {
+    w.model_mode = o.model.mode;
+    if (o.model.mode === 'manual') {
+      w.provider = o.model.provider;
+      w.model = o.model.model;
+    }
+  }
   return w;
 }
 
@@ -81,6 +97,14 @@ export function pendingChips(o: PendingOverrides): MsgChip[] {
   for (const m of o.mentions || []) chips.push({ key: 'mention:' + mentionKey(m), label: mentionLabel(m), state: 'pending' });
   if (o.plan) chips.push({ key: 'plan', label: '📋 计划模式', state: 'pending' });
   if (o.goal) chips.push({ key: 'goal', label: `🎯 ${o.goal.title}`, state: 'pending' });
+  if (o.model) {
+    chips.push({
+      key: 'model',
+      label: o.model.mode === 'auto' ? '🧠 自动路由'
+        : `🧠 ${o.model.provider}/${o.model.model}`,
+      state: 'pending',
+    });
+  }
   return chips;
 }
 
@@ -98,6 +122,21 @@ export function settleChips(chips: MsgChip[], receipt: any): MsgChip[] {
       // 服务端回的名字带专家自己的图标（如 "⚖ 法务顾问"），以它为准
       return { ...c, state: r.expert.applied ? 'ok' : 'fail', note: r.expert.reason,
         label: r.expert.applied && r.expert.name ? r.expert.name : c.label };
+    }
+    if (c.key === 'model' && r.model) {
+      // v1.11.15：服务端回执说明本条消息实际用的模型。生效时以回执的 label 为准
+      // （自动路由会带上档位，如 "🧠 自动路由 · 强力"），未生效时显示原因 ——
+      // 用户手选了模型却没生效，必须让他看见，而不是悄悄用默认模型跑完。
+      const m = r.model as any;
+      if (m.applied) {
+        const label = m.label || (m.mode === 'auto'
+          ? (m.tier ? `🧠 自动路由 · ${m.tier}` : '🧠 自动路由')
+          : `🧠 ${m.provider || ''}/${m.model || ''}`);
+        const note = m.note
+          || (m.tier && m.score != null ? `档位 ${m.tier} · 复杂度 ${m.score}` : undefined);
+        return { ...c, state: 'ok', label, note };
+      }
+      return { ...c, state: 'fail', note: m.reason || '服务端未确认（可能是旧版服务端）' };
     }
     if (c.key === 'plan' && r.plan) {
       return { ...c, state: r.plan.applied ? 'ok' : 'fail', note: r.plan.reason || r.plan.note };
@@ -176,10 +215,29 @@ export function isTextFile(f: File): boolean {
 
 // ── 断点续跑 ────────────────────────────────────────────
 
+/**
+ * 可续跑摘要（GET /api/checkpoints/resumable）。
+ *
+ * v1.11.16：kind 从两种扩到四种（plan / react / multi / loop），进度统一放在
+ * ``progress`` 里（键随 kind 而定）；plan/react 的旧扁平字段（done/total/
+ * remaining/artifacts）仍然保留，旧版 UI 不需要改也能显示。
+ */
 export interface ResumableInfo {
-  id: string; kind: 'plan' | 'react'; task: string; interaction: string;
+  id: string; kind: 'plan' | 'react' | 'multi' | 'loop'; task: string; interaction: string;
+  run_mode?: string;
+  /** kind 专属进度：plan={total,done,remaining}，react={completed_actions,artifacts}，
+      multi={steps_done,steps_total,last_output}，loop={iterations,last_output,feedback} */
+  progress?: {
+    total?: number; done?: number; remaining?: number;
+    completed_actions?: number; failed_actions?: number; artifacts?: string[];
+    steps_done?: number; steps_total?: number;
+    iterations?: number; last_output?: string; feedback?: string;
+  };
+  // ── 兼容旧前端的扁平字段 ──
   done?: number; total?: number; remaining?: number; failed?: number;
-  artifacts?: string[]; status?: string; stop_reason?: string; updated?: number;
+  artifacts?: string[];
+  steps_done?: number; steps_total?: number; iterations?: number; last_output?: string;
+  status?: string; stop_reason?: string; updated?: number; budget_exhausted?: boolean;
 }
 
 export async function fetchResumable(sid: string): Promise<ResumableInfo | null> {
@@ -193,10 +251,46 @@ export async function dismissResumable(id: string, sid: string): Promise<void> {
   try { await apiPost(`/checkpoints/${encodeURIComponent(id)}/dismiss`, { session_id: sid }); } catch { /* ignore */ }
 }
 
+/** 断点类型的图标（横幅与重跑卡片共用）。 */
+export const RESUMABLE_ICON: Record<string, string> = {
+  plan: '📋', react: '🔧', multi: '🤝', loop: '🔁',
+};
+
+/**
+ * 一句话说明"上次做到哪了"。
+ *
+ * 四种形态的进度单位完全不同（计划是步、ReAct 是动作/产物、协同是角色步骤、
+ * 循环是迭代轮数），所以这里按 kind 分别措辞 —— 统一写成"N 步"会让用户
+ * 按着错误的预期点「继续」。
+ */
 export function describeResumable(r: ResumableInfo): string {
-  if (r.kind === 'plan') return `计划已完成 ${r.done ?? 0}/${r.total ?? 0} 步，剩余 ${r.remaining ?? 0} 步`;
-  const n = r.done ?? 0;
-  return n ? `已真实完成 ${n} 个动作${r.artifacts?.length ? `，产出 ${r.artifacts.length} 个文件` : ''}` : '尚无已完成的动作';
+  const p = r.progress || {};
+  switch (r.kind) {
+    case 'plan': {
+      const done = r.done ?? p.done ?? 0;
+      const total = r.total ?? p.total ?? 0;
+      const remaining = r.remaining ?? p.remaining ?? Math.max(0, total - done);
+      return `计划已完成 ${done}/${total} 步，本次只执行剩余 ${remaining} 步`;
+    }
+    case 'multi': {
+      const done = r.steps_done ?? p.steps_done ?? r.done ?? 0;
+      const total = r.steps_total ?? p.steps_total ?? r.total ?? 0;
+      return total
+        ? `协同已完成 ${done}/${total} 个角色步骤（跳过不重做），剩余 ${Math.max(0, total - done)} 步`
+        : `协同已完成 ${done} 个角色步骤，跳过不重做`;
+    }
+    case 'loop': {
+      const it = r.iterations ?? p.iterations ?? 0;
+      return it > 0 ? `已跑完 ${it} 轮，从第 ${it + 1} 轮继续` : '从第 1 轮继续';
+    }
+    default: {
+      const n = r.done ?? p.completed_actions ?? 0;
+      const arts = (r.artifacts ?? p.artifacts)?.length ?? 0;
+      return n
+        ? `已真实完成 ${n} 个动作${arts ? `，产出 ${arts} 个文件` : ''}（不会重做）`
+        : '尚无已完成的动作，从当前进度继续';
+    }
+  }
 }
 
 // 旧的"文本续跑"前缀（没有可用断点时的兜底）。v1.7.7 修复：续跑前先剥掉已有前缀，

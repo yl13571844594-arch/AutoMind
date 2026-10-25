@@ -1,0 +1,55 @@
+/* v1.11.15 输入框模型选择器（ModelPicker 组件内 import，不改 global.css）。
+   观感与 .composer-mode / .composer-sticky 一致：胶囊、26px 高、小字号；
+   "自动路由"用渐变底 + 呼吸点，和普通模型选择一眼能区分。 */
+.model-pill {
+  display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px;
+  max-width: 230px; border-radius: 999px; font-family: var(--font); font-size: .74em;
+  cursor: pointer; color: var(--text2); background: transparent;
+  border: 1px dashed var(--border); white-space: nowrap; user-select: none;
+}
+.model-pill:hover { color: var(--text); border-color: var(--accent); }
+.model-pill-label { overflow: hidden; text-overflow: ellipsis; }
+.model-pill.auto {
+  border-style: solid; border-color: transparent; color: #fff;
+  background: var(--accent-grad); box-shadow: 0 2px 10px var(--accent-glow);
+}
+.model-pill.warn { border-color: var(--yellow); color: var(--yellow); }
+.model-pill.auto.warn { box-shadow: 0 0 0 1px var(--yellow), 0 2px 10px var(--accent-glow); }
+.model-pill-tag {
+  font-size: .86em; padding: 0 6px; border-radius: 999px;
+  background: rgba(255, 255, 255, .22); color: #fff;
+}
+.model-breath {
+  width: 7px; height: 7px; border-radius: 50%; background: #fff; flex-shrink: 0;
+  animation: modelBreath 1.8s ease-in-out infinite;
+}
+@keyframes modelBreath { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+.model-caret { font-size: .82em; opacity: .6; }
+.model-warn { font-size: .95em; }
+@media (prefers-reduced-motion: reduce) { .model-breath { animation: none; } }
+@media (max-width: 720px) {
+  .model-pill-tag { display: none; }
+  .model-pill { max-width: 140px; }
+}
+
+/* 下拉菜单（antd 弹层与 SafeDropdown 自绘菜单共用）。 */
+.model-picker-menu .ant-dropdown-menu {
+  padding: 6px; border-radius: 14px; border: 1px solid var(--border);
+  box-shadow: var(--pop-shadow); min-width: 320px;
+  max-height: 70vh; max-height: min(560px, 70vh); overflow-y: auto;
+}
+.model-picker-menu .ant-dropdown-menu-item {
+  padding: 5px 8px !important; border-radius: 9px !important; margin: 1px 0;
+}
+.model-picker-menu .ant-dropdown-menu-item-group-title {
+  padding: 8px 10px 4px !important; font-size: .68em; font-weight: 600;
+  letter-spacing: .06em; color: var(--text3) !important;
+}
+.model-picker-menu .ant-dropdown-menu-item-group + .ant-dropdown-menu-item-group {
+  margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border);
+}
+.model-picker-menu .ant-dropdown-menu-item-group-list { margin: 0 !important; }
+.model-picker-menu.sm-pop { width: 340px; }
+/* 自动路由条目：选中时图标用渐变底；锁定时文字压暗 */
+.mp-auto-on .pm-ico { background: var(--accent-grad); color: #fff; box-shadow: none; }
+.mp-locked .pm-title, .mp-locked .pm-desc { color: var(--text3); }

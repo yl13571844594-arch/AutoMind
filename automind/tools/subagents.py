@@ -36,6 +36,12 @@ RESULT_PER_AGENT_CHARS = 4000
 #: 父上下文会把父任务自己的上下文挤爆（而父任务还要继续干活）。
 RESULT_TOTAL_CHARS = 12000
 
+#: ``subagent_list(agent_id=...)`` 单个详情视图里回传的 output 字符上限。
+#: 比列表视图（每项 4000 / 总量 12000）大得多：父模型**点名**要看的那一个
+#: 结果，就是它接着干活/写报告的依据，给半截只会逼它再派发一次。
+#: 同时仍然封顶 —— 一个子任务可以跑出几十万字，无上限会把父上下文一次性撑爆。
+DETAIL_OUTPUT_CHARS = 20000
+
 
 # ═══════════════════════════════════════════════════════════
 # 公共小工具
@@ -267,10 +273,27 @@ class SubagentListTool(AbstractTool):
         "List the sub-agents delegated in this session: status (running/done/failed/"
         "cancelled), steps, token usage, error and output tail. For finished "
         "sub-agents the results are included (most recent first, length-capped). "
-        "Use it to check progress and to collect results; do not poll it in a tight "
-        "loop — do some other work first."
+        "Pass agent_id to read ONE sub-agent's full detail instead: status/steps/"
+        "tokens/error/elapsed plus its complete output (up to 20000 chars; if it is "
+        "longer, truncated=true and output_chars reports the original length). "
+        "Use agent_id when a result was cut off in the list view and you need the "
+        "whole thing before acting on it. Do not poll in a tight loop — do some "
+        "other work first."
     )
-    parameters = {"type": "object", "properties": {}, "required": []}
+    parameters = {
+        "type": "object",
+        "properties": {
+            "agent_id": {
+                "type": "string",
+                "description": (
+                    "Optional: id of one sub-agent (e.g. sa3). When set, returns that "
+                    "sub-agent's full detail and complete output instead of the list. "
+                    "Unknown ids produce an actionable error listing the available ids."
+                ),
+            },
+        },
+        "required": [],
+    }
     permission_tier = PermissionTier.SAFE
     risk_score = 0
 
@@ -283,6 +306,13 @@ class SubagentListTool(AbstractTool):
             return failure
         manager = _manager_of(self)
         session_id = subagents.current_session_id()
+
+        # 点名查看单个子智能体：与"列表 + 截断结果"是两种意图 ——
+        # 前者是"把这个结果给我，我要用它"；后者是"看看现在什么进度"。
+        agent_id = str(kwargs.get("agent_id") or "").strip()
+        if agent_id:
+            return _agent_detail(self.name, manager, session_id, agent_id)
+
         items = manager.list(session_id=session_id)
         results, truncated = _collect_results(manager, session_id, items)
         running = sum(1 for item in items if item["status"] == "running")
@@ -307,6 +337,87 @@ class SubagentListTool(AbstractTool):
         else:
             payload["note"] = "所有子智能体都已结束；results 里是它们的结果。"
         return ok(self.name, **payload)
+
+
+def _agent_detail(tool_name: str, manager: subagents.SubagentManager,
+                  session_id: str, agent_id: str) -> ToolResult:
+    """按 agent_id 取单个子智能体的完整视图（``subagent_list`` 的点名模式）。
+
+    为什么不直接复用 ``manager.get()`` 返回的 output：``SubagentRecord.detail()``
+    把 output 截到 8000（``OUTPUT_KEEP_CHARS``，列表只要尾部）；而父模型点名要
+    这一个结果时，它要的是**能直接据以继续工作**的正文。这里优先从记录里取
+    原文，按 ``DETAIL_OUTPUT_CHARS`` 再截一次，并把原长/是否截断如实标注 ——
+    给多少、截了多少都说清楚，比默默给半截强。
+    """
+    try:
+        detail = manager.get(agent_id, session_id=session_id)
+    except Exception as e:                       # pragma: no cover - 防御性
+        return err(tool_name, e)
+    if detail is None:
+        try:
+            available = [str(item.get("agent_id") or "")
+                         for item in manager.list(session_id=session_id)]
+        except Exception:                        # pragma: no cover - 防御性
+            available = []
+        ids = "、".join(x for x in available if x) or "（当前会话还没有子智能体）"
+        return bad(
+            tool_name,
+            f"没有找到子智能体 '{agent_id}'（可用 id：{ids}）。"
+            "可能是 id 写错了、它属于其它会话，或已超出结果保留上限。"
+            "请用 subagent_list（不带 agent_id）查看当前会话的全部子智能体后重试。")
+
+    # 记录里是"原文"（manager.get 的 output 已被截到 8000）；取不到再退回 detail。
+    raw = ""
+    getter = getattr(manager, "get_record", None)
+    record = None
+    if callable(getter):
+        try:
+            record = getter(agent_id, session_id=session_id)
+        except Exception:                        # pragma: no cover - 防御性
+            record = None
+    if record is not None:
+        raw = str(getattr(record, "output", "") or "")
+    if not raw:
+        raw = str(detail.get("output") or "")
+
+    output = raw
+    truncated = len(raw) > DETAIL_OUTPUT_CHARS
+    if truncated:
+        output = (raw[:DETAIL_OUTPUT_CHARS]
+                  + f"\n…[输出已截断：原长 {len(raw)} 字符，这里保留前 "
+                    f"{DETAIL_OUTPUT_CHARS} 字符]")
+
+    payload: dict[str, Any] = {
+        "agent_id": detail.get("agent_id") or agent_id,
+        "title": detail.get("title", ""),
+        "status": detail.get("status", ""),
+        "steps": detail.get("steps", 0),
+        "tokens": detail.get("tokens", 0),
+        "error": detail.get("error", ""),
+        "elapsed_s": detail.get("elapsed_s", 0.0),
+        "stop_reason": detail.get("stop_reason", ""),
+        "resumable": bool(detail.get("resumable")),
+        "output": output,
+        "output_chars": len(raw),
+        "truncated": truncated,
+    }
+    # manager 有则给：任务原文与派发时的限额 —— 父模型判断"它到底做没做完、
+    # 还能不能接着派"要用这些，多这几个字段不会撑爆上下文。
+    for key in ("task", "allowed_tools", "max_steps", "max_tokens"):
+        if key in detail:
+            payload[key] = detail[key]
+
+    if payload["status"] == "running":
+        payload["note"] = (
+            "该子智能体仍在运行：output 是当前进度快照，不是最终结果。"
+            "先继续做别的步骤，稍后再查；要补充要求用 subagent_send，"
+            "要停止用 subagent_stop。")
+    else:
+        payload["note"] = (
+            "该子智能体已结束：output 是完整结果"
+            f"（上限 {DETAIL_OUTPUT_CHARS} 字符，truncated=true 时仅保留前部）。"
+            "可直接据此继续工作；若还需它做别的事，请用 subagent 重新派发。")
+    return ok(tool_name, **payload)
 
 
 def _collect_results(manager: subagents.SubagentManager, session_id: str,
@@ -467,6 +578,7 @@ def subagent_tools(manager: subagents.SubagentManager | None = None) -> list[Abs
 
 
 __all__ = [
+    "DETAIL_OUTPUT_CHARS",
     "RESULT_PER_AGENT_CHARS",
     "RESULT_TOTAL_CHARS",
     "SUBAGENT_TOOL_CLASSES",

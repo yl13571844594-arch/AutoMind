@@ -95,21 +95,43 @@ FEATURE_GATED_TOP_LEVEL: dict[str, str] = {
 }
 
 #: 所有步骤共有的字段（类型无关）。
-COMMON_STEP_FIELDS: frozenset[str] = frozenset({"id", "type", "timeout", "on_failure"})
+#: v1.11.16：新增 ``if`` / ``unless`` —— 步骤级条件执行（社区版，见 docs/WORKFLOWS.md §5）。
+COMMON_STEP_FIELDS: frozenset[str] = frozenset({"id", "type", "timeout", "on_failure",
+                                                "if", "unless"})
 
 #: 顶层合法字段。
 TOP_LEVEL_FIELDS: frozenset[str] = frozenset(
     {"version", "name", "description", "inputs", "steps", "metadata",
      # v1.9.0（专业版）：触发器、重启续跑策略、失败通知
-     "triggers", "on_restart", "notify"})
+     "triggers", "on_restart", "notify",
+     # v1.11.16（社区版）：整轮硬超时（秒）
+     "timeout_seconds"})
 
 #: 触发器（v1.9.0，R-201 / R-202 / R-209）的合法字段。
 #: cron 与 webhook 二选一；retry 是"触发运行没有全绿时，从断点自动续跑几次"。
+#: v1.11.16：``catch_up`` / ``max_delay_seconds``（cron 错过补偿策略）、
+#: ``dedupe_window``（webhook 重放保护窗口，秒）。
 TRIGGER_FIELDS: frozenset[str] = frozenset(
-    {"id", "cron", "webhook", "inputs", "description", "enabled", "retry", "retry_delay"})
+    {"id", "cron", "webhook", "inputs", "description", "enabled", "retry", "retry_delay",
+     "catch_up", "max_delay_seconds", "dedupe_window"})
 TRIGGER_MAX_RETRY = 5
 TRIGGER_DEFAULT_RETRY_DELAY = 60
 TRIGGER_MIN_RETRY_DELAY = 10
+
+#: cron 错过补偿（v1.11.16）：服务停机期间错过的定时点怎么处理。
+#:  ``once``（默认）= 恢复后补跑一次（与此前行为一致——tick 检测到到期就会触发）；
+#:  ``skip``      = 错过就跳过，只按"现在之后的下一个时间点"继续。
+#: 另有 ``max_delay_seconds``：迟到超过该秒数时即使 once 也不补跑（默认 0 = 不限制）。
+CATCH_UP_CHOICES: tuple[str, ...] = ("once", "skip")
+CATCH_UP_ONCE = "once"
+CATCH_UP_SKIP = "skip"
+#: 迟到判定容差（秒）：调度 tick 有间隔，"到点后 3 秒才检查到"不是错过。
+CATCH_UP_GRACE_SECONDS = 60.0
+#: max_delay_seconds 上限（7 天）：再长已经没有"补跑"的意义，请直接改 cron。
+TRIGGER_MAX_DELAY_SECONDS = 7 * 86400
+#: webhook 去重窗口上限（24 小时）与状态里最多保留多少条去重键
+TRIGGER_MAX_DEDUPE_WINDOW = 86400
+TRIGGER_RECENT_KEYS = 100
 
 #: 多级 / 按角色审批（v1.10.0，企业版，R-303）：审批人写成 ``role:<角色>`` 或
 #: ``user:<用户名>``；mode=all 按顺序逐级审批（每一级都要通过），any 任一人通过即可。
@@ -141,8 +163,11 @@ INPUT_TYPES: tuple[str, ...] = ("string", "integer", "number", "boolean", "objec
 CONDITION_OPS: tuple[str, ...] = _CONDITION_OPS
 
 #: on_failure 的取值说明（写进错误提示，让人不用翻文档）。
+#: v1.11.16 新增 ``fallback(<步骤id>)``：失败后跳到指定（更靠后的）步骤做降级处理。
 ON_FAILURE_HINT = ("可选值：abort（中止整个工作流，默认）、continue（记录失败后继续）、"
-                   "retry(n)（重试 n 次后仍失败则视为失败）")
+                   "retry(n)（重试 n 次后仍失败则视为失败）、"
+                   "fallback(<步骤id>)（失败后跳到该步骤执行降级/恢复逻辑，"
+                   "两者之间的步骤标记为跳过）")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -154,13 +179,18 @@ ON_FAILURE_HINT = ("可选值：abort（中止整个工作流，默认）、cont
 class FailurePolicy:
     """步骤失败后的处置。
 
-    `abort` / `continue` / `retry` 三态。注意 `retry` 的语义是
+    `abort` / `continue` / `retry` / `fallback` 四态。注意 `retry` 的语义是
     **"重试 n 次；仍失败则步骤判失败"**，而不是"重试到成功为止"——
     无限重试会让一次 CI 跑到天亮，也让报告失去意义。
+
+    v1.11.16 新增 ``fallback``：失败后**跳到**指定步骤（必须排在当前步骤之后）
+    执行降级 / 恢复逻辑；跳转区间内的步骤标记 ``skipped``，当前步骤仍记
+    ``failed``（整轮至少是 ``partial``）—— 降级路径跑通不等于原来的失败没发生。
     """
 
-    kind: str = "abort"          # abort | continue | retry
+    kind: str = "abort"          # abort | continue | retry | fallback
     retries: int = 0             # 仅 retry 有意义：额外重试次数
+    fallback: str = ""           # 仅 fallback 有意义：跳转目标步骤 id
     raw: str = "abort"           # 原始写法，报告里如实回显
 
     @property
@@ -168,7 +198,10 @@ class FailurePolicy:
         return self.retries + 1 if self.kind == "retry" else 1
 
     def as_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "retries": self.retries, "raw": self.raw}
+        data: dict[str, Any] = {"kind": self.kind, "retries": self.retries, "raw": self.raw}
+        if self.fallback:
+            data["fallback"] = self.fallback
+        return data
 
 
 @dataclass
@@ -205,6 +238,10 @@ class StepSpec:
     #: human 步骤的审批人（v1.10.0，企业版）：空 = 任何能看到弹窗的人都可以批
     approvers: list[str] = field(default_factory=list)
     approval_mode: str = "all"
+    #: 步骤级条件执行（v1.11.16，社区版）：条件成立才执行 / 条件成立则跳过。
+    #: 语法与 branch 条件同一套白名单比较；两者同时写会在加载期报错。
+    if_condition: str = ""
+    unless_condition: str = ""
     #: 通用
     timeout: float = 0.0                 # 0 = 不限
     on_failure: FailurePolicy = field(default_factory=FailurePolicy)
@@ -217,6 +254,10 @@ class StepSpec:
             "line": self.position.line,
             "on_failure": self.on_failure.as_dict(),
         }
+        if self.if_condition:
+            data["if"] = self.if_condition
+        if self.unless_condition:
+            data["unless"] = self.unless_condition
         if self.timeout:
             data["timeout"] = self.timeout
         if self.type == "tool":
@@ -282,6 +323,10 @@ class TriggerSpec:
     #: 触发运行没有全绿时，从断点自动续跑的次数（0 = 不重试）
     retry: int = 0
     retry_delay: float = TRIGGER_DEFAULT_RETRY_DELAY
+    #: v1.11.16（专业版）：cron 错过补偿策略 + 迟到上限；webhook 重放保护窗口（秒）
+    catch_up: str = CATCH_UP_ONCE
+    max_delay_seconds: float = 0.0
+    dedupe_window: int = 0
     #: cron 相邻两次触发的最短间隔（秒，加载期算出；webhook 为 0）
     min_interval: int = 0
     position: Position = field(default_factory=Position)
@@ -290,7 +335,10 @@ class TriggerSpec:
         data: dict[str, Any] = {"id": self.id, "kind": self.kind, "inputs": self.inputs,
                                 "description": self.description, "enabled": self.enabled,
                                 "retry": self.retry, "retry_delay": self.retry_delay,
-                                "line": self.position.line}
+                                "line": self.position.line,
+                                "catch_up": self.catch_up,
+                                "max_delay_seconds": self.max_delay_seconds,
+                                "dedupe_window": self.dedupe_window}
         if self.kind == "cron":
             data.update({"cron": self.cron, "min_interval": self.min_interval})
         return data
@@ -334,6 +382,10 @@ class WorkflowSchema:
     triggers: list[TriggerSpec] = field(default_factory=list)
     on_restart: str = "notify"
     notify: NotifySpec = field(default_factory=NotifySpec)
+    #: v1.11.16（社区版）：整轮硬超时（秒，0 = 不限）。
+    #: 与步骤级 timeout 的区别：这是**整份流程**的兜底 —— 无论卡在第几步、是否在重试，
+    #: 到点整轮中止并如实标 aborted；步骤级 timeout 管的是"单步最多多久"。
+    timeout_seconds: float = 0.0
 
     # ── 查询辅助 ──────────────────────────────────────
 
@@ -393,6 +445,7 @@ class WorkflowSchema:
             "triggers": [t.as_dict() for t in self.triggers],
             "on_restart": self.on_restart,
             "notify": self.notify.as_dict(),
+            "timeout_seconds": self.timeout_seconds,
         }
 
     def summarize(self) -> str:
@@ -409,6 +462,8 @@ class WorkflowSchema:
                 flag = "必填" if spec.required else "可选"
                 default = "" if spec.default is None else f"，默认 {spec.default!r}"
                 lines.append(f"  - {spec.name}（{spec.type}，{flag}{default}）")
+        if self.timeout_seconds:
+            lines.append(f"整轮超时：{self.timeout_seconds:g}s（到点整轮中止并标 aborted）")
         lines.append(f"步骤：共 {len(self.steps)} 步")
         for i, step in enumerate(self.steps, 1):
             lines.append(f"  {i}. {_describe_step(step)}")
@@ -426,10 +481,19 @@ class WorkflowSchema:
 def _describe_step(step: StepSpec) -> str:
     """一行话说清一个步骤"将执行什么" —— dry-run 与 `--list` 都用它。"""
     on_failure = step.on_failure
-    policy = on_failure.raw if on_failure.kind != "retry" else f"retry({on_failure.retries})"
+    if on_failure.kind == "retry":
+        policy = f"retry({on_failure.retries})"
+    elif on_failure.kind == "fallback":
+        policy = f"fallback({on_failure.fallback})"
+    else:
+        policy = on_failure.raw
     tail = f"（失败策略 {policy}）" if policy != "abort" else ""
     if step.timeout:
         tail += f"（超时 {step.timeout:g}s）"
+    if step.if_condition:
+        tail += f"（当 {_clip(step.if_condition)} 时执行）"
+    if step.unless_condition:
+        tail += f"（当 {_clip(step.unless_condition)} 时不执行）"
     if step.type == "tool":
         arg_keys = "、".join(step.args) if step.args else "无参数"
         return f"[{step.id}] type=tool  tool={step.tool}  参数={arg_keys}{tail}"
@@ -596,6 +660,7 @@ def _parse_on_failure(ctx: _Ctx, raw: Any, *, path: str, at: Any) -> FailurePoli
       · ``abort`` / ``continue``
       · ``retry``（默认重试 1 次）
       · ``retry(3)`` / ``retry:3`` / ``retry 3``
+      · ``fallback(<步骤id>)`` / ``fallback:<步骤id>``（v1.11.16）
 
     为什么连 `retry:3` 也认：YAML 里写 ``on_failure: retry:3`` 会因为冒号
     被当成映射而报错，人会顺手改成引号形式 ``"retry:3"``，认了它少一次
@@ -621,6 +686,19 @@ def _parse_on_failure(ctx: _Ctx, raw: Any, *, path: str, at: Any) -> FailurePoli
         # 裸 retry 默认重试 1 次。刻意不给"无限重试"的写法：
         # 无限重试会让一次 CI 跑到天亮，也让报告里的"成功/失败"失去意义。
         return FailurePolicy(kind="retry", retries=1, raw=raw.strip())
+
+    fallback = _parse_fallback_target(raw.strip())
+    if fallback is not None:
+        if not fallback:
+            ctx.error(f"on_failure 的 fallback 缺少目标步骤 id：{raw!r}。"
+                      "正确写法如 fallback(notify_admin)", path=path, at=at)
+            return FailurePolicy()
+        if any(ch in fallback for ch in "{}.") or any(ch.isspace() for ch in fallback):
+            ctx.error(f"on_failure 的 fallback 目标 {fallback!r} 不是合法步骤 id"
+                      "（不能含点号、花括号、空格 —— 它会进模板与报告路径）",
+                      path=path, at=at)
+            return FailurePolicy()
+        return FailurePolicy(kind="fallback", fallback=fallback, raw=raw.strip())
 
     count: int | None = None
     if text.startswith("retry(") and text.endswith(")"):
@@ -654,6 +732,29 @@ def _as_positive_int(text: str) -> int | None:
     """把 `retry(3)` 里的 `3` 取出来；不是纯数字就返回 None（交由调用方报错）。"""
     inner = text.strip()
     return int(inner) if inner.isdigit() else None
+
+
+def _parse_fallback_target(raw: str) -> str | None:
+    """识别 ``fallback(<id>)`` / ``fallback:<id>`` / ``fallback <id>``，返回目标 id。
+
+    不是 fallback 写法返回 None（交由 retry 解析继续尝试）。目标 id 的语法
+    （点号、花括号等）由调用方报错 —— 目标**是否存在、是否向后**只有拿到
+    步骤清单之后才知道，在 `_check_step_references` 里统一校验。
+    """
+    text = str(raw or "").strip()
+    lowered = text.lower().replace(" ", "")
+    if not lowered.startswith("fallback"):
+        return None
+    tail = text.strip()[len("fallback"):].strip()
+    if tail.startswith("(") and tail.endswith(")"):
+        return tail[1:-1].strip()
+    if tail.startswith(":"):
+        return tail[1:].strip()
+    if tail.startswith("(") or text.strip().lower() in ("fallback",):
+        # 括号没闭合 / 只写了 fallback：返回空串，让调用方给出定向错误
+        return ""
+    # `fallbackxxx` 这类不是 fallback 写法 → 交回 retry 解析器报"无法识别"
+    return None if tail else ""
 
 
 def _check_inputs(ctx: _Ctx, raw: Any, *, unknown_fields: str) -> dict[str, InputSpec]:
@@ -881,12 +982,65 @@ def _check_step(ctx: _Ctx, raw: Any, index: int, *, tool_names: list[str] | None
         if "timeout" in raw else 0.0
     policy = _parse_on_failure(ctx, raw.get("on_failure"), path=f"{step_path}.on_failure",
                                at=raw.get("on_failure"))
+    if parent and policy.kind == "fallback":
+        # 子步骤的失败跳转没有确定语义：foreach 是"逐项循环"、parallel 是"并发"，
+        # 跳到某一项/组外的步骤会让"第几项走到哪"无法逐行对照（与 branch 不放进去
+        # 的理由一致）。需要降级请在顶层步骤上写 fallback。
+        ctx.error(f"on_failure: fallback(...) 只能写在顶层步骤上；"
+                  f"{container} 的子步骤不支持失败跳转（失败后请用 continue / "
+                  "abort，或在顶层步骤处理降级）",
+                  path=f"{step_path}.on_failure", at=raw.get("on_failure"))
+        policy = FailurePolicy()
+    if_condition, unless_condition = _check_step_conditions(
+        ctx, raw, step_path=step_path)
+    if stype == "branch" and (if_condition or unless_condition):
+        # branch 自身的条件判定只决定"往哪跳"；再叠一层 if/unless 跳过它，
+        # 主循环会把 then / else 两段**都**按顺序跑掉（没有跳转就没有区间跳过），
+        # 这是"报告全绿、实际多做了事"的一类静默错误 —— 加载期直接拒绝。
+        ctx.error("branch 步骤不支持 if / unless：branch 本身就是条件跳转。"
+                  "要按条件选路，把判断合并进 branch 的 condition；"
+                  "要对整段流程做条件执行，请给 then / else 的目标步骤各自写 if / unless",
+                  path=f"{step_path}.if", at=raw.get("if") or raw.get("unless"))
+        if_condition = unless_condition = ""
 
     return StepSpec(
         id=step_id, type=stype, position=ctx.pos(raw), tool=tool, args=args,
         prompt=prompt, system=system, condition=condition, then=then, else_=else_,
-        timeout=timeout, on_failure=policy, parent=parent, **extra,
+        timeout=timeout, on_failure=policy, parent=parent,
+        if_condition=if_condition, unless_condition=unless_condition, **extra,
     )
+
+
+def _check_step_conditions(ctx: _Ctx, raw: dict[str, Any], *, step_path: str
+                           ) -> tuple[str, str]:
+    """校验步骤级 ``if`` / ``unless``（v1.11.16）。
+
+    ``if`` 与 ``unless`` 的差别只有"条件成立时执行"还是"条件成立时跳过"；
+    两者写在同一处的好处是**不允许同时写**，不给"两个条件谁优先"留解释空间。
+    """
+    if_condition = ""
+    unless_condition = ""
+    for field_name in ("if", "unless"):
+        value = raw.get(field_name)
+        if value is None:
+            continue
+        if not isinstance(value, str) or not value.strip():
+            ctx.error(f"{field_name} 应当是非空字符串（条件表达式，如 "
+                      f"\"{{{{ steps.check.output.status }}}} == ok\"），实际是 {value!r}",
+                      path=f"{step_path}.{field_name}", at=raw.get(field_name))
+            continue
+        _check_condition(ctx, value, path=f"{step_path}.{field_name}",
+                         at=raw.get(field_name), label=field_name)
+        if field_name == "if":
+            if_condition = value.strip()
+        else:
+            unless_condition = value.strip()
+    if if_condition and unless_condition:
+        ctx.error("同一个步骤不能同时写 if 与 unless（两个条件谁优先没有确定的语义）。"
+                  "条件成立时执行用 if；条件成立时跳过用 unless（或把 unless 的条件取反写成 if）",
+                  path=f"{step_path}.if", at=raw.get("if"))
+        unless_condition = ""
+    return if_condition, unless_condition
 
 
 def _as_int(ctx: _Ctx, raw: Any, *, path: str, at: Any, minimum: int,
@@ -1111,10 +1265,11 @@ def _check_parallel(ctx: _Ctx, raw: dict[str, Any], *, step_path: str, step_id: 
     return out
 
 
-def _check_condition(ctx: _Ctx, condition: str, *, path: str, at: Any) -> None:
-    """校验 branch 条件：必须是 `左值 <算子> 右值` 的受限比较。
+def _check_condition(ctx: _Ctx, condition: str, *, path: str, at: Any,
+                     label: str = "branch") -> None:
+    """校验条件表达式：必须是 `左值 <算子> 右值` 的受限比较（branch / if / unless 共用）。
 
-    为什么要**在加载期**就查语法：branch 的条件写错 = 跳转走错分支，
+    为什么要**在加载期**就查语法：条件写错 = 走错分支 / 该跑的没跑，
     而错的那条分支可能正在改生产配置。这是本实现里最不能"跑了才知道"的一类错误。
 
     为什么只允许白名单算子、且左右都只是模板或字面量：
@@ -1122,8 +1277,12 @@ def _check_condition(ctx: _Ctx, condition: str, *, path: str, at: Any) -> None:
     解析规则统一在 conditions.py（执行器用同一份），这里只负责把问题记进 ctx。
     """
     for message, suggestions in _check_condition_text(condition):
+        if label != "branch":
+            # conditions.py 的文案是围绕 branch 写的；if / unless 复用同一份校验，
+            # 但报错要说清是哪一种，否则用户会去翻 branch 的文档
+            message = message.replace("branch 条件", f"{label} 条件")
         if "条件" not in message:
-            message = f"branch 条件 {condition!r} 有误：{message}"
+            message = f"{label} 条件 {condition!r} 有误：{message}"
         ctx.error(message, path=path, at=at, suggestions=suggestions)
 
 
@@ -1232,6 +1391,11 @@ def collect_issues(
 
     description = str(document.get("description") or "")
 
+    # v1.11.16（社区版）：整轮硬超时。0 / 缺省 = 不限（与步骤级 timeout 同一解析口径）。
+    timeout_seconds = _check_timeout(ctx, document["timeout_seconds"],
+                                     path="timeout_seconds") \
+        if "timeout_seconds" in document else 0.0
+
     triggers = _check_triggers(ctx, document.get("triggers"), inputs,
                                unknown_fields=unknown_fields)
     on_restart = _check_on_restart(ctx, document, has_triggers=bool(triggers))
@@ -1244,7 +1408,7 @@ def collect_issues(
         version=version, name=name, description=description, inputs=inputs, steps=steps,
         metadata=metadata, source=source, warnings=list(ctx.warnings),
         source_digest=source_digest, triggers=triggers, on_restart=on_restart,
-        notify=notify,
+        notify=notify, timeout_seconds=timeout_seconds,
     )
     return schema, ctx.issues, ctx.warnings
 
@@ -1350,6 +1514,37 @@ def _check_triggers(ctx: _Ctx, raw: Any, inputs: dict[str, InputSpec], *,
                             minimum=TRIGGER_MIN_RETRY_DELAY, maximum=86400,
                             what="retry_delay（秒）")
             spec.retry_delay = float(value or TRIGGER_DEFAULT_RETRY_DELAY)
+        # ── v1.11.16：cron 错过补偿 / webhook 重放保护 ─────────────
+        if "catch_up" in item:
+            raw_catch = item["catch_up"]
+            catch_up = str(raw_catch).strip().lower() if isinstance(raw_catch, str) else ""
+            if catch_up not in CATCH_UP_CHOICES:
+                ctx.error(f"触发器 catch_up 只能是 {' / '.join(CATCH_UP_CHOICES)}，"
+                          f"实际是 {raw_catch!r}（once = 错过时补跑一次；skip = 错过就跳过）",
+                          path=f"{path}.catch_up", position=position,
+                          suggestions=suggest(str(raw_catch), list(CATCH_UP_CHOICES)))
+            else:
+                spec.catch_up = catch_up
+            if spec.kind != "cron":
+                ctx.error("catch_up 只对定时（cron）触发器有意义；webhook 是外部调用触发的，"
+                          "不存在'错过'", path=f"{path}.catch_up", position=position)
+        if "max_delay_seconds" in item:
+            value = _as_int(ctx, item["max_delay_seconds"],
+                            path=f"{path}.max_delay_seconds", at=item, minimum=0,
+                            maximum=TRIGGER_MAX_DELAY_SECONDS,
+                            what="max_delay_seconds（迟到超过多久就不补跑）")
+            spec.max_delay_seconds = float(value or 0)
+            if spec.kind != "cron":
+                ctx.error("max_delay_seconds 只对定时（cron）触发器有意义",
+                          path=f"{path}.max_delay_seconds", position=position)
+        if "dedupe_window" in item:
+            value = _as_int(ctx, item["dedupe_window"], path=f"{path}.dedupe_window",
+                            at=item, minimum=0, maximum=TRIGGER_MAX_DEDUPE_WINDOW,
+                            what="dedupe_window（秒；0 = 关闭去重）")
+            spec.dedupe_window = int(value or 0)
+            if spec.kind != "webhook":
+                ctx.error("dedupe_window（重放保护窗口）只对 webhook 触发器有意义",
+                          path=f"{path}.dedupe_window", position=position)
         out.append(spec)
     return out
 
@@ -1474,6 +1669,30 @@ def _check_step_references(ctx: _Ctx, steps: list[StepSpec],
                       "或改用相反的算子（== ↔ !=、> ↔ <=）",
                       path=f"steps[{i}]({step.id}).then", position=step.position)
 
+    # 2.5) on_failure: fallback(<步骤id>) 的目标校验（v1.11.16）：
+    #      必须存在、必须向后、不能指向自己 —— 否则就是循环，而 v1 明确不支持循环。
+    for i, step in enumerate(steps):
+        policy = step.on_failure
+        if policy.kind != "fallback":
+            continue
+        target = policy.fallback
+        if not target:
+            continue                            # 缺目标已在 _parse_on_failure 里报过
+        if target not in seen:
+            ctx.error(f"on_failure: fallback 指向不存在的步骤：{target!r}",
+                      path=f"steps[{i}]({step.id}).on_failure", position=step.position,
+                      suggestions=suggest(target, list(seen)))
+            continue
+        if target == step.id:
+            ctx.error(f"on_failure: fallback 不能指向自己（{target!r}）：失败后跳回自己 = 死循环",
+                      path=f"steps[{i}]({step.id}).on_failure", position=step.position)
+            continue
+        if seen[target] <= i:
+            ctx.error(f"on_failure: fallback 指向已执行过的步骤 {target!r}"
+                      f"（第 {i + 1} 步 → 第 {seen[target] + 1} 步），v1 不支持循环。"
+                      "降级步骤必须排在失败步骤之后",
+                      path=f"steps[{i}]({step.id}).on_failure", position=step.position)
+
     # 3) 模板变量：inputs 必须声明、env 必须大写、steps 必须存在
     from automind.workflow.template import validate_template
 
@@ -1583,6 +1802,10 @@ def _template_fields(step: StepSpec) -> list[tuple[str, str]]:
     执行期才报未定义变量"，那正是这套静态检查存在的意义（提前发现）。
     """
     fields: list[tuple[str, str]] = []
+    if step.if_condition:
+        fields.append(("if", step.if_condition))
+    if step.unless_condition:
+        fields.append(("unless", step.unless_condition))
     if step.type == "tool":
         fields.append(("tool", step.tool))
         for key, value in step.args.items():
@@ -1632,6 +1855,10 @@ def _arg_position(ctx: _Ctx, step: StepSpec, field_name: str, sub_path: str) -> 
         return ctx.pos(step.tool, step.position)
     if field_name in ("prompt", "system", "condition", "goal"):
         return ctx.pos(getattr(step, field_name), step.position)
+    if field_name == "if":
+        return ctx.pos(step.if_condition, step.position)
+    if field_name == "unless":
+        return ctx.pos(step.unless_condition, step.position)
     if field_name.startswith("items"):
         return ctx.pos(step.items, step.position)
     if field_name.startswith("args."):
@@ -1659,6 +1886,8 @@ __all__ = [
     "AGENT_MODES",
     "APPROVAL_MODES",
     "APPROVER_PREFIXES",
+    "CATCH_UP_CHOICES",
+    "CATCH_UP_GRACE_SECONDS",
     "COMMON_STEP_FIELDS",
     "CONDITION_OPS",
     "FEATURE_GATED_STEP_TYPES",
@@ -1678,6 +1907,9 @@ __all__ = [
     "SUPPORTED_VERSIONS",
     "TOP_LEVEL_FIELDS",
     "TRIGGER_FIELDS",
+    "TRIGGER_MAX_DEDUPE_WINDOW",
+    "TRIGGER_MAX_DELAY_SECONDS",
+    "TRIGGER_RECENT_KEYS",
     "UNKNOWN_FIELD_ERROR",
     "UNKNOWN_FIELD_WARNING",
     "FailurePolicy",

@@ -1,6 +1,6 @@
 # 工作流自动化 —— 版本发布需求与步骤
 
-> 编制日期：2026-09-29 ｜ 基线版本：1.7.7（当前 1.10.0）｜ 维护方式：每个版本发布后回填第 0 节状态表与第 9 节变更记录
+> 编制日期：2026-09-29 ｜ 基线版本：1.7.7（当前 1.11.16）｜ 维护方式：每个版本发布后回填第 0 节状态表与第 9 节变更记录
 >
 > 本文档管"**做什么、做到什么程度算完成**"；"**怎么打包发布**"见仓库根目录 [RELEASE.md](../RELEASE.md)，
 > 工作流文件格式参考见 [WORKFLOWS.md](WORKFLOWS.md)，版本特性分层机制见 [EDITIONS.md](EDITIONS.md)。
@@ -14,6 +14,7 @@
 | **v1.8.0** | 工作流可用化（Web + 异步 + 续跑 + agent 步骤） | 社区版 | R-101 ~ R-110 | 9–11 人日 / 2–3 个会话 | 🟨 代码完成（2026-09-30）：R-101~R-110 全部实现并有自动化测试；待 7.3 真实 Key 冒烟与 7.4 打包发布 |
 | **v1.9.0** | 无人值守自动化（触发器 + 并行 + 历史） | 专业版 | R-201 ~ R-209 | 7–9 人日 / 约 2 个会话 | 🟨 代码完成（2026-10-04）：R-201~R-209 全部实现并有自动化测试（社区 100 项 + 专业版 26 项）；待 7.3 真实 Key 冒烟（含专业版三项）与 7.4 打包发布（与 v1.8.0 一并） |
 | **v1.10.0** | 治理与固化（发布审批 + 权限 + 审计 + 轨迹转工作流） | 企业版（固化为专业版） | R-301 ~ R-308 | 7–11 人日 / 2–3 个会话 | 🟨 代码完成（2026-10-04）：R-301~R-308 全部实现并有自动化测试（社区 44 项 + 专业 / 企业版 24 项）；待 7.3 真实 Key 冒烟（含 SSO 多身份审批）与 7.4 打包发布（与 v1.8.0 / v1.9.0 一并） |
+| **v1.11.16** | 自动化强化（步骤可靠性 + 条件编排 + 运行治理 + 触发器可靠 + 可观测） | 社区版 + 专业版 | R-401 ~ R-405 | 1–2 人日 / 1 个会话 | 🟨 代码完成（2026-10-23）：R-401~R-405 全部实现并有自动化测试（`tests/workflow/test_automation_v1116.py` 56 项 + 既有 456 项全过）；待 7.3 真实 Key 冒烟与 7.4 打包发布 |
 
 状态图例：⬜ 未开始 · 🟨 进行中 · ✅ 已发布 · ⏸ 暂缓（写明原因）
 
@@ -36,6 +37,8 @@
 | 检查点状态机（running / partial / interrupted / completed / resumed / dismissed） | `automind/state/checkpoint.py`（v1.7.7） |
 | 出站事件（webhook） | `automind/core/webhooks.py` |
 | 版本特性开关、限额 | `automind/core/edition.py`、`automind/core/quota.py` |
+| 步骤级条件 `if` / `unless`、失败降级 `on_failure: fallback(...)`、整轮 `timeout_seconds`、整轮 / 单步 token 统计（v1.11.16） | `automind/workflow/schema.py`、`executor.py` |
+| 触发器错过补偿（`catch_up` / `max_delay_seconds`）、webhook 重放保护（`dedupe_window`）、通知含耗时 / token / 最慢步骤（v1.11.16） | `automind/workflow/schema.py`、`pro/automind_pro/workflow_pro.py` |
 | 测试 189 个 | `tests/workflow/` |
 
 **缺口**（本路线图要解决的）：Web 无入口；REST 运行同步阻塞（无运行 id / 进度 / 取消 / 历史）；
@@ -175,6 +178,34 @@ POST /api/workflow/runs/{run_id}/resume
 
 ---
 
+## 5.5 v1.11.16（社区版 + 专业版）—— 自动化强化
+
+> 背景：v1.8.0 ~ v1.10.0 把"能不能跑、能不能无人值守、能不能治理"补齐了；
+> 本版补的是**真实生产里反复遇到的那几类自动化缺口**（步骤坏了只会整轮中止、
+> 条件只能靠 branch 跳转、触发器错过/重放没有策略、看板 token 恒为 0）。
+> 设计原则不变：能在加载期拒绝的绝不留给运行时；失败不许伪装成成功。
+
+| 编号 | 需求 | 版本 | 验收标准 |
+|---|---|---|---|
+| R-401 | **步骤级条件执行**：`if` / `unless`（与 branch 共用白名单比较，不做表达式求值）；条件不成立记 `skipped`、输出为 null（后续引用明确报错）；条件无法判定记失败；foreach / parallel 子步骤同样支持；dry-run 只渲染预览不跳过 | 社区 | 条件真/假两条路径都真实执行；跳过步骤不写空串；`tests/workflow/test_automation_v1116.py::TestCondition*` |
+| R-402 | **失败降级分支**：`on_failure: fallback(<步骤id>)`，失败后跳到同文件内更靠后的步骤做降级，跳转区间标 `skipped`，失败步骤仍记 `failed`（整轮 partial）；加载期校验目标存在 / 向后 / 非子步骤 | 社区 | 失败后降级步骤真实执行、依赖步骤被跳过、恢复后继续；目标不合法加载期报错 |
+| R-403 | **整轮硬超时**：顶层 `timeout_seconds`；到点当前步骤 `aborted`、剩余 `skipped`、整轮 `aborted` 并写明上限 | 社区 | 慢工具真实中止（耗时 < 上限 + 容差），不是只写字段；`0` 保持旧行为 |
+| R-404 | **可观测**：每步 / 整轮 token 统计写入报告（llm 取响应 usage、agent 取 D6 `tokens`）；通知模板补整轮耗时 / token / 最慢步骤；看板 token 不再恒为 0 | 社区 + 专业 | 报告 `tokens.total` 与运行记录摘要一致；通知正文含三项数字 |
+| R-405 | **触发器可靠性**：cron 错过补偿 `catch_up: once\|skip` + `max_delay_seconds`（迟到多久内才补跑，默认补跑一次 = 旧隐式行为）；webhook 重放保护 `dedupe_window`（Idempotency-Key 或请求体 sha256，窗口内重复返回 `duplicate: true` 且不重复触发） | 专业（沿用 `workflow_triggers` 门控） | 停机一夜恢复只补一次 / 可配置不补；重复 webhook 只触发一次；状态字段可在 `GET /api/workflow/triggers` 看到 |
+
+**不做 / 剩余项**（明确记录，避免误以为"已全绿"）：
+
+- **跨触发器 singleton**（同一工作流只允许一个运行、并发触发排队）：现有"同一触发器串行、繁忙跳过"
+  只覆盖单触发器；跨触发器的进程级排队需要改服务端运行登记（`server.py` 不在本版改动范围），
+  留待后续版本，或在网络层 / 外部调度侧用单实例约束解决；
+- **手动重跑单个失败步骤**：断点续跑以"已成功步骤"为粒度，重跑失败步骤 = 续跑整份
+  （失败步骤自然会重跑）；单独"只重跑这一步"没有明确语义（后续步骤依赖它的新输出），暂不做；
+- **循环终止条件 / while**：v1 明确不支持循环（`branch`/`fallback` 只能向后跳），本版不变；
+- **foreach 循环内 branch / 嵌套 foreach**：仍按原限制拒绝（报告逐项对照的语义优先）；
+- **社区版触发器**：仍是专业版能力（加载期拦截），本版只增强专业版触发器可靠性。
+
+---
+
 ## 6. v1.10.0（企业版为主）—— 治理与固化
 
 | 编号 | 需求 | 版本 | 验收标准 |
@@ -264,6 +295,7 @@ POST /api/workflow/runs/{run_id}/resume
 
 | 日期 | 版本 | 变更 |
 |---|---|---|
+| 2026-10-23 | 1.11.16 | v1.11.16 自动化强化代码完成（R-401 ~ R-405）：步骤级 `if`/`unless`、失败降级 `on_failure: fallback(...)`、整轮 `timeout_seconds`、每步/整轮 token 统计与通知增强（社区）；cron 错过补偿 `catch_up`/`max_delay_seconds`、webhook 重放保护 `dedupe_window`、通知含耗时/token/最慢步骤（专业版，沿用 `workflow_triggers` 门控，**未新增特性键**）。新增 `tests/workflow/test_automation_v1116.py` 56 项；`tests/workflow` 合计 456 项全过。明确不做：跨触发器 singleton、单步手动重跑、while 循环。待 7.3 真实 Key 冒烟与 7.4 打包发布 |
 | 2026-10-04 | 1.10.0 | v1.10.0 代码完成（R-301 ~ R-308），三版路线的规划项全部交付；第 0 节标 🟨（待真实 Key 冒烟与发布，与 v1.8.0 / v1.9.0 一并）；第 6 节补实现说明。新增接口 18 个（治理 / 凭据 / 并发 / 审计 / 轨迹草稿 / 模板库），社区版均为 403 + 升级提示；`workflow_from_trace` / `workflow_templates` / `workflow_governance` 移入 `COMMERCIAL_FEATURES`，`PLANNED_FEATURES` 清空；RBAC 内置角色增加工作流动作与 approver 角色。7.1 / 7.2 全部完成，7.3 的前端构建、全量回归、版本一致性已完成 |
 | 2026-10-04 | 1.9.0 | v1.9.0 代码完成（R-201 ~ R-209）；D2 定稿、D5 触发器部分落地、D4 专用会话落地；第 0 节标 🟨（待真实 Key 冒烟与发布，与 v1.8.0 一并）；第 5 节补"scheduler 审阅结论"与实现说明。新增接口 6 个（`/api/workflow/triggers`、`…/{key}/toggle|token|run`、`/api/workflow/hooks/{key}`、`/api/workflow/dashboard`），社区版均为 403 + 升级提示；特性键 `workflow_triggers` / `workflow_parallel` / `workflow_history` 移入 `COMMERCIAL_FEATURES`；`QUOTA_RULES` 增加 `workflow_history_days`。7.1 / 7.2 全部完成，7.3 的前端构建、全量回归、版本一致性已完成 |
 | 2026-09-30 | 1.8.0 | v1.8.0 代码完成（R-101 ~ R-110）；D1 / D3 / D4 / D6 定稿、D5 手动部分落地、D2 顺延 v1.9.0；第 0 节标 🟨（待真实 Key 冒烟与发布）；7.1 / 7.2 与 7.3 的前端、隔离目录验证已勾选。实现与路线图的差异：① 断点续跑存于 `workflow_runs/`（独立于 `CheckpointManager`，但复用同一套状态词，理由见 `automind/workflow/runs.py`）；② 另增 `GET /api/workflow/runs`、`…/dismiss`、`/api/workflow/source`、`/save`、`/delete` 五个接口供界面使用；③ foreach 续跑粒度为整步；④ 2.4 节的五个特性键先登记在 `edition.PLANNED_FEATURES`（带计划版本），各自实现交付时再移入 `COMMERCIAL_FEATURES` —— 直接放进后者会让企业版许可证的 `feature_flags()` 出现五个 False（pro/tests 断言全部为真）、界面显示 🔒 |

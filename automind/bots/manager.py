@@ -39,8 +39,8 @@ from automind.bots.channels import (
     HttpReq,
     Incoming,
     get_channel,
-    split_utf8,
 )
+from automind.bots.md_format import split_message
 from automind.core.logging import get_logger
 
 logger = get_logger("automind.bots")
@@ -60,6 +60,17 @@ Sender = Callable[[Incoming, str, str], Awaitable[None]]
 
 def _now() -> str:
     return time.strftime("%H:%M:%S")
+
+
+def _md_list(lines: list[str]) -> str:
+    """把过程行整理成 Markdown 列表项（各平台语法降级交给 md_format 适配层）。"""
+    out: list[str] = []
+    for line in lines:
+        text = line.strip()
+        if not text:
+            continue
+        out.append(text if text.startswith(("- ", "• ", "> ")) else f"- {text}")
+    return "\n".join(out)
 
 
 class _ChatState:
@@ -129,7 +140,7 @@ class ProgressRelay:
         if self.steps_total:
             title += f"（{self.steps_done}/{self.steps_total}）"
         self._last = time.monotonic()
-        await self.send("\n".join(lines), title)
+        await self.send(_md_list(lines), title)
 
     async def on_event(self, ev: dict[str, Any]) -> None:
         t = ev.get("type")
@@ -179,7 +190,8 @@ class ProgressRelay:
             elif t == "loop_iter":
                 self.lines.append(f"🔁 第 {ev.get('iter')}/{ev.get('max')} 轮")
             elif t == "ma_plan":
-                roles = [f"{p.get('role')}：{str(p.get('subtask') or '')[:40]}" for p in ev.get("plan") or []]
+                roles = [f"- **{p.get('role')}**：{str(p.get('subtask') or '')[:40]}"
+                         for p in ev.get("plan") or []]
                 if roles:
                     await self.send("\n".join(roles), "👥 多智能体分工")
             if len(self.lines) >= 12:
@@ -401,16 +413,27 @@ class BotManager:
         ch = get_channel(bot["channel"])
 
         async def send(msg: Incoming, text: str, title: str = "") -> None:
-            chunks = split_utf8(text, max(500, ch.limit_bytes - len(title.encode("utf-8")) - 40))
+            # 标题在部分渠道会占正文额度（企微 / 公众号把标题放正文首行），先预留再分片
+            reserved = len(title.encode("utf-8")) + 40 if title else 0
+            limit = max(500, ch.limit_bytes - reserved)
+            chunks = split_message(text, limit, channel=bot["channel"], marker=False)
+            total = len(chunks)
             for i, part in enumerate(chunks[:6]):
-                t = title if i == 0 else f"{title}（续 {i + 1}）"
+                if i == 0:
+                    part_title = title
+                else:
+                    part_title = (f"{title}（续 {i + 1}/{total}）" if title
+                                  else f"（续 {i + 1}/{total}）")
                 try:
-                    await ch.send(bot, msg, part, t)
+                    await ch.send(bot, msg, part, part_title)
                 except Exception as e:
                     logger.warning("bot_send_failed", bot=bot["id"], channel=bot["channel"],
                                    error=f"{type(e).__name__}: {e}")
                     self._log(bot["id"], "err", msg.chat_id, f"发送失败：{e}")
                     return
+            if total > 6:                        # 与旧版一致：最多连发 6 条，其余记日志
+                logger.warning("bot_message_truncated", bot=bot["id"], channel=bot["channel"],
+                               chunks=total, sent=6)
         return send
 
     async def simulate(self, bot_id: str, text: str, chat_id: str = "console",
@@ -481,7 +504,8 @@ class BotManager:
             return None
         if cmd_l in ("status", "状态"):
             if st.task and not st.task.done():
-                await reply(f"正在执行：{st.text[:80]}\n已用时 {time.time() - st.started:.0f} 秒", "⏳ 执行中")
+                await reply(f"- **正在执行**：{st.text[:80]}\n"
+                            f"- **已用时**：{time.time() - st.started:.0f} 秒", "⏳ 执行中")
             else:
                 await reply(f"空闲。当前模式：{MODES.get(st.mode or bot['mode'], bot['mode'])}")
             return None
@@ -509,11 +533,15 @@ class BotManager:
         return st.task
 
     def _help(self, bot: dict[str, Any]) -> str:
-        return ("直接发消息即可下达任务，我会把执行过程和结果发回这里。\n"
-                f"当前模式：{MODES.get(bot['mode'], bot['mode'])}\n"
-                "指令：\n/stop 停止当前任务\n/status 查看状态\n/new 开始新对话\n"
-                "/mode 对话|工作|编程 切换模式\n/apply 把隔离副本的产物应用到项目\n"
-                "同意 / 拒绝 [编号] 回复操作审批")
+        return ("直接发消息即可下达任务，我会把执行过程和结果发回这里。\n\n"
+                f"- **当前模式**：{MODES.get(bot['mode'], bot['mode'])}\n"
+                "- **指令**：\n"
+                "  - /stop 停止当前任务\n"
+                "  - /status 查看状态\n"
+                "  - /new 开始新对话\n"
+                "  - /mode 对话|工作|编程 切换模式\n"
+                "  - /apply 把隔离副本的产物应用到项目\n"
+                "  - 同意 / 拒绝 [编号] 回复操作审批")
 
     async def _answer_approval(self, st: _ChatState, ok: bool, aid: str, reply) -> None:
         pending = {k: v for k, v in st.approvals.items() if not v["future"].done()}
@@ -565,8 +593,10 @@ class BotManager:
             shown = "\n".join(f"- {k}: {str(v)[:160]}" for k, v in list((args or {}).items())[:6])
             timeout = float(bot.get("approval_timeout") or 300)
             await relay.flush()
-            await reply(f"操作：{tool_name}（{getattr(tier, 'value', tier)}）\n原因：{reason}\n{shown}\n\n"
-                        f"回复「同意 {aid}」放行，「拒绝 {aid}」拦下（{int(timeout)} 秒内不回复按拒绝处理）",
+            await reply(f"**操作**：{tool_name}（{getattr(tier, 'value', tier)}）\n"
+                        f"**原因**：{reason}\n\n{shown}\n\n"
+                        f"回复「同意 {aid}」放行，「拒绝 {aid}」拦下"
+                        f"（{int(timeout)} 秒内不回复按拒绝处理）",
                         "⚠ 需要你批准")
             try:
                 ok = await asyncio.wait_for(fut, timeout=timeout)
@@ -581,7 +611,8 @@ class BotManager:
         self._run_hooks[sid] = {"event_sink": relay.on_event, "approval": approval, "quiet": True}
         relay.start()
         t0 = time.time()
-        await reply(f"{msg.text[:200]}\n\n模式：{MODES.get(mode, mode)} · 发送 /stop 可停止", "🤖 收到，开始执行")
+        await reply(f"**任务**：{msg.text[:200]}\n\n"
+                    f"**模式**：{MODES.get(mode, mode)} · 发送 /stop 可停止", "🤖 收到，开始执行")
         try:
             res = await self._run_task({"task": msg.text, "session_id": sid,
                                         "overrides": {"mode": mode}})
@@ -597,17 +628,19 @@ class BotManager:
             await relay.close()
             await relay.flush()
             ok = bool(body.get("success", True))
-            meta = [f"用时 {time.time() - t0:.0f} 秒"]
-            if body.get("steps"):
-                meta.append(f"{body['steps']} 步")
-            if body.get("tokens"):
-                meta.append(f"{body['tokens']} tokens")
             out = str(body.get("output") or "（没有输出）").strip()
             ws = relay.workspace
             if ws and ws.get("count"):
-                out += (f"\n\n📁 隔离副本产物：新增 {len(ws.get('added') or [])} · 修改 {len(ws.get('modified') or [])}"
-                        "\n回复 /apply 可按相对路径覆盖回项目根（覆盖前自动备份）")
-            await reply(out + "\n\n" + " · ".join(meta), "✅ 任务完成" if ok else "⚠ 部分完成")
+                out += (f"\n\n- 📁 **隔离副本产物**：新增 {len(ws.get('added') or [])}"
+                        f" · 修改 {len(ws.get('modified') or [])}"
+                        "\n- 回复 /apply 可按相对路径覆盖回项目根（覆盖前自动备份）")
+            meta = [f"⏱ 用时 {time.time() - t0:.0f} 秒"]
+            if body.get("steps"):
+                meta.append(f"🧭 步数 {body['steps']}")
+            if body.get("tokens"):
+                meta.append(f"🔤 {body['tokens']} tokens")
+            footer = "\n".join(f"- {m}" for m in meta)
+            await reply(f"{out}\n\n{footer}", "✅ 任务完成" if ok else "⚠ 部分完成")
         except asyncio.CancelledError:
             await relay.close()
             await reply("任务已停止。", "⏹ 已停止")

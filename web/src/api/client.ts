@@ -123,6 +123,44 @@ export async function apiGet<T = any>(path: string): Promise<T> {
 }
 
 /**
+ * 读取**纯文本**接口（v1.11.14：Markdown 文档预览）。
+ *
+ * 为什么不能复用 apiGet：`/api/preview/file` 对 .md 返回 `text/plain` 原文，
+ * 而 apiGet 会把响应体当 JSON 解析 —— 一篇文档直接报「响应不是合法 JSON」。
+ * 这里成功时返回原文；失败时仍按 client 的统一口径抛 ApiError（错误体是 JSON
+ * 就取出 error/detail 那句话，404/403/401 的友好提示与 apiGet 完全一致）。
+ */
+export async function apiGetText<T = string>(path: string, timeoutMs?: number): Promise<T> {
+  const ctrl = timeoutMs ? new AbortController() : undefined;
+  const timer = ctrl ? window.setTimeout(() => ctrl.abort(), timeoutMs) : undefined;
+  let r: Response;
+  try {
+    r = await fetch(`${API}${path}`, { headers: adminHeaders(), signal: ctrl?.signal });
+  } catch (e: any) {
+    if (e?.name === 'AbortError') throw new ApiError(408, `请求超时（${timeoutMs}ms 内没有响应）`, path);
+    throw new ApiError(0, e?.message || '网络请求失败', path);
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
+  let raw: string;
+  try {
+    raw = await r.text();
+  } catch (e: any) {
+    throw new ApiError(r.status, e?.message || '响应读取失败', path);
+  }
+  if (!r.ok) {
+    let msg = r.statusText || `请求失败（${r.status}）`;
+    try {
+      const data = JSON.parse(raw);
+      if (data && typeof data === 'object') msg = data.error || data.detail || msg;
+    } catch { /* 非 JSON 错误体：用状态文案 */ }
+    throw new ApiError(r.status, msg, path);
+  }
+  // 统一去掉 BOM：Windows 上不少 .md 文件带 UTF-8 BOM，首行标题会因此识别失败
+  return raw.replace(/^\uFEFF/, '') as unknown as T;
+}
+
+/**
  * 写操作（POST）。
  *
  * v1.6.3 之前这里是 `return r.json()` —— **写失败被完全吞掉**：

@@ -6,59 +6,46 @@
   ``web_search`` / ``web_fetch`` 遇到网络类失败时，先探测网络、没恢复就等（最多 60 秒），
   再按 2s / 5s / 10s 退避重试最多 3 次；pip / npm 第二次重试起改用国内镜像
   （``AUTOMIND_NET_MIRROR=0`` 关闭）。会产生远端副作用的调用（git push、POST……）不重做。
-* ``net_check`` 工具：一次看清 DNS、国内外站点、代理、包管理器源是否可达，并给出建议。
+* ``net_check`` 工具：一次看清**本地服务 / 网关 / 公网**三段，并给出可执行建议。
 * ``wait_for_network`` 工具：网络断了时让 Agent 明确地"等网络回来"，而不是换着花样重试。
+
+v1.11.14（内网离线三件套）改造：
+  * net_check 的结论分三态（``online`` / ``expected_offline`` / ``degraded``），
+    离线策略下公网段明确写"预期离线，不要重试"；
+  * 探测目标可用 ``AUTOMIND_PROBE_HOSTS`` / ``AUTOMIND_GATEWAY_PROBE`` /
+    ``AUTOMIND_LOCAL_PROBES`` 覆盖，不再硬编码公网；
+  * 离线模式下 ``wait_for_network`` 立即返回（不会真的等 60 秒再告诉你"还是不通"），
+    并明确"离线模式下不存在等网络恢复这回事"，避免模型反复空等。
 
 在「插件」页停用本插件即可回到原始行为（熔断器对网络类失败的半开放行仍然生效）。
 """
 
 from __future__ import annotations
 
-import asyncio
-import os
-import socket
-import time
 from typing import Any
 
+from automind.core import offline
 from automind.core.hooks import AgentHooks
-from automind.core.netresilience import ResilientDispatch, network_up, wait_for_network
+from automind.core.netresilience import (
+    ResilientDispatch,
+    network_state,
+    wait_for_network,
+)
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools.base import AbstractTool
 
 _DISPATCH = ResilientDispatch()
 
-#: net_check 依次检查的目标（名称, 主机, 端口）
-_TARGETS: tuple[tuple[str, str, int], ...] = (
-    ("百度", "www.baidu.com", 443),
-    ("清华 PyPI 镜像", "pypi.tuna.tsinghua.edu.cn", 443),
-    ("npmmirror", "registry.npmmirror.com", 443),
-    ("PyPI 官方", "pypi.org", 443),
-    ("npm 官方", "registry.npmjs.org", 443),
-    ("GitHub", "github.com", 443),
-)
-
-
-def _check_one(host: str, port: int, timeout: float) -> dict[str, Any]:
-    t0 = time.perf_counter()
-    try:
-        ip = socket.gethostbyname(host)
-    except OSError as e:
-        return {"host": host, "dns": False, "reachable": False, "error": f"DNS 失败：{e}"}
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            return {"host": host, "dns": True, "ip": ip, "reachable": True,
-                    "ms": round((time.perf_counter() - t0) * 1000)}
-    except OSError as e:
-        return {"host": host, "dns": True, "ip": ip, "reachable": False,
-                "error": f"{type(e).__name__}: {e}"}
-
 
 class NetCheckTool(AbstractTool):
     name = "net_check"
     description = (
-        "Diagnose network connectivity: DNS, domestic/overseas sites, PyPI/npm "
-        "registries, GitHub and the configured proxy. Use it when a command fails "
-        "with timeouts / connection reset / could not resolve host, before retrying."
+        "Diagnose network connectivity in three sections: local services (AUTOMIND_LOCAL_PROBES), "
+        "the model gateway / relay (AUTOMIND_GATEWAY_PROBE) and the public internet "
+        "(AUTOMIND_PROBE_HOSTS). Returns a three-state verdict: online / expected_offline "
+        "(offline policy, not a fault) / degraded (gateway or local service unreachable), plus "
+        "the current egress policy. Use it when a command fails with timeouts / could not "
+        "resolve host, and before retrying."
     )
     parameters = {
         "type": "object",
@@ -70,40 +57,51 @@ class NetCheckTool(AbstractTool):
     risk_score = 0
 
     async def execute(self, **kwargs: Any) -> ToolResult:
-        timeout = float(kwargs.get("timeout") or 3)
-        rows = await asyncio.gather(*[
-            asyncio.to_thread(_check_one, host, port, timeout) for _, host, port in _TARGETS])
-        for (label, _, _), row in zip(_TARGETS, rows, strict=True):
-            row["name"] = label
-        env = {k.upper(): v for k, v in os.environ.items()
-               if k.upper() in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY")}
-        ok_cn = any(r["reachable"] for r in rows[:3])
-        ok_global = any(r["reachable"] for r in rows[3:])
-        advice: list[str] = []
-        if not ok_cn and not ok_global:
-            advice.append("所有目标都不可达：网络已断开或 DNS 失效。请调用 wait_for_network 等待恢复，"
-                          "不要反复执行同一条命令。")
-        elif ok_cn and not ok_global:
-            advice.append("国内站点可达、境外不可达：pip 请加 -i https://pypi.tuna.tsinghua.edu.cn/simple，"
-                          "npm 请加 --registry=https://registry.npmmirror.com，GitHub 可改用镜像或配置代理。")
-        elif not rows[0]["reachable"] and ok_global:
-            advice.append("境外可达但国内站点不可达：可能处于代理环境，按代理设置访问即可。")
-        else:
-            advice.append("网络正常：若命令仍失败，问题多半在命令或远端服务本身。")
-        if any(not r["dns"] for r in rows) and any(r["reachable"] for r in rows):
-            advice.append("部分域名解析失败：可检查 DNS 设置（如改用 223.5.5.5 / 119.29.29.29）。")
+        timeout = max(0.5, min(float(kwargs.get("timeout") or 3), 10.0))
+        state = await network_state(timeout=timeout)
+        policy = state["policy"]
         return ToolResult(tool_name=self.name, success=True, output={
-            "online": ok_cn or ok_global, "domestic": ok_cn, "overseas": ok_global,
-            "targets": rows, "proxy": env, "advice": advice,
+            # 三态结论（给模型看的主字段）
+            "state": state["state"],
+            "online": state["online"],
+            "expected_offline": state["expected_offline"],
+            "degraded": state["degraded"],
+            "detail": state["detail"],
+            "policy": policy,
+            # 三段式
+            "local": state["local"],
+            "gateway": state["gateway"],
+            "public": state["public"],
+            "sections": state["sections"],
+            # 兼容旧字段（v1.11.6 起就有：domestic / overseas / targets / proxy）
+            "domestic": state["domestic"],
+            "overseas": state["overseas"],
+            "targets": state["targets"],
+            "proxy": state["proxy"],
+            "advice": state["advice"],
             "retry_stats": dict(_DISPATCH.stats),
+            "next": _next_hint(state),
         })
+
+
+def _next_hint(state: dict[str, Any]) -> str:
+    """给模型一句"下一步做什么"，避免它自己脑补重试。"""
+    if state["state"] == "expected_offline":
+        return ("离线模式是预期状态：不要再用 wait_for_network 等待或反复重试联网命令；"
+                "改用本地 / 内网能力，并在交付说明里注明哪些步骤需要出网。")
+    if state["state"] == "degraded":
+        return ("检测到内网 / 公网链路故障：先按 advice 排查（本地服务 / 网关 / DNS / 代理），"
+                "不要靠重复执行同一条命令来'试'。")
+    return "网络正常：若命令仍失败，问题多半在命令本身或远端服务，请检查错误详情的其余部分。"
 
 
 class WaitForNetworkTool(AbstractTool):
     name = "wait_for_network"
     description = (
         "Block until the network is reachable again (or the timeout elapses). Call this "
-        "after a network-related failure instead of retrying the same command in a loop."
+        "after a network-related failure instead of retrying the same command in a loop. "
+        "In offline mode (AUTOMIND_OFFLINE=1 / AUTOMIND_NETWORK_POLICY=offline) it returns "
+        "immediately with an expected_offline verdict: waiting can never help there."
     )
     parameters = {
         "type": "object",
@@ -115,17 +113,36 @@ class WaitForNetworkTool(AbstractTool):
     risk_score = 0
 
     async def execute(self, **kwargs: Any) -> ToolResult:
+        # 离线模式：不存在"等网络恢复"这回事，立即返回，绝不白等
+        if offline.is_offline():
+            return ToolResult(tool_name=self.name, success=True, output={
+                "online": False,
+                "state": "expected_offline",
+                "skipped": True,
+                "waited_s": 0.0,
+                "policy": offline.policy_status(),
+                "detail": offline.offline_hint(),
+                "next": "离线模式下等待无意义：请使用离线 / 内网能力；如需出网请联系管理员放通白名单。",
+            })
         timeout = min(600.0, max(1.0, float(kwargs.get("timeout") or 60)))
         ok, waited = await wait_for_network(timeout)
-        _, detail = await network_up()
         if ok:
             return ToolResult(tool_name=self.name, success=True, output={
-                "online": True, "waited_s": round(waited, 1), "detail": detail,
+                "online": True, "state": "online", "waited_s": round(waited, 1),
+                "policy": offline.policy_status(),
                 "next": "网络已恢复，可以重新执行刚才失败的命令。"})
+        state = await network_state(timeout=2.0, fresh=True)
+        policy = state["policy"]
+        note = ""
+        if policy["mode"] == offline.MODE_ALLOWLIST:
+            note = ("当前为出网白名单模式：只有 AUTOMIND_EGRESS_ALLOW 中的目标可出网，"
+                    "请确认目标在白名单内，或把 AUTOMIND_PROBE_HOSTS 设为可达目标。")
         return ToolResult(tool_name=self.name, success=False, output={
-            "online": False, "waited_s": round(waited, 1), "detail": detail},
-            error=(f"等待 {waited:.0f} 秒网络仍未恢复（{detail}）。可再等一会儿，"
-                   "或先完成不需要联网的步骤，并在交付说明里写明哪些步骤因网络未完成。"))
+            "online": False, "state": state["state"], "waited_s": round(waited, 1),
+            "detail": state["detail"], "policy": policy,
+            "next": note or "可再等一会儿，或先完成不需要联网的步骤。"},
+            error=(f"等待 {waited:.0f} 秒网络仍未恢复（{state['detail']}）。{note}"
+                   "可先完成不需要联网的步骤，并在交付说明里写明哪些步骤因网络未完成。"))
 
 
 def get_tools() -> list[AbstractTool]:

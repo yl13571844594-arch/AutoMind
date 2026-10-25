@@ -352,7 +352,18 @@ class AutoMindAgent:
         "若 FAILED 必须立即修复该语法错误再继续（TDD 内环）。\n"
         "9. file_edit 的 old_string 必须与文件内容逐字符一致（含缩进与空白）；"
         "若匹配失败，错误信息会附带文件中最接近的片段（带行号），"
-        "请以该片段的原文为准重试，不要凭记忆猜测。"
+        "请以该片段的原文为准重试，不要凭记忆猜测。\n"
+        "10. 简单任务（写一个文件 / 读一个文件 / 跑一条命令）**验证一次即完成并收尾**："
+        "拿到成功结果后直接用一句话汇报，不要再用第二种工具（file_read / terminal / pwsh）"
+        "重复确认同一件事 —— 每一步都要重发全量上下文，反复验证是 token 消耗的最大来源。"
+        "file_write 的成功回执已包含**磁盘回读校验**（size_bytes / encoding / "
+        "readback_matches / verified=true），看到 verified 就不必再读回或用终端查看。\n"
+        "11. 中文文件名与中文内容直接使用，不需要先试探编码（默认 UTF-8）；"
+        "只有确实遇到编码错误时才显式传 encoding='utf-8'，不要为了\"验证编码\"多跑命令；"
+        "若是既有 GBK 文件（file_read 回执 encoding=gbk），沿用该 encoding 写入，不要强行转码。\n"
+        "12. 需要与他人共享进度或分工时，用 team_task 查看 / 认领 / 更新团队任务看板："
+        "claim 后状态自动变 doing，做完 update status=done，有进展用 comment 留言；"
+        "不要替用户凭空创建重复任务，先 list 查重。"
     )
 
     # ═══════════════════════════════════════════════════════════
@@ -509,41 +520,16 @@ class AutoMindAgent:
         backtracks = 0
         errors_corrected = 0
         self._begin_checkpoint_record(user_input)
-        # v1.7.0 整轮任务总时长预算。单步超时管"某一步卡住"、无进展检测管
-        # "原地打转"，都管不住"每步都正常但整体就是跑不完"——50 步 × 单次
-        # LLM 5 分钟的理论上限是 4 小时以上。到点不再开新步骤，把已完成
-        # 的工作完整交出去（部分交付清单），而不是硬掐断。
-        try:
-            budget = float(getattr(self.config.execution, "max_task_seconds", 0) or 0)
-        except (TypeError, ValueError):
-            budget = 0.0
-        self._task_deadline = (time.monotonic() + budget) if budget > 0 else None
-        if self._task_deadline is not None:
-            logger.info("task_budget_set", seconds=budget,
-                        interaction=getattr(self._interaction, "value", ""))
+        # v1.11.16：每个任务一份预算 —— LLM 计数 / ResourceManager / 预算窗口 /
+        # 墙钟截止 / 预警阈值统一由 _begin_task_budget 重置。此前这段逻辑只在
+        # 这里写了一遍，multi / loop / 子智能体 / 续跑各自漏了不同项，表现为
+        # "上一个任务用掉窗口后，换个模式跑第一个模型调用就撞预算"。
+        self._begin_task_budget()
 
         if self.llm is None:
             raise RuntimeError(
                 "LLM 未初始化。请先在「API Keys」面板配置当前提供商的 API Key。"
             )
-        self.llm.reset()  # 重置本次任务的 token 计数
-        # v1.11.10：`usage_update` 的累计值同样按任务清零（此前是会话克隆
-        # 生命周期累计，右栏「本次」数字与旁边的任务语义对不上）
-        self._reset_usage_total()
-
-        # Token 预算**按任务**重置（v1.7.5）。
-        # 上面那句 llm.reset() 只清了 _TokenTrackingLLM 的显示计数，
-        # 而 ResourceManager 的已用量是跨任务累计、永不重置的 ——
-        # 加上 Web 端同一会话复用同一个克隆实例，结果是"会话预算用光之后，
-        # 之后每个新任务都在第一次模型调用时就失败"。
-        # 实测一个普通任务约烧 43~46k token，默认预算 81,920 意味着
-        # 一个会话大约只能跑两个任务。这里把它掰回"每个任务一份预算"。
-        if getattr(self, "resources", None) is not None:
-            self.resources.tokens.reset()
-            self._budget_warned = False
-            self._next_compact_at = self._BUDGET_WARN_AT
-        self._reset_budget_windows()
-        self._plan_rejected = ""
 
         # 1. 解析输入
         parsed = self.input_parser.parse(user_input)
@@ -653,7 +639,8 @@ class AutoMindAgent:
             result_text += (
                 "\n\n——— 本轮预算已用尽 ———\n"
                 f"{budget_exhausted}\n"
-                "上面是本轮**已经真实完成**的部分，直接说「继续」即可接着往下做。")
+                "上面是本轮**已经真实完成**的部分。可直接说「继续」，"
+                "或在界面上点「从断点续跑」精确续跑（收尾时会保存断点）。")
 
         # 6. 存储交互
         assistant_msg = Message(role=Role.ASSISTANT, content=result_text)
@@ -1053,38 +1040,266 @@ class AutoMindAgent:
             except Exception:
                 self._last_stream_usage = TokenUsage()
 
-    async def run_multi(self, task: str, on_event: Any = None) -> dict:
-        """多智能体协同执行（专业版特性 multi_agent，未授权时抛 FeatureNotAvailable）。"""
+    async def run_multi(self, task: str, on_event: Any = None, *,
+                        resume: dict | None = None) -> dict:
+        """多智能体协同执行（专业版特性 multi_agent，未授权时抛 FeatureNotAvailable）。
+
+        v1.11.16（预算连续性）：与普通任务一样**每个任务一份预算**
+        （``_begin_task_budget``）。预算最终耗尽时不再被编排器吞成"执行失败"
+        文字 —— 捕获 ``BudgetExhaustedError`` 后写一份带 ``progress`` 的
+        可续跑检查点，返回 ``success=False / stop_reason="budget_exhausted" /
+        checkpoint_id / resumable=True``。
+
+        ``resume`` 是上次检查点里的 progress（内部用：续跑时跳过已完成的
+        role 步骤）。未授权时抛 FeatureNotAvailable。
+        """
         from automind.core.edition import require_feature
 
         feature = require_feature("multi_agent")
         if self.llm is None:
             raise RuntimeError("LLM 未初始化，请先配置 API Key。")
-        self.llm.reset()
-        self._reset_usage_total()
+        self._begin_task_budget()
+        self._begin_checkpoint_record(task)
+        self._agent_state.session_id = getattr(self, "session_id", "") or "default"
         if self.orchestrator is None:
             self.orchestrator = feature.create(self.llm)
-        result = await self.orchestrator.run(task, context="", on_event=on_event)
-        result["token_usage"] = self.llm.usage
-        return result
+        try:
+            result = await self.orchestrator.run(
+                task, context="", on_event=on_event, resume=resume)
+        except BudgetExhaustedError as e:
+            progress = dict((getattr(e, "details", None) or {}).get("progress") or {})
+            logger.warning("multi_budget_exhausted",
+                           steps=len(progress.get("steps") or []),
+                           plan=len(progress.get("plan") or []))
+            return await self._finish_run_mode(
+                "multi", task, result=None, progress=progress,
+                budget_exhausted=True, on_event=on_event)
+        except Exception as e:
+            # 非预算异常：能带出编排进度就留一份可续跑断点再上抛 ——
+            # 任务没跑完时，最不该发生的就是"什么都没留下"。
+            progress = self._run_mode_progress_from_exc(e)
+            if progress is not None:
+                await self._finish_run_mode(
+                    "multi", task, result=None, progress=progress,
+                    budget_exhausted=False, error=e, on_event=on_event,
+                    status="interrupted")
+            raise
+        progress = self._run_mode_progress(result, run_mode="multi")
+        return await self._finish_run_mode(
+            "multi", task, result=result, progress=progress,
+            budget_exhausted=False, on_event=on_event)
 
     async def run_loop(self, task: str, on_event: Any = None,
-                       max_iterations: int | None = None) -> dict:
+                       max_iterations: int | None = None, *,
+                       resume: dict | None = None) -> dict:
         """循环工程（Loop Engineering）— 自主"行动-观察-修正"闭环。
 
         专业版特性 loop_engine：每轮执行任务 → 观察/校验结果 → 未达成则带
         反馈继续修正，直到停止条件（完成/最大轮数/无进展/被中断）。
         未授权时抛 FeatureNotAvailable。
+
+        v1.11.16（预算连续性）：每轮/每次续跑都有独立预算窗口；预算最终耗尽
+        时（ReAct 的 ``stop_reason="task_budget"`` 或验收调用抛
+        ``BudgetExhaustedError``）立即带进度退出并写可续跑检查点，
+        **不再继续下一轮空烧**。
         """
         from automind.core.edition import require_feature
 
         engine = require_feature("loop_engine")
-        # v1.11.10：循环工程同样算"一次任务"，实时用量从 0 起算
-        if self.llm is not None:
-            self.llm.reset()
-        self._reset_usage_total()
-        return await engine.run(self, task, on_event=on_event,
-                                max_iterations=max_iterations)
+        if self.llm is None:
+            raise RuntimeError("LLM 未初始化，请先配置 API Key。")
+        self._begin_task_budget()
+        self._begin_checkpoint_record(task)
+        self._agent_state.session_id = getattr(self, "session_id", "") or "default"
+        try:
+            result = await engine.run(self, task, on_event=on_event,
+                                      max_iterations=max_iterations, resume=resume)
+        except BudgetExhaustedError as e:
+            progress = dict((getattr(e, "details", None) or {}).get("progress") or {})
+            logger.warning("loop_budget_exhausted",
+                           iterations=progress.get("iterations"))
+            return await self._finish_run_mode(
+                "loop", task, result=None, progress=progress,
+                budget_exhausted=True, on_event=on_event)
+        except Exception as e:
+            progress = self._run_mode_progress_from_exc(e)
+            if progress is not None:
+                await self._finish_run_mode(
+                    "loop", task, result=None, progress=progress,
+                    budget_exhausted=False, error=e, on_event=on_event,
+                    status="interrupted")
+            raise
+        if result.get("stop_reason") == "budget_exhausted":
+            progress = dict(result.get("progress") or {})
+            return await self._finish_run_mode(
+                "loop", task, result=result, progress=progress,
+                budget_exhausted=True, on_event=on_event)
+        progress = self._run_mode_progress(result, run_mode="loop")
+        return await self._finish_run_mode(
+            "loop", task, result=result, progress=progress,
+            budget_exhausted=False, on_event=on_event)
+
+    # ── multi / loop：预算耗尽的收尾与可续跑检查点（v1.11.16）──
+
+    @staticmethod
+    def _run_mode_progress_from_exc(exc: BaseException) -> dict | None:
+        """异常里带的 run-mode 进度（编排器/循环引擎在抛错前挂到 details）。"""
+        details = getattr(exc, "details", None)
+        if isinstance(details, dict):
+            progress = details.get("progress")
+            if isinstance(progress, dict) and progress:
+                return dict(progress)
+        return None
+
+    def _run_mode_progress(self, result: dict, *, run_mode: str) -> dict:
+        """从 run_multi/run_loop 的成功返回值提炼检查点 progress。"""
+        result = result if isinstance(result, dict) else {}
+        if run_mode == "multi":
+            plan = list(result.get("plan") or [])
+            steps = [dict(s) for s in (result.get("steps") or []) if isinstance(s, dict)]
+            last = (steps[-1].get("output") if steps else "") or ""
+            return {
+                "plan": plan,
+                "steps": steps,
+                "scratch": str(result.get("scratch") or ""),
+                "last_output": str(result.get("last_output") or last
+                                   or result.get("output") or ""),
+                "steps_done": len(steps),
+                "steps_total": len(plan),
+            }
+        iterations = int(result.get("iterations") or 0)
+        try:
+            max_it = int(result.get("max_iterations")
+                         or getattr(getattr(self.config, "execution", None),
+                                    "loop_max_iterations", 8) or 8)
+        except (TypeError, ValueError):
+            max_it = 8
+        return {
+            "iterations": iterations,
+            "last_output": str(result.get("output") or ""),
+            "feedback": str(result.get("feedback") or ""),
+            "max_iterations": max_it,
+        }
+
+    @staticmethod
+    def _run_mode_progress_brief(run_mode: str, progress: dict) -> dict:
+        """事件里只放进度摘要（完整 steps 可能很大，不塞进事件帧）。"""
+        p = progress if isinstance(progress, dict) else {}
+        if run_mode == "multi":
+            return {"steps_done": int(p.get("steps_done") or 0),
+                    "steps_total": int(p.get("steps_total") or 0),
+                    "plan": len(p.get("plan") or [])}
+        return {"iterations": int(p.get("iterations") or 0),
+                "max_iterations": int(p.get("max_iterations") or 0)}
+
+    def _budget_stats_snapshot(self) -> dict:
+        """当前预算窗口的用量摘要（回执 / 检查点 / 事件共用）。"""
+        rm = getattr(self, "resources", None)
+        counter = getattr(rm, "tokens", None)
+        used_tokens = getattr(counter, "tokens_used", None)
+        used = int(getattr(used_tokens, "total", 0) or 0)
+        budget = int(getattr(counter, "budget", 0) or 0)
+        prior = int(getattr(self, "_budget_spent_prior", 0) or 0)
+        return {
+            "used": used,
+            "budget": budget,
+            "total_used": prior + used,
+            "windows": int(getattr(self, "_budget_windows_used", 0) or 0) + 1,
+            "auto_continue": self._budget_auto_continue(),
+        }
+
+    async def _finish_run_mode(self, run_mode: str, task: str, *,
+                               result: dict | None, progress: dict,
+                               budget_exhausted: bool,
+                               on_event: Any = None,
+                               error: Exception | None = None,
+                               status: str | None = None) -> dict:
+        """multi / loop 的统一收尾：写检查点 + 预算耗尽事件 + 回执字段。
+
+        **绝不再把预算耗尽伪装成成功**：``success`` 只在 ``status ==
+        "completed"`` 时为 True；预算耗尽 / 中断一律 False + ``resumable``，
+        并把"已完成部分 + 续跑入口"写进 output。
+        """
+        data = dict(result or {})
+        progress = dict(progress or {})
+        output = str(data.get("output") or progress.get("last_output") or "")
+        steps = int(data.get("steps_executed") or 0)
+        if not steps:
+            steps = int(data.get("iterations")
+                        or len(data.get("steps") or [])
+                        or progress.get("steps_done") or 0)
+        if budget_exhausted:
+            status = "partial"
+            stop_reason = "budget_exhausted"
+            can_checkpoint = bool(getattr(
+                getattr(self.config, "execution", None),
+                "checkpoint_enabled", True))
+            output = (output.rstrip()
+                      + "\n\n——— 本轮 Token 预算已用尽 ———\n"
+                      + ("上面是本轮**已经真实完成**的部分，已自动保存断点；"
+                         "点界面上的「从断点续跑」即可接着做（续跑会重新计一份预算）。"
+                         if can_checkpoint else
+                         "上面是本轮**已经真实完成**的部分；检查点功能已关闭，"
+                         "可直接发送「继续」重跑剩余部分（已完成的步骤不会重做）。"))
+        elif error is not None:
+            status = status or "interrupted"
+            stop_reason = str(data.get("stop_reason")
+                              or type(error).__name__ or "interrupted")
+            output = (output.rstrip()
+                      + f"\n\n——— 本轮执行中断（{type(error).__name__}）———\n"
+                      "已保存断点，可在界面点「从断点续跑」接着做。")
+        else:
+            status = status or "completed"
+            stop_reason = str(data.get("stop_reason") or "completed")
+        checkpoint_id = await self._save_run_checkpoint(
+            task=task, run_mode=run_mode, status=status, output=output,
+            progress=progress, stop_reason=stop_reason,
+            budget_exhausted=bool(budget_exhausted), steps_executed=steps,
+            error=str(error) if error is not None else "")
+        resumable = bool(checkpoint_id) and status != "completed"
+        stats = self._budget_stats_snapshot()
+        if budget_exhausted:
+            logger.warning("run_mode_budget_exhausted", run_mode=run_mode,
+                           checkpoint=checkpoint_id, **stats)
+            await self._emit({
+                "type": "budget_exhausted",
+                "run_mode": run_mode,
+                "stop_reason": "budget_exhausted",
+                "resumable": resumable,
+                "checkpoint_id": checkpoint_id,
+                "output": output[:500],
+                "progress": self._run_mode_progress_brief(run_mode, progress),
+                **stats,
+            })
+        elif error is not None:
+            await self._emit({
+                "type": "run_interrupted", "run_mode": run_mode,
+                "stop_reason": stop_reason, "resumable": resumable,
+                "checkpoint_id": checkpoint_id,
+                "error": f"{type(error).__name__}: {error}"[:300],
+                **stats,
+            })
+        logger.info("run_mode_finished", run_mode=run_mode, status=status,
+                    stop_reason=stop_reason, checkpoint=checkpoint_id,
+                    steps=steps, **stats)
+        data.update({
+            "success": status == "completed",
+            "stop_reason": stop_reason,
+            "checkpoint_id": checkpoint_id,
+            "resumable": resumable,
+            "progress": progress,
+            "budget_exhausted": bool(budget_exhausted),
+            "output": output,
+            "steps_executed": steps,
+            "token_usage": getattr(self.llm, "usage", None),
+        })
+        if run_mode == "multi":
+            data.setdefault("plan", list(progress.get("plan") or []))
+            data.setdefault("steps", list(progress.get("steps") or []))
+        else:
+            data.setdefault("iterations", int(progress.get("iterations") or steps))
+            data.setdefault("max_iterations", int(progress.get("max_iterations") or 0))
+        return data
 
     async def _loop_verify(self, task: str, output: str) -> dict:
         """观察阶段 — 验收是否真正完成。
@@ -1146,6 +1361,11 @@ class AutoMindAgent:
                     "reason": str(data.get("reason", ""))[:600],
                 }
             detail = "模型未按 JSON 格式作答"
+        except BudgetExhaustedError:
+            # v1.11.16：预算耗尽**不是**"验收设施不可用"。吞掉它就等于把
+            # "没预算了"伪装成"验收没做成"：循环工程会继续下一轮（每轮都撞
+            # 预算）、最后把任务记成"验收未过"，而不是"预算耗尽、可续跑"。
+            raise
         except Exception as e:
             logger.warning("loop_verify_failed", error=f"{type(e).__name__}: {e}")
             detail = f"验收调用异常（{type(e).__name__}）"
@@ -1516,6 +1736,130 @@ class AutoMindAgent:
         # 被上一轮的大 prompt 阈值挡住、迟迟不压。
         self._last_context_compact_prompt = 0
         self._sync_deadline_shift()
+
+    def _begin_task_budget(self, interaction: Any = None) -> None:
+        """统一「每个任务 / 每次续跑一份预算」的入口（v1.11.16）。
+
+        修复前这段逻辑只在 ``_run_impl_bound`` 里写了一遍：``run_multi`` /
+        ``run_loop`` 只 reset 了 LLM 的显示计数，**没有** reset
+        ResourceManager 与预算窗口 —— 上一任务用掉窗口后，切协同/循环模式
+        会直接撞预算或被强制收尾；子智能体与断点续跑也各自漏了不同项。
+
+        这里把"一个任务该有的预算状态"一次归零：
+
+          · 墙钟截止时刻（``max_task_seconds``）；
+          · LLM 显示计数与界面「本次」累计用量；
+          · ``ResourceManager.tokens``（每个任务一份预算，不跨任务累计）；
+          · 预算窗口续开状态（``_budget_windows_used`` / 累计已花 / 顺延量）；
+          · 预警与上下文压缩阈值；
+          · 本条计划审批驳回状态。
+
+        全部经 ``getattr`` 兜底：轻量替身 / 老快照 / 单测里的假 Agent 缺字段
+        时也不该炸 —— 这个方法会在所有执行入口的最前面被调用。
+        """
+        # 1) 墙钟预算：每次任务/续跑重新计一份
+        ex = getattr(self.config, "execution", None)
+        try:
+            budget = float(getattr(ex, "max_task_seconds", 0) or 0)
+        except (TypeError, ValueError):
+            budget = 0.0
+        self._task_deadline = (time.monotonic() + budget) if budget > 0 else None
+        if self._task_deadline is not None:
+            logger.info("task_budget_set", seconds=budget,
+                        interaction=getattr(interaction, "value",
+                                            str(interaction or "")))
+        # 2) LLM 显示计数 + 面板「本次」累计
+        llm = getattr(self, "llm", None)
+        if llm is not None and hasattr(llm, "reset"):
+            try:
+                llm.reset()
+            except Exception as e:                    # pragma: no cover - 防御
+                logger.warning("llm_counter_reset_failed", error=str(e))
+        self._reset_usage_total()
+        # 3) ResourceManager 已用量（预算本身不变；子智能体另行替换资源对象）
+        if getattr(self, "resources", None) is not None:
+            try:
+                self.resources.tokens.reset()
+            except Exception as e:                    # pragma: no cover - 防御
+                logger.warning("resource_budget_reset_failed", error=str(e))
+        # 4) 预警 / 上下文压缩阈值
+        self._budget_warned = False
+        self._next_compact_at = self._BUDGET_WARN_AT
+        # 5) 预算窗口续开状态
+        self._reset_budget_windows()
+        # 6) 本条计划审批状态
+        self._plan_rejected = ""
+
+    async def _save_run_checkpoint(self, *, task: str, run_mode: str, status: str,
+                                   output: str = "", progress: dict | None = None,
+                                   stop_reason: str = "",
+                                   budget_exhausted: bool = False,
+                                   steps_executed: int = 0,
+                                   error: str = "") -> str:
+        """为 multi / loop 这类不走 plan/react 状态机的运行写可续跑检查点（v1.11.16）。
+
+        普通路径的检查点存的是 HierarchicalPlan 或 ReAct actions；multi / loop
+        没有这些结构，续跑需要的是**该模式自己的进度**（role 步骤表 / 迭代轮次），
+        所以 metadata 单独记一份 ``run_mode`` + ``progress``。契约（与 resume 成员
+        约定，改动需同步）：
+
+            run_mode: "multi" | "loop"
+            status: "running" | "partial" | "completed" | "interrupted"
+            stop_reason: "budget_exhausted" | "completed" | <异常类名> | ""
+            budget_exhausted: bool
+            progress.multi: {plan, steps, scratch, last_output,
+                             steps_done, steps_total}
+            progress.loop:  {iterations, last_output, feedback, max_iterations}
+        """
+        if not getattr(getattr(self.config, "execution", None),
+                       "checkpoint_enabled", True):
+            return ""
+        sid = getattr(self, "session_id", "") or "default"
+        try:
+            md = dict(getattr(self._agent_state, "metadata", None) or {})
+        except Exception:                                  # pragma: no cover - 防御
+            md = {}
+        md.update({
+            "task": str(task)[:4000],
+            # 契约（与 resume 成员约定）：run_mode 与 interaction 都写成该模式名。
+            # multi / loop 的续跑路由靠它判断"这是哪种任务"；若这里写的是调用方
+            # 当时的其它 interaction，checkpoint 发现与续跑分派就会对不上。
+            "interaction": run_mode,
+            "mode": str(getattr(self._mode, "value", "") or ""),
+            "run_mode": run_mode,
+            "status": status,
+            "stop_reason": stop_reason,
+            "budget_exhausted": bool(budget_exhausted),
+            "progress": dict(progress or {}),
+            "output": str(output)[:8000],
+            "steps_executed": int(steps_executed),
+            "finished_at": time.time(),
+            "tokens": self._budget_stats_snapshot(),
+        })
+        if not md.get("started_at"):
+            md["started_at"] = time.time()
+        if error:
+            md["error"] = str(error)[:500]
+        self._agent_state.metadata = md
+        self._agent_state.session_id = sid
+        self._agent_state.plan = None
+        try:
+            self._agent_state.messages = self.context_mgr.get_context()
+        except Exception:                                  # pragma: no cover - 防御
+            self._agent_state.messages = []
+        usage = getattr(getattr(self, "llm", None), "usage", None)
+        if isinstance(usage, TokenUsage):
+            self._agent_state.token_usage = usage
+        try:
+            cid = await self.checkpoint_mgr.save(self._agent_state)
+        except Exception as e:                             # 落盘失败不该让任务失败
+            logger.warning("run_mode_checkpoint_failed", run_mode=run_mode,
+                           status=status, error=str(e))
+            return ""
+        logger.info("run_mode_checkpoint_saved", run_mode=run_mode, status=status,
+                    checkpoint=cid, budget_exhausted=budget_exhausted,
+                    steps=steps_executed)
+        return cid
 
     def _sync_deadline_shift(self) -> None:
         """把墙钟顺延量推给执行器（它们持有的是任务开始时的截止时刻）。"""
@@ -1990,15 +2334,26 @@ class AutoMindAgent:
                     if allowed_tools else self.tool_registry)
         ex_cfg = self.config.execution
         old_sink = self.event_sink
-        old_budget = getattr(getattr(self, "resources", None), "tokens", None)
-        old_budget_value = getattr(old_budget, "budget", None)
+        # v1.11.16：子任务用**自己的** ResourceManager（max_tokens 作为该子预算），
+        # 不再临时改写父 Agent 的共享预算对象 —— 父/子并发时临时改 budget 会
+        # 把父任务的下一次调用按"另一个任务剩下的额度"拦住，恢复也覆盖不到
+        # 并发写入。这里整体替换资源对象、结束时还原，父预算一个字节都不动。
+        old_resources = getattr(self, "resources", None)
+        old_executor = getattr(self, "react_executor", None)
+        old_deadline = getattr(self, "_task_deadline", None)
+        sub_budget = int(max_tokens or 0)
+        executor = None
+        from automind.state.resource_manager import ResourceManager
+
         try:
             if event_sink is not None:
                 self.event_sink = event_sink
-            if old_budget is not None and int(max_tokens or 0) > 0:
-                old_budget.budget = int(max_tokens)
-            self.llm.reset()
-            self._reset_usage_total()
+            self.resources = (ResourceManager(token_budget=sub_budget)
+                              if sub_budget > 0 else old_resources)
+            # 每个子任务同样是一份独立预算：LLM 计数 / ResourceManager /
+            # 预算窗口 / 墙钟 / 预警阈值统一重置 —— auto_continue 窗口因此
+            # 对子智能体同样生效（耗尽一个窗口会压缩后自动续开）。
+            self._begin_task_budget()
             executor = ReActExecutor(
                 self.llm, registry,
                 max_iterations=max(1, int(max_steps or 20)),
@@ -2011,6 +2366,8 @@ class AutoMindAgent:
                 obs_keep_chars=(getattr(ex_cfg, "compact_keep_obs_chars", 0) or None),
                 interjection_source=self.drain_interjections,
             )
+            # 让预算续窗时的上下文压缩 / 进度快照拿到正在跑的执行器
+            self.react_executor = executor
             sid = getattr(self, "session_id", "") or "default"
             depth = int(getattr(self, "_subagent_depth", 0))
             with _sctx.bind_session(
@@ -2024,19 +2381,52 @@ class AutoMindAgent:
                     on_thought=None, on_action=None,
                     on_no_progress=self._emit, on_timeout=self._emit,
                     on_interjection=self._emit, on_reconnect=self._emit)
-            success = executor.stop_reason in ("no_more_tools", "done")
+            stop_reason = executor.stop_reason or "unknown"
+            tokens = int(getattr(getattr(self.llm, "usage", None), "total", 0) or 0)
+            steps = int(getattr(executor, "iterations_used", 0))
+            if stop_reason == "task_budget":
+                # ReAct 把预算耗尽表达成"到点收尾"，这里翻译成父级能理解的
+                # 可重试语义：**不是成功**，也不是普通失败 —— 父模型据此
+                # 可以重新派发，而不是把半截结果当成任务已完成。
+                stats = self._budget_stats_snapshot()
+                return {
+                    "success": False,
+                    "stop_reason": "budget_exhausted",
+                    "resumable": True,
+                    "budget_exhausted": True,
+                    "output": text or "",
+                    "steps": steps,
+                    "tokens": tokens,
+                    "budget": stats,
+                    "error": (f"子任务 Token 预算已用尽（已用 {stats['used']}/{stats['budget']}，"
+                              f"共 {stats['windows']} 个窗口）：上面是已产出的部分结果，"
+                              "可重新派发一个子任务接着做（不要当成已完成）"),
+                }
+            success = stop_reason in ("no_more_tools", "done")
             return {
                 "success": bool(success),
                 "output": text or "",
-                "steps": int(getattr(executor, "iterations_used", 0)),
-                "tokens": int(getattr(getattr(self.llm, "usage", None), "total", 0) or 0),
-                "stop_reason": executor.stop_reason or "unknown",
+                "steps": steps,
+                "tokens": tokens,
+                "stop_reason": stop_reason,
                 "error": "" if success else (
                     executor.interrupted_reason
-                    or f"子任务未正常完成（stop_reason={executor.stop_reason}）")[:400],
+                    or f"子任务未正常完成（stop_reason={stop_reason}）")[:400],
             }
         except asyncio.CancelledError:
             raise
+        except BudgetExhaustedError as e:
+            # 理论上 ReAct 内部已接住；这里再兜一层，保证父级拿到的永远是
+            # "可重试的预算耗尽"而不是一个裸异常 / 伪造的成功。
+            stats = self._budget_stats_snapshot()
+            logger.warning("subtask_budget_exhausted", error=str(e)[:200])
+            return {"success": False, "stop_reason": "budget_exhausted",
+                    "resumable": True, "budget_exhausted": True,
+                    "output": "", "steps": int(getattr(executor, "iterations_used", 0))
+                    if executor is not None else 0,
+                    "tokens": int(getattr(getattr(self.llm, "usage", None), "total", 0) or 0),
+                    "budget": stats,
+                    "error": f"子任务 Token 预算已用尽：{e}"[:400]}
         except Exception as e:                    # pragma: no cover - 防御性
             logger.warning("subtask_failed", error=f"{type(e).__name__}: {e}"[:300])
             return {"success": False, "output": "", "steps": 0, "tokens": 0,
@@ -2044,8 +2434,9 @@ class AutoMindAgent:
                     "error": f"{type(e).__name__}: {e}"[:400]}
         finally:
             self.event_sink = old_sink
-            if old_budget is not None and old_budget_value is not None:
-                old_budget.budget = old_budget_value
+            self.resources = old_resources
+            self.react_executor = old_executor
+            self._task_deadline = old_deadline
 
     async def _run_plan_execute(self, task: str, context: str) -> tuple[HierarchicalPlan, list[Any]]:
         """Plan-and-Execute 模式执行。"""
@@ -2597,8 +2988,8 @@ class AutoMindAgent:
     def _register_supplement_tools(self) -> None:
         """注册"模型主动协作"类补充工具（v1.11.11，只增不改）。
 
-        三个社区版工具 + 两个按条件注册的工具：
-          · todo_write / ask_user_question / present —— 任何版本都有；
+        社区版工具 + 两个按条件注册的工具：
+          · todo_write / ask_user_question / present / team_task —— 任何版本都有；
           · pwsh —— 仅 Windows 且本机确实找得到 PowerShell；
           · subagent 家族 —— 仅专业版（multi_agent 特性已激活）。
         单个工具注册失败只记录、不连累其余工具与启动。
@@ -2607,6 +2998,7 @@ class AutoMindAgent:
             ("todo", self._register_todo_tool),
             ("ask_user", self._register_ask_user_tool),
             ("present", self._register_present_tool),
+            ("team_task", self._register_team_task_tool),
             ("pwsh", self._register_pwsh_tool),
             ("subagents", self._register_subagent_tools),
         ):
@@ -2629,6 +3021,18 @@ class AutoMindAgent:
         from automind.tools.present import PresentTool
 
         self.tool_registry.register(PresentTool(project_root=self.config.project_root))
+
+    def _register_team_task_tool(self) -> None:
+        """团队共享任务看板（v1.11.18）：让 Agent 参与团队协作。
+
+        为什么放在社区版而不是商业特性：团队任务看板（SQLite + Web 看板 + REST）
+        从 v1.11.15 起就是社区能力，模型却一直没有入口 —— 用户能在界面上看到
+        共享任务，Agent 却既看不见也认领不了。补上工具后，"让 Agent 领一个
+        共享任务并回报进度"才真正成立。
+        """
+        from automind.tools.team_tasks import TeamTaskTool
+
+        self.tool_registry.register(TeamTaskTool())
 
     def _register_pwsh_tool(self) -> None:
         from automind.tools.pwsh import PwshTool
@@ -2816,6 +3220,9 @@ class AutoMindAgent:
         * **ReAct 路径**（v1.7.7）：没有计划可恢复，但检查点里记着已经真实
           完成的动作、产出的文件、卡在哪一步 —— 把这份进度原样交给模型，
           明确"这些不要重做"，而不是只丢给它一句原任务让它重新摸索。
+        * **multi / loop 路径**（v1.11.16）：按检查点 metadata 里的
+          ``run_mode`` + ``progress`` 接着跑 —— multi 跳过已完成的 role
+          步骤、loop 从下一迭代继续；恢复时重新计一份预算窗口。
 
         无论哪条路径，续跑都在本会话的身份与工作目录下执行（Web 端的隔离
         工作区、轨迹、Token 预算都按会话生效），源检查点标记为 ``resumed``，
@@ -2825,6 +3232,41 @@ class AutoMindAgent:
         md = dict(getattr(state, "metadata", {}) or {})
         plan = state.plan
         task = str(md.get("task") or getattr(plan, "task_description", "") or "")
+
+        # v1.11.16：续跑是"新的一次任务"，预算窗口 / 用量必须从 0 起算。
+        # 上一轮往往正是把预算烧光才停下；若沿用那份已用尽的额度，用户点了
+        # "继续"也会在第一次模型调用就再次失败。budget 成员提供了统一的每任务
+        # 引导方法（还会重设 deadline 与上下文压缩阈值）；该方法尚未合并时
+        # 回退到旧的三步。放在各分支判断之前 —— 四条续跑路径都先拿到完整预算。
+        begin_budget = getattr(self, "_begin_task_budget", None)
+        if callable(begin_budget):
+            try:
+                begin_budget()
+            except Exception as e:                 # 预算引导失败不该让续跑起不来
+                logger.warning("resume_begin_budget_failed", error=str(e))
+        else:
+            try:
+                self._reset_budget_windows()
+            except Exception as e:                 # pragma: no cover - 防御性
+                logger.warning("resume_reset_budget_failed", error=str(e))
+            resources = getattr(self, "resources", None)
+            if resources is not None:
+                try:
+                    resources.tokens.reset()
+                except Exception as e:             # pragma: no cover - 防御性
+                    logger.warning("resume_reset_tokens_failed", error=str(e))
+            try:
+                self._reset_usage_total()
+            except Exception:                      # pragma: no cover - 旧替身可能没有
+                pass
+
+        # v1.11.16：multi / loop 的可续跑检查点靠 metadata.run_mode 区分。
+        # 必须**优先于 state.plan 判断**：loop 根本没有计划，multi 的 role
+        # 计划也不是 HierarchicalPlan；按计划续跑会跑错路径甚至直接报错。
+        run_mode = str(md.get("run_mode") or "")
+        if run_mode in ("multi", "loop"):
+            return await self._resume_run_checkpoint(
+                checkpoint_id, state, run_mode, task, md)
 
         if plan is not None:
             status_value = getattr(getattr(plan, "status", None), "value", "")
@@ -2858,6 +3300,106 @@ class AutoMindAgent:
         finally:
             self._resume_origin = None
 
+    async def _resume_run_checkpoint(self, checkpoint_id: str, state: Any,
+                                     run_mode: str, task: str,
+                                     md: dict) -> AgentResult:
+        """multi / loop 断点续跑（v1.11.16）。
+
+        这两种模式没有 plan / ReAct actions 那种"执行状态机"可恢复，续跑靠
+        检查点里的 ``progress``：
+
+          * **multi** —— 已完成的 role 步骤清单 + 共享白板：跳过已完成步骤，
+            只跑剩下的角色，最后重新综合；
+          * **loop**  —— 已完成的迭代轮数与上一轮输出/反馈：从下一轮继续。
+
+        恢复时 ``_begin_task_budget`` 会把预算窗口重新计一份（上一轮正是把
+        预算烧光才停下的，沿用旧额度会在第一次调用就再次失败）；源检查点
+        标记 ``resumed``，不会被重复续跑。
+        """
+        from automind.core import session_ctx as _sctx
+
+        start = time.perf_counter()
+        progress = dict(md.get("progress") or {})
+        status = str(md.get("status") or "")
+        if status in ("completed", "dismissed", "resumed"):
+            output0 = str(md.get("output") or "")
+            return AgentResult(
+                success=True,
+                output=(f"检查点已恢复；{run_mode} 任务状态为「{status}」，无需继续。"
+                        + (f"\n\n{output0}" if output0 else "")))
+        sid = getattr(self, "session_id", "") or state.session_id or "default"
+        for msg in state.messages:
+            try:
+                self.context_mgr.add(msg)
+            except Exception:                          # 防御：旧消息格式损坏
+                pass
+        self.checkpoint_mgr.mark(checkpoint_id, "resumed")
+        # 用检查点的状态作为本次运行的载体（finished_at 等会被覆盖）
+        self._agent_state = state
+        self._agent_state.session_id = sid
+        sink = self._emit if self.event_sink is not None else None
+        with _sctx.bind_session(sid, run_id=_sctx.new_run_id("resume"),
+                                workspace=_sctx.workspace(), sink=sink,
+                                project_root=self.config.project_root):
+            self._resume_origin = {"task": task, "checkpoint": checkpoint_id}
+            try:
+                # 续跑 = 新的一次任务：预算窗口 / 用量 / 墙钟重新计一份
+                self._begin_task_budget()
+                await self._emit({
+                    "type": "task_resumed", "kind": run_mode, "run_mode": run_mode,
+                    "checkpoint": checkpoint_id, "task": task[:200],
+                    "progress": self._run_mode_progress_brief(run_mode, progress),
+                })
+                logger.info("checkpoint_resume_run_mode", checkpoint=checkpoint_id,
+                            run_mode=run_mode,
+                            iterations=progress.get("iterations"),
+                            steps=len(progress.get("steps") or []))
+                if run_mode == "multi":
+                    result = await self.run_multi(task, on_event=self._emit,
+                                                  resume=progress)
+                else:
+                    result = await self.run_loop(
+                        task, on_event=self._emit,
+                        max_iterations=(int(progress.get("max_iterations") or 0) or None),
+                        resume=progress)
+            finally:
+                self._resume_origin = None
+        success = bool(result.get("success"))
+        output = str(result.get("output") or "")
+        if result.get("stop_reason") == "budget_exhausted":
+            output = (output + "\n\n（本次续跑也撞上了预算上限：断点已再次保存，"
+                      "可继续点「从断点续跑」接着做。）")
+        # steps_executed 按"**本次续跑**执行了多少"记账（不是包含上次的总量）：
+        # multi = 新完成的 role 步骤数，loop = 新完成的迭代数。
+        steps_executed = int(result.get("steps_executed") or 0)
+        result_progress = result.get("progress") if isinstance(result, dict) else {}
+        result_progress = result_progress if isinstance(result_progress, dict) else {}
+        if run_mode == "multi":
+            try:
+                steps_executed = max(
+                    0, int(result_progress.get("steps_done") or 0)
+                    - int(progress.get("steps_done") or 0))
+            except (TypeError, ValueError):         # pragma: no cover - 防御
+                pass
+        else:
+            try:
+                steps_executed = max(0, int(result.get("iterations") or 0)
+                                     - int(progress.get("iterations") or 0))
+            except (TypeError, ValueError):         # pragma: no cover - 防御
+                pass
+        new_cid = str(result.get("checkpoint_id") or "")
+        usage = getattr(self.llm, "usage", None)
+        logger.info("checkpoint_resume_run_mode_done", checkpoint=checkpoint_id,
+                    run_mode=run_mode, success=success,
+                    steps=steps_executed, new_checkpoint=new_cid)
+        return AgentResult(
+            success=success, output=output, plan=None,
+            steps_executed=steps_executed,
+            token_usage=usage if isinstance(usage, TokenUsage) else TokenUsage(),
+            duration_ms=(time.perf_counter() - start) * 1000,
+            checkpoints=[new_cid] if new_cid else [],
+        )
+
     async def _resume_plan(self, checkpoint_id: str, state: Any, plan: Any,
                            task: str, progress: dict[str, int]) -> AgentResult:
         """计划续跑：在会话身份 + 工作目录绑定下只执行剩余目标。"""
@@ -2879,13 +3421,9 @@ class AutoMindAgent:
                 self._resume_origin = None
             self._agent_state.session_id = sid
             self._current_plan = plan
-            self._task_deadline = None
-            if self.llm is not None:
-                self.llm.reset()
-            # v1.11.10：续跑同样是"本次任务"，实时用量与预算一起从 0 起算
-            self._reset_usage_total()
-            if getattr(self, "resources", None) is not None:
-                self.resources.tokens.reset()
+            # v1.11.16：续跑同样是一份新任务 —— 墙钟 / ResourceManager /
+            # 预算窗口 / 预警阈值统一由 _begin_task_budget 重置。
+            self._begin_task_budget()
             logger.info("checkpoint_resume", checkpoint=checkpoint_id,
                         total=progress["total"], done=progress["done"],
                         remaining=progress["remaining"])

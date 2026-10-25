@@ -78,18 +78,29 @@ python -m automind.server --port 8765
 
 # 专业版 / 企业版
 pip install automind-pro          # 商业渠道获取的 wheel（或源码目录 ./pro）
-set AUTOMIND_LICENSE=AMP-PRO-...  # 或写入 .automind_license / ~/.automind/license
+set AUTOMIND_LICENSE=AMP2-...     # 或写入 .automind_license / ~/.automind/license
 python -m automind.server --port 8765
 ```
 
+> 许可证为 Ed25519 非对称签名（`AMP2-...`）。**v1 旧格式 `AMP-...`（HMAC）默认拒绝** ——
+> 旧密钥历史上随包分发过，已等同公开；存量客户请在换证窗口期换发新证。
+> 发行方签发与自检方式见 [RELEASE.md](RELEASE.md)「商业激活闭环」与
+> [docs/COMMERCIAL_ACTIVATION.md](COMMERCIAL_ACTIVATION.md)。
+
 **应用内升级（v1.11.1 起，推荐）**：Web 界面 → 设置 →「⭐ 升级专业版 / 企业版」（或点左上角版本徽标）。
+
+> v1.11.7 起发行方交付的是**一个** `.ampkg`（wheel + 许可证合一）：客户拖进「⚡ 一键升级」
+> 一次完成装包 + 激活，不需要 pip、不需要改环境变量。下面 1-3 步是分两步升级 / 手工配置
+> 场景仍支持的旧路径。
 
 1. 拖入 `automind_pro-*.whl`：解压到 `<数据目录>/extensions/`，启动时自动加入 `sys.path` ——
    **不需要 pip**，冻结的桌面版同样适用（接口 `POST /api/license/package`，只接受 automind_pro 本身）；
 2. 粘贴许可证：当场离线校验，有效才写入 `~/.automind/license`（接口 `POST /api/license/activate`）；
 3. 就地激活：新特性的路由热挂载、调度循环当场启动，**无需重启**。
 
-`GET /api/license` 返回当前版本、扩展包状态与"卡在哪一步"（`need_package` / `incompatible` / `need_license` / `active`）。
+`GET /api/license` 返回当前版本、扩展包状态与"卡在哪一步"（`need_package` / `incompatible` / `need_license` / `active`），
+v1.11.14 起还给出**版本匹配信息**：`core_version` / `version_match` / `version_reason` / `version_step`
+（扩展包与主程序不同号时提示换包，不破坏升级面板现有字段）。
 三个接口都是管理动作：本机直接可用，远程需管理员令牌。环境变量 `AUTOMIND_LICENSE` 优先于界面里填写的许可证。
 
 激活结果可通过 `GET /api/health` 的 `edition` 字段确认
@@ -109,7 +120,8 @@ automind/            ← 社区核心（MIT 开源）
   server.py          ← 商业路由由扩展注册；社区版注册 403 降级路由
 
 pro/automind_pro/    ← 商业扩展（闭源，独立打包）
-  license.py         ← 离线许可证校验（HMAC 签名）
+  licensing/         ← Ed25519 非对称许可证：验签公钥 + 读取顺序（v1.7.0 起，只有公钥）
+  license.py         ← 兼容入口：re-export licensing（老代码 `from automind_pro.license import ...` 继续可用）
   multiagent/        ← 协同模式编排器
   loop_engine.py     ← 循环工程引擎
   scheduler.py       ← 定时任务（路由 + 后台调度）
@@ -143,12 +155,32 @@ pro/automind_pro/    ← 商业扩展（闭源，独立打包）
 ## 4. 许可证格式（商业版）
 
 ```
-AMP-<TIER>-<EXPIRY>-<CUSTOMER>-<SIG>
-     PRO|ENT  YYYYMMDD    客户标识   HMAC-SHA256 前 20 位
-              (00000000=永久)
+AMP2-<KID>-<PAYLOAD>-<SIG>
+
+KID     : 验签公钥指纹（sha256(公钥) 前 16 位 hex），排障时一眼看出"哪把钥匙签的"
+PAYLOAD : base32 紧凑 JSON {v,tier,到期日,客户标识,席位,签发日}
+SIG     : Ed25519 私钥对 "AMP2|KID|PAYLOAD" 的签名（base32）
 ```
 
-发行方生成：`python -m automind_pro.license PRO 20271231 acme`
+- **非对称签名**：客户端只有验签公钥（`pro/automind_pro/licensing/keys.py` 的
+  `PUBLIC_KEY_HEX`，v1.11.14 已置备真公钥），签发私钥只在发行方离线的
+  `pro/tools/issue_license.py` 里，**不随 wheel / sdist / git 分发** ——
+  客户无法伪造，也改不了档位、到期日、席位。
+- **未置备公钥 = 一律验不过（fail-closed）**：宁可商业版起不来，也不能"验不了就算过"。
+  环境变量 `AUTOMIND_LICENSE_PUBLIC_KEY` 仍优先于内置公钥（测试/应急用）。
+- 发行方签发（许可证 + wheel 打成 `.ampkg`）：
+
+  ```bash
+  python pro/tools/issue_license.py bundle PRO 20271231 acme
+  python pro/tools/issue_license.py verify AMP2-xxxx-...   # 签完自己验一遍
+  python pro/tools/issue_license.py doctor                 # 发行前自检
+  ```
+
+- 客户侧读取顺序：环境变量 `AUTOMIND_LICENSE` → 当前目录 `.automind_license` →
+  `~/.automind/license`（应用内激活写这一份）。
+- 旧格式 `AMP-<TIER>-<EXPIRY>-<CUSTOMER>-<SIG>`（对称 HMAC）**默认拒绝** ——
+  密钥历史上随包分发过，已等同公开；存量客户请换发新证，仅换证窗口期可用
+  `AUTOMIND_LICENSE_ALLOW_LEGACY_HMAC=1` 临时过渡。
 
 ## 5. 常见问题
 
@@ -158,3 +190,7 @@ AMP-<TIER>-<EXPIRY>-<CUSTOMER>-<SIG>
   对话历史（`.automind/`）、记忆数据完全共用。
 - **专业版影响社区版更新吗？** 不影响。扩展协议向后兼容；
   若协议升级（v2），会同步发布新版 automind-pro。
+- **填了许可证为什么还是社区版？** 看 `GET /api/license` 的 `step` / `reason_text`：
+  `need_package`（没装扩展包）、`incompatible`（协议版本不匹配）、
+  `need_license`（许可证无效/过期/公钥未置备）、`active`（已激活）。
+  扩展包与主程序版本不一致时还会给 `version_match` / `version_reason`（v1.11.14 起）。

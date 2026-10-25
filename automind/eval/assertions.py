@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -156,12 +157,84 @@ def _check_file_exists(a: Assertion, out: EvalOutcome, root: Path) -> CheckResul
 # 行为类
 # ═══════════════════════════════════════════════════════════════
 
+#: 需要做"相对/绝对路径等价"判断的参数名（小写）。
+#:
+#: 为什么需要：模型完全可能把工作区内的文件写成**绝对路径**（``file_write``
+#: 允许，文件也确实写对了），而套件里写的是相对路径。按字符串精确比较会把
+#: "写对了文件"判成参数不匹配 —— 这是断言的假阴性（全量复跑实测到
+#: ``smoke_write_file`` 因此失败，而 ``file_exists``/输出断言全过）。
+#:
+#: 刻意用白名单而不是"名字里含 path"：后者会把 ``url_path`` / ``classpath``
+#: 这类无关参数也放宽，断言就在不相干的地方意外变绿了。
+_PATH_ARG_NAMES = frozenset({"path", "file", "file_path", "target", "target_path"})
 
-def _match_args(actual: dict[str, Any], want: dict[str, Any]) -> bool:
-    return all(k in actual and actual[k] == v for k, v in want.items())
+
+def _match_args(actual: dict[str, Any], want: dict[str, Any],
+                root: Path | None = None) -> bool:
+    """期望参数是否是实际参数的子集（``want`` 里的每个键都要在 ``actual`` 里对上）。
+
+    ``root`` 非空时，路径类参数额外允许"同一个文件、不同写法"：``path: hello.txt``
+    的期望与模型实际传的工作区内绝对路径等价（见 :func:`_same_workspace_path`）。
+    其余参数**仍然严格精确相等** —— 放宽只能是"路径表示法"这一种，不能让
+    ``tool_called`` 退化成"参数随便什么都算过"。
+    """
+    for key, expected in want.items():
+        if key not in actual:
+            return False
+        value = actual[key]
+        if value == expected:
+            continue
+        if root is not None and _is_path_arg(key) and _same_workspace_path(
+                value, expected, root):
+            continue
+        return False
+    return True
 
 
-def _check_tool_called(a: Assertion, out: EvalOutcome) -> CheckResult:
+def _is_path_arg(name: Any) -> bool:
+    """参数名是否属于"路径"类（大小写不敏感）。
+
+    只认这一小撮常见命名，而不是"名字里带 path 就算"：``url_path`` / ``classpath``
+    这类一旦被放宽，断言就会在不相干的地方意外变绿。
+    """
+    return str(name).strip().lower() in _PATH_ARG_NAMES
+
+
+def _same_workspace_path(actual: Any, expected: Any, root: Path) -> bool:
+    """实际值是否指向"工作区里的同一个文件"，只是写法不同（相对 vs 绝对）。
+
+    只在期望值是**工作区内相对路径**时放宽：
+      · 绝对期望值不退让（否则"随便哪个绝对路径"都能对上）；
+      · ``..`` 穿越不退让（与 ``file_exists`` 的越界规则一致）。
+
+    比较用 ``os.path.normcase`` 处理 Windows 的大小写不敏感（``C:\\Temp`` 与
+    ``c:\\temp`` 是同一个文件）。
+    """
+    try:
+        actual_path = Path(os.fspath(actual))
+        expected_path = Path(os.fspath(expected))
+    except (TypeError, ValueError):
+        return False
+    if expected_path.is_absolute() or ".." in expected_path.parts:
+        return False
+    try:
+        actual_resolved = actual_path.resolve()
+        expected_resolved = (Path(root) / expected_path).resolve()
+    except (OSError, RuntimeError, ValueError):
+        # 路径本身非法（保留设备名、非法字符等）：不放宽，按不匹配处理
+        return False
+    return (os.path.normcase(str(actual_resolved))
+            == os.path.normcase(str(expected_resolved)))
+
+
+def _check_tool_called(a: Assertion, out: EvalOutcome,
+                       root: Path | None = None) -> CheckResult:
+    """判定"调用过某工具"。
+
+    ``root`` 是任务工作区（``check_assertion`` 会传入）：路径类参数允许"工作区
+    内相对路径 ↔ 绝对路径"的等价匹配。默认 ``None`` = 退回严格的字符串比较，
+    供直接调用点/老测试保持旧行为。
+    """
     name = str(a.params.get("name", _value_of(a) or ""))
     want_args = a.params.get("args") or a.params.get("arguments") or {}
     if not isinstance(want_args, dict):
@@ -173,7 +246,8 @@ def _check_tool_called(a: Assertion, out: EvalOutcome) -> CheckResult:
     if not want_args:
         return _ok(a, exp, f"调用了 {called.count(name)} 次")
     for tc in out.tool_calls:
-        if tc.get("name") == name and _match_args(tc.get("arguments") or {}, want_args):
+        if tc.get("name") == name and _match_args(tc.get("arguments") or {}, want_args,
+                                                 root):
             return _ok(a, exp, f"命中，参数={tc.get('arguments')}")
     same = [tc.get("arguments") for tc in out.tool_calls if tc.get("name") == name]
     return _fail(a, exp, f"调用了 {name}，但参数不匹配；实际参数：{same}")
@@ -226,7 +300,7 @@ def check_assertion(a: Assertion, out: EvalOutcome, workspace: str | Path) -> Ch
     if a.type == "file_exists":
         return _check_file_exists(a, out, root)
     if a.type == "tool_called":
-        return _check_tool_called(a, out)
+        return _check_tool_called(a, out, root)
     if a.type == "max_seconds":
         return _check_max_seconds(a, out)
     if a.type == "max_tokens":

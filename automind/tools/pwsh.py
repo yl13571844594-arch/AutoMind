@@ -19,7 +19,7 @@ from typing import Any
 
 from automind.core.logging import get_logger
 from automind.core.types import PermissionTier, ToolResult
-from automind.tools._toolkit import bad, run_blocking
+from automind.tools._toolkit import bad, live_execution_config, run_blocking
 from automind.tools.base import AbstractTool
 from automind.tools.output_budget import limits_from_config
 from automind.tools.terminal import decode_output
@@ -38,7 +38,10 @@ class PwshTool(AbstractTool):
         "Run a PowerShell command on Windows and return exit code, stdout, stderr. "
         "Use native PowerShell syntax ($env:NAME, Get-ChildItem, ...) — this tool "
         "does NOT translate bash syntax. Each call uses a fresh process; pass "
-        "workdir instead of cd. Raise timeout (up to 1800s) for installs/builds."
+        "workdir instead of cd. Raise timeout (up to 1800s) for installs/builds, or "
+        "set background=true to detach: it returns a task_id immediately and the "
+        "command no longer risks being killed by a timeout — poll it with "
+        "terminal_background(action='poll', task_id=...)."
     )
     parameters = {
         "type": "object",
@@ -48,6 +51,15 @@ class PwshTool(AbstractTool):
                         "description": "Working directory (optional; relative to project root)."},
             "timeout": {"type": "number",
                         "description": "Timeout in seconds (default 300, max 1800)."},
+            "background": {
+                "type": "boolean",
+                "description": (
+                    "Run detached and return a task_id immediately (default false). "
+                    "Poll with terminal_background(action='poll', task_id=...). "
+                    "Use for PowerShell commands that legitimately take minutes "
+                    "(downloads / builds / long scans)."
+                ),
+            },
         },
         "required": ["command"],
     }
@@ -55,10 +67,15 @@ class PwshTool(AbstractTool):
     risk_score = 50
 
     def __init__(self, workdir: str | Path = ".", timeout: float = 300.0,
-                 max_timeout: float = 1800.0) -> None:
+                 max_timeout: float = 1800.0,
+                 background_enabled: bool = True) -> None:
         self.workdir = str(Path(workdir).resolve())
         self.timeout = max(5.0, float(timeout or 300.0))
         self.max_timeout = max(self.timeout, float(max_timeout or 1800.0))
+        #: 后台通道开关（执行治理 execution.terminal_background_enabled）。
+        #: 与 terminal 共用同一个配置：它管的是"后台任务的资源占用"，不该按
+        #: 工具分家 —— 用户关掉后台通道就是要所有长命令都别偷偷跑。
+        self.background_enabled = background_enabled
         try:
             limits = limits_from_config()
             self.max_chars = int(limits.get("max_chars", _MAX_CHARS_FALLBACK)
@@ -70,6 +87,34 @@ class PwshTool(AbstractTool):
     def available() -> bool:
         return os.name == "nt" and bool(
             shutil.which("pwsh") or shutil.which("powershell"))
+
+    def apply_execution_config(self, ex: Any) -> None:
+        """v1.11.16：执行治理参数（超时 / 输出上限）改完在下一次调用即生效。"""
+        try:
+            timeout = float(getattr(ex, "tool_timeout_seconds", self.timeout))
+        except (TypeError, ValueError):
+            timeout = self.timeout
+        try:
+            max_timeout = float(getattr(ex, "tool_timeout_max_seconds", self.max_timeout))
+        except (TypeError, ValueError):
+            max_timeout = self.max_timeout
+        if timeout > 0:
+            self.timeout = max(1.0, timeout)
+        self.max_timeout = max(self.timeout, max_timeout if max_timeout > 0
+                               else self.max_timeout)
+        # 后台通道开关同样实时生效：设置里关掉后，"下一次调用"就必须拒绝，
+        # 不能等 Agent 重建（工具实例在会话克隆之间共享，构造只发生一次）。
+        try:
+            self.background_enabled = bool(getattr(
+                ex, "terminal_background_enabled", self.background_enabled))
+        except Exception:                     # pragma: no cover - 防御性
+            pass
+        try:
+            limits = limits_from_config(ex)
+            self.max_chars = int(limits.get("max_chars", _MAX_CHARS_FALLBACK)
+                                 or _MAX_CHARS_FALLBACK)
+        except Exception:                     # pragma: no cover - 防御性
+            pass
 
     @staticmethod
     def _exe() -> str:
@@ -107,6 +152,10 @@ class PwshTool(AbstractTool):
         workdir, problem = self._workdir(kwargs.get("workdir"))
         if problem:
             return bad(self.name, problem)
+        # v1.11.16：按当前任务的实时执行配置刷新超时/输出上限（改完下次调用即生效）
+        live_ex = live_execution_config()
+        if live_ex is not None:
+            self.apply_execution_config(live_ex)
         try:
             timeout = float(kwargs.get("timeout") or self.timeout)
         except (TypeError, ValueError):
@@ -114,6 +163,14 @@ class PwshTool(AbstractTool):
         timeout = min(max(timeout, 1.0), self.max_timeout)
 
         argv = [exe, "-NoProfile", "-NonInteractive", "-Command", command]
+
+        # ── 后台通道（与 terminal 的后台能力对齐）──
+        # 长耗时的 PowerShell 命令（下载/构建/全盘扫描）在前台同步等超时就是
+        # "白跑一遍"：进程被杀、输出全丢、模型只能重跑。后台通道立即给 task_id，
+        # 用同一个 terminal_background 取回，模型不需要学两套轮询方式。
+        if bool(kwargs.get("background", False)):
+            return await self._run_background(argv, workdir, timeout)
+
         proc = None
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -166,6 +223,56 @@ class PwshTool(AbstractTool):
             exit_code=code,
         )
 
+    async def _run_background(self, argv: list[str], workdir: str,
+                              timeout: float) -> ToolResult:
+        """把 PowerShell 命令交给后台通道，立即返回 task_id。
+
+        为什么用 ``background.start_argv``（create_subprocess_exec）而不是
+        ``start``（create_subprocess_shell）：见 ``background.start_argv`` 的
+        函数注释 —— PowerShell 命令原文不能被 cmd.exe 再解释一遍。
+        """
+        if not self.background_enabled:
+            return bad(
+                self.name,
+                "后台通道已在配置中关闭（execution.terminal_background_enabled=false）。"
+                "请改用前台执行并显式设置足够大的 timeout"
+                f"（上限 {self.max_timeout:.0f}s）。")
+        from automind.tools import background as bg
+
+        try:
+            task = await bg.start_argv(
+                argv, workdir, env=dict(os.environ), timeout=timeout, kind="pwsh")
+        except Exception as e:
+            return bad(
+                self.name,
+                f"后台任务启动失败：{type(e).__name__}: {e}。"
+                "可改用前台执行 + 更大 timeout。")
+        if task.status != "running":
+            # 进程根本没起来（spawn 就失败）：如实报错，**不要**给一个
+            # task_id 让模型去轮询一个不存在的东西
+            return bad(
+                self.name,
+                f"后台命令启动失败：{task.error or '未知原因'}。"
+                "可在前台同步执行并设置足够大的 timeout。")
+        return ToolResult(
+            tool_name=self.name, success=True, exit_code=None,
+            output={
+                "background": True,
+                "task_id": task.task_id,
+                "pid": task.meta.get("pid"),
+                "status": "running",
+                "kind": "pwsh",
+                "timeout_s": timeout,
+                "note": (
+                    "PowerShell 命令已在后台启动，**尚未结束**。"
+                    "请勿重复启动同一条命令；稍后用 "
+                    f"terminal_background(action='poll', task_id='{task.task_id}') "
+                    "取结果，其间可以继续做别的步骤。"),
+            },
+            metadata={"background_id": task.task_id},
+        )
+
     def get_execution_plan(self, **kwargs: Any) -> str:
         wd = kwargs.get("workdir") or self.workdir
-        return f"[pwsh] {wd}\n  PS> {kwargs.get('command', '')}"
+        bg = " [background]" if kwargs.get("background") else ""
+        return f"[pwsh{bg}] {wd}\n  PS> {kwargs.get('command', '')}"

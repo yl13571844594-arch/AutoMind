@@ -71,7 +71,14 @@ MAX_MAX_STEPS = 100
 MAX_MAX_TOKENS = 200_000
 
 #: 结果记录里保留的输出字符数（超长截断并标注；完整内容不落进父上下文）。
-OUTPUT_KEEP_CHARS = 8000
+#:
+#: v1.11.18：从 8000 提到 20000。``subagent_list(agent_id=...)``（工具层）允许
+#: 回传 20000 字符的"完整输出"，但记录在这里先被 8000 截断 —— 上层看到的
+#: 永远只有 8000，详情能力名不副实。两处数字必须对齐（工具层上限
+#: ``automind/tools/subagents.py::DETAIL_OUTPUT_CHARS``）。
+#: 20k 只存在于**子智能体记录**里（每个父会话最多保留 KEEP_RESULTS=20 条已结束
+#: 记录），父上下文仍由列表的 4000 字符/条 + 总 12000 上限约束，不会撑爆。
+OUTPUT_KEEP_CHARS = 20_000
 
 #: 列表里给的输出尾部字符数（模型用来判断"跑得对不对"，不需要全文）。
 OUTPUT_TAIL_CHARS = 300
@@ -256,12 +263,17 @@ class SubagentRecord:
     session_id: str
     title: str
     task: str
-    status: str = "running"              # running | done | failed | cancelled | error
+    status: str = "running"              # running | done | failed | cancelled | error | budget_exhausted
     output: str = ""                     # 最新输出（运行时是进度快照，结束后是最终结果）
     output_tail: str = ""                # 给列表/进度事件的尾部
     error: str = ""
     steps: int = 0
     tokens: int = 0
+    #: 结束原因（v1.11.16）：budget_exhausted = Token 预算耗尽、可重新派发；
+    #: 父模型据此决定"接着做"而不是把它当成已完成。
+    stop_reason: str = ""
+    #: 是否可重试/重派（预算耗尽为 True；父级不应静默当成功）
+    resumable: bool = False
     allowed_tools: list[str] | None = None
     max_steps: int = DEFAULT_MAX_STEPS
     max_tokens: int = 0
@@ -295,6 +307,9 @@ class SubagentRecord:
             "steps": int(self.steps),
             "tokens": int(self.tokens),
             "error": self.error,
+            # v1.11.16：预算耗尽时明确告诉父模型"可重派"，而不是只看到一个失败状态
+            "stop_reason": self.stop_reason,
+            "resumable": bool(self.resumable),
             "output_tail": _tail(tail, tail_chars) if tail else "",
             "running": self.running,
             "elapsed_s": self.elapsed_s,
@@ -509,6 +524,7 @@ class SubagentManager:
             # done 事件发出去** —— 否则界面上的子智能体会永远停在"运行中"。
             record.status = "cancelled"
             record.error = record.error or "子智能体已被用户停止"
+            record.stop_reason = record.stop_reason or "cancelled"
             record.finished_at = record.finished_at or time.time()
             try:
                 await self._emit_done(record)
@@ -522,6 +538,7 @@ class SubagentManager:
             # 不能拖垮父任务，也不能当成功；记进记录并通过 done 事件如实交代
             record.status = "error"
             record.error = f"{type(e).__name__}: {e}"
+            record.stop_reason = record.stop_reason or "error"
             logger.warning("subagent_failed", agent_id=record.agent_id,
                            session=record.session_id, error=record.error)
         else:
@@ -562,14 +579,28 @@ class SubagentManager:
         success = result.get("success")
         error = _as_text(result.get("error")).strip()
         output = _as_text(result.get("output"))
+        stop_reason = _as_text(result.get("stop_reason")).strip()
+        resumable = bool(result.get("resumable"))
         if success is None:
             # 没给 success 就按"有没有 error"判定：报错即失败，没报错当成功
-            success = not error
+            success = not error and stop_reason != "budget_exhausted"
         record.steps = _as_int(result.get("steps"), record.steps)
         record.tokens = _as_int(result.get("tokens"), record.tokens)
+        record.stop_reason = stop_reason
         record.output = _clip(output, OUTPUT_KEEP_CHARS)
         if output:
             record.output_tail = _tail(output, OUTPUT_TAIL_CHARS)
+        if not success and stop_reason == "budget_exhausted":
+            # v1.11.16：预算耗尽**不是**普通失败，也不是完成 —— 明确记为
+            # budget_exhausted + resumable，并把"已有部分输出 + 可以重新派发"
+            # 写进 error，父模型据此接着做，而不是把半截结果当成功。
+            record.status = "budget_exhausted"
+            record.resumable = True
+            record.error = error or (
+                "子智能体 Token 预算已用尽：上面是已产出的部分结果；"
+                "可重新派发一个子任务接着做（不要当成已完成）。")
+            return
+        record.resumable = bool(resumable)
         record.error = error
         if success:
             record.status = "done"
@@ -865,6 +896,10 @@ class SubagentManager:
             "error": record.error or None,
             "steps": int(record.steps),
             "tokens": int(record.tokens),
+            # v1.11.16：预算耗尽等"可重试"结局要如实说明，父级/界面据此
+            # 重新派发而不是把它当成已完成
+            "stop_reason": record.stop_reason,
+            "resumable": bool(record.resumable),
         })
 
     def _prune(self, session_id: str) -> None:

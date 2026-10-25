@@ -158,6 +158,8 @@ _state: dict[str, Any] = {
     "features": {},       # feature name -> implementation object
     "loaded": False,      # load_extensions 是否已执行
     "license": None,      # 扩展包写入的许可证摘要（customer/expiry 等，可选）
+    # v1.11.15：周期复检判定许可证失效时的原因（供 /api/license 说明"为什么被降级"）
+    "license_reason": None,
 }
 
 
@@ -170,12 +172,30 @@ class FeatureNotAvailable(RuntimeError):
 
 
 def upgrade_hint(feature: str) -> str:
-    """生成面向用户的升级提示文案。"""
+    """生成面向用户的升级 / 排障提示文案。
+
+    必须区分两种语境，否则文案会自相矛盾（v1.11.17 修复）：
+
+    * 当前版本**低于**特性所需版本 —— 功能确实没解锁，引导升级 / 配置许可证；
+    * 当前版本**已够**（/api/status 已授权）但特性实现没加载 —— 问题在扩展包侧
+      （旧扩展包没注入该特性 / 热激活未完成），再让用户"安装 automind-pro 并配置
+      有效许可证"只会让人对着已激活的专业版发懵。
+    """
     tier, label = COMMERCIAL_FEATURES.get(feature, (EDITION_PRO, feature))
     tier_label = _EDITION_LABELS.get(tier, tier)
+    current = get_edition()
+    if EDITION_RANK.get(current, 0) >= EDITION_RANK.get(tier, 1):
+        # 版本已够用例中唯一可能的原因是实现缺失：说明该更新什么、怎么恢复，
+        # 而不是提供一条已经完成的"升级"动作。
+        return (
+            f"「{label}」已授权（{_EDITION_LABELS.get(current, current)}），"
+            f"但服务端未加载该特性的实现（feature={feature}）："
+            f"扩展包未注入该特性（扩展包版本过旧 / 热激活未完成），"
+            f"请更新到与主程序同版本的 automind-pro 扩展包后重启服务。"
+        )
     return (
         f"「{label}」是 AutoMind {tier_label}功能，当前为"
-        f"{_EDITION_LABELS[get_edition()]}。"
+        f"{_EDITION_LABELS.get(current, current)}。"
         f"请安装 automind-pro 并配置有效许可证（环境变量 AUTOMIND_LICENSE "
         f"或项目根目录 .automind_license 文件）后重启服务。"
     )
@@ -271,9 +291,24 @@ def load_extensions(force: bool = False) -> str:
         if edition:
             logger.info("edition_activated", edition=edition,
                         features=sorted(_state["features"]))
+            # v1.11.15：长驻进程里周期复检许可证（过期/吊销/换机/时钟回拨自动降级，
+            # 续期后自动恢复）。AUTOMIND_LICENSE_RECHECK=0 时商业包会直接返回、不起线程。
+            _start_license_watchdog()
     except Exception as e:  # 商业包故障不拖垮社区核心
         logger.warning("edition_activate_failed", error=str(e))
     return _state["edition"]
+
+
+def _start_license_watchdog() -> bool:
+    """启动商业包的许可证周期复检线程（幂等；商业包不可用 / 已关闭复检时安全跳过）。"""
+    try:
+        import importlib
+
+        guard = importlib.import_module("automind_pro.licensing.guard")
+        return bool(guard.start_watchdog())
+    except Exception as e:                      # 扩展包旧版本没有 guard / 线程创建失败
+        logger.warning("license_watchdog_unavailable", error=str(e)[:200])
+        return False
 
 
 # ── 应用内升级（v1.11.1）─────────────────────────────────
@@ -313,24 +348,56 @@ def _add_extensions_path() -> None:
         sys.path.insert(0, str(d))
 
 
+def core_version() -> str:
+    """社区核心版本（唯一数据源 ``automind/__init__.py``）。"""
+    try:
+        from automind import __version__
+
+        return str(__version__)
+    except Exception:
+        return ""
+
+
+def _package_version_hint(core: str, package_version: str) -> str:
+    """扩展包版本与主程序不一致时的排障文案（一致/未安装时为空串）。"""
+    if not package_version:
+        return "商业扩展包未声明版本号，无法确认是否与主程序配套"
+    if not core or package_version == core:
+        return ""
+    return (f"扩展包版本 v{package_version} 与主程序版本 v{core} 不一致："
+            f"请获取与主程序同版本（v{core}）的扩展包重新升级；"
+            "旧扩展包通常仍可激活，但新功能/修复可能缺失")
+
+
 def pro_package_info() -> dict:
-    """商业扩展包是否可用：已安装？版本？协议版本是否匹配？"""
+    """商业扩展包是否可用：已安装？版本？协议版本是否匹配？与核心同版本吗？
+
+    版本一致性是发行纪律（社区核心与商业包同号发布，见 RELEASE.md）：
+    ``compatible`` 只表示扩展**协议**（EXTENSION_API_VERSION）匹配；业务上还要求
+    ``version_match`` —— 不一致时给出 ``version_detail`` 让人能直接照做。
+    """
     import importlib
 
+    core = core_version()
     _add_extensions_path()
     importlib.invalidate_caches()
+    base: dict[str, Any] = {"installed": False, "version": "", "compatible": False,
+                            "path": "", "api_version": None, "core_version": core,
+                            "version_match": False, "version_detail": ""}
     try:
         pro = importlib.import_module("automind_pro")
     except ImportError:
-        return {"installed": False, "version": "", "compatible": False, "path": "",
-                "api_version": None}
+        return base
     except Exception as e:                      # 包损坏（半截解压 / 语法错）
-        return {"installed": False, "version": "", "compatible": False, "path": "",
-                "api_version": None, "error": f"商业扩展包无法加载：{e}"[:300]}
+        return {**base, "error": f"商业扩展包无法加载：{e}"[:300]}
     ver = getattr(pro, "EXTENSION_API_VERSION", 0)
-    return {"installed": True, "version": str(getattr(pro, "__version__", "")),
+    pkg_version = str(getattr(pro, "__version__", ""))
+    return {"installed": True, "version": pkg_version,
             "api_version": ver, "compatible": ver == EXTENSION_API_VERSION,
-            "path": str(Path(getattr(pro, "__file__", "") or "").parent)}
+            "path": str(Path(getattr(pro, "__file__", "") or "").parent),
+            "core_version": core,
+            "version_match": bool(pkg_version) and pkg_version == core,
+            "version_detail": _package_version_hint(core, pkg_version)}
 
 
 def license_diagnosis() -> dict | None:
@@ -349,11 +416,52 @@ _REASON_TEXT = {
     "no_license_configured": "还没有配置许可证",
     "public_key_not_provisioned": "商业扩展包缺少验签公钥（安装包不完整，请重新获取）",
     "license_present_but_invalid": "找到了许可证，但校验未通过（签名不符 / 已过期 / 格式错误）",
+    # v1.11.15：协议 v3 的具体原因码（面板直接展示，避免"无效"两个字让客户猜）
+    "empty": "还没有配置许可证",
+    "signature_invalid": "许可证签名校验未通过（内容被改动，或不是本发行方签发）",
+    "key_id_unknown": "许可证由一把当前版本不认识的密钥签发，请获取新版扩展包",
+    "payload_invalid": "许可证内容格式不合法，请确认完整复制了整行许可证",
+    "expired": "许可证已过期，请续期后重新激活",
+    "not_yet_active": "许可证尚未到生效日，请到生效日后再使用",
+    "machine_mismatch": "许可证绑定的机器与本机不符（换机需要向发行方申请换绑或换证）",
+    "revoked": "许可证已被吊销，请联系发行方",
+    "clock_rollback": "检测到系统时钟回拨，请校正系统时间后重试",
+    "grace_expired": "许可证已过期且超出宽限期，请续期",
+    "grace": "许可证已过期，当前处于宽限期，请尽快续期",
+    "invalid": "许可证无效：签名校验未通过或已过期",
 }
 
 
+def _diagnosis_reason_text(diag: dict | None) -> str:
+    """把商业包诊断结果翻译成一句人话（优先具体原因码，退回旧粗粒度原因）。"""
+    if not diag:
+        return ""
+    code = str(diag.get("reason_code") or "")
+    if code and code not in ("ok", "grace"):
+        specific = _REASON_TEXT.get(code, "")
+        if specific:
+            detail = str(diag.get("detail") or "").strip()
+            return f"{specific}（{detail}）" if detail else specific
+    if diag.get("grace"):
+        return _REASON_TEXT["grace"]
+    coarse = str(diag.get("reason") or "")
+    return _REASON_TEXT.get(coarse, "")
+
+
 def upgrade_status() -> dict:
-    """升级面板需要的全部信息：当前版本、扩展包、许可证、为什么没激活。"""
+    """升级面板需要的全部信息：当前版本、扩展包、许可证、为什么没激活。
+
+    v1.11.14 起额外给出**版本一致性**（``core_version`` / ``version_match`` /
+    ``version_reason`` / ``version_step``）：扩展包与主程序不同号时，即使协议兼容、
+    许可证也能激活，用户仍可能停在旧功能上 —— 必须能一眼看出来该怎么换包。
+
+    v1.11.15 起再增补**商业运营状态**（许可证协议 v3）：本机指纹
+    （``machine_id``，购买机器绑定版时发给发行方）、序列号（``license_serial``）、
+    是否绑定机器（``machine_bound``）、宽限（``grace_days`` / ``grace_left``）、
+    周期复检间隔（``recheck_seconds``）、CRL 命中数（``crl_revoked_count``）、
+    时钟状态（``clock_ok``）与具体失败原因（``reason_code`` / ``detail``）。
+    这些字段全部是**增补**，旧前端忽略即可。
+    """
     load_extensions()
     pkg = pro_package_info()
     diag = license_diagnosis() if pkg["installed"] else None
@@ -367,12 +475,38 @@ def upgrade_status() -> dict:
     else:
         step = "need_license"
     reason = (diag or {}).get("reason", "")
+    reason_text = _diagnosis_reason_text(diag) or _REASON_TEXT.get(reason, "")
+    version_reason = pkg.get("version_detail", "") if pkg.get("installed") else ""
+    version_step = "replace_package" if version_reason else ""
+    if version_reason:
+        reason_text = f"{reason_text}；{version_reason}" if reason_text else version_reason
+    diag = diag or {}
     return {
         "edition": edition, "label": _EDITION_LABELS.get(edition, edition),
         "license": _state["license"], "package": pkg, "step": step,
-        "reason": reason, "reason_text": _REASON_TEXT.get(reason, ""),
+        "reason": reason, "reason_text": reason_text,
+        "core_version": core_version(),
+        "version_match": bool(pkg.get("version_match")),
+        "version_reason": version_reason,
+        "version_step": version_step,
         "license_file": str(license_file()),
         "extensions_dir": str(extensions_dir()),
+        # ── v1.11.15 商业运营状态（许可证协议 v3）──
+        "license_version": diag.get("protocol_version", 2),
+        "machine_id": diag.get("machine_id", ""),
+        "license_serial": diag.get("license_serial", ""),
+        "machine_bound": bool(diag.get("machine_bound")),
+        "grace_days": diag.get("grace_days", 0),
+        "grace_left": diag.get("grace_left", 0),
+        "grace": bool(diag.get("grace")),
+        "recheck_seconds": diag.get("recheck_seconds", 0),
+        "crl_path": diag.get("crl_path", ""),
+        "crl_revoked_count": diag.get("crl_revoked_count", 0),
+        "clock_ok": diag.get("clock_ok", True),
+        "last_check": diag.get("last_check"),
+        "reason_code": diag.get("reason_code", ""),
+        "detail": diag.get("detail", ""),
+        "license_state": _state.get("license_reason"),
         "features": {k: k in _state["features"] for k in COMMERCIAL_FEATURES},
         "feature_labels": {k: {"tier": t, "label": lbl}
                            for k, (t, lbl) in COMMERCIAL_FEATURES.items()},
@@ -386,7 +520,8 @@ def _reactivate() -> tuple[set[str], set[str]]:
     跑着，换成新实例只会出现"界面看到的和后台在跑的不是同一个"。
     """
     old = dict(_state["features"])
-    _state.update({"edition": EDITION_COMMUNITY, "features": {}, "license": None})
+    _state.update({"edition": EDITION_COMMUNITY, "features": {}, "license": None,
+                   "license_reason": None})
     load_extensions(force=True)
     for k, impl in old.items():
         if k in _state["features"]:
@@ -395,8 +530,74 @@ def _reactivate() -> tuple[set[str], set[str]]:
     return now - set(old), set(old) - now
 
 
+def _verify_license_for_activation(raw: str) -> dict:
+    """用商业包的详细校验拿原因码；旧扩展包没有 guard 时退回 ``parse_license``。
+
+    返回 ``{valid, code, detail, info, reason}``。这里绝不抛异常 —— 许可证填错
+    是常见操作，必须是一条安静的失败分支。
+    """
+    try:
+        from automind_pro.license import verify_license_text  # type: ignore[import-not-found]
+
+        return verify_license_text(raw)
+    except Exception:                   # 旧扩展包 / 扩展包故障
+        pass
+    try:
+        from automind_pro.license import parse_license  # type: ignore[import-not-found]
+
+        info = parse_license(raw)
+    except Exception as e:
+        return {"valid": False, "code": "invalid",
+                "detail": f"许可证校验出错：{e}"[:300], "info": None, "reason": ""}
+    if info is not None:
+        return {"valid": True, "code": "ok", "detail": "", "info": info.summary(),
+                "reason": "许可证有效"}
+    return {"valid": False, "code": "invalid",
+            "detail": "签名校验未通过或已过期", "info": None, "reason": ""}
+
+
+#: 激活失败时"具体原因码 → (对外 code, 文案模板)」。未列出的原因（签名/格式/
+#: 公钥未置备等）统一按 invalid 返回 —— 那是旧接口契约，面板按 invalid 展示原文。
+_ACTIVATION_ERRORS: dict[str, tuple[str, str]] = {
+    "expired": ("expired", "许可证已过期"),
+    "grace_expired": ("expired", "许可证已过期且超出宽限期"),
+    "not_yet_active": ("not_yet_active", "许可证尚未生效"),
+    "machine_mismatch": ("machine_mismatch", "许可证绑定的机器与本机不符"),
+    "revoked": ("revoked", "许可证已被吊销"),
+    "clock_rollback": ("clock_rollback", "检测到系统时钟回拨"),
+    "empty": ("empty", "请粘贴许可证内容"),
+}
+
+
+def _activation_error(verified: dict) -> dict:
+    """把详细校验结果翻译成激活面板要的 ``{ok, code, error, reason_code, detail}``。"""
+    code = str(verified.get("code") or "invalid")
+    detail = str(verified.get("detail") or "").strip()
+    if code == "grace":
+        return {}
+    public_code, title = _ACTIVATION_ERRORS.get(code, ("invalid",
+                                                       "许可证无效：签名校验未通过或已过期"))
+    reason = str(verified.get("reason") or "")
+    if code in ("expired", "grace_expired", "not_yet_active", "revoked",
+                "clock_rollback", "machine_mismatch") and detail:
+        message = f"{title}：{detail}" if detail not in title else detail
+    elif detail:
+        message = f"{title}（{detail}）" if reason else f"{title}：{detail}"
+    else:
+        message = title
+    if code == "invalid" and not detail:
+        message = ("许可证无效：签名校验未通过或已过期。请确认完整复制了整行许可证")
+    return {"ok": False, "code": public_code, "error": message,
+            "reason_code": code, "detail": detail}
+
+
 def activate_license(raw: str) -> dict:
-    """校验并激活许可证：有效才落盘，随后就地重新激活扩展。"""
+    """校验并激活许可证：有效才落盘，随后就地重新激活扩展。
+
+    v1.11.15 起对无效许可证给出**具体原因**（过期 / 尚未生效 / 机器不匹配 /
+    已被吊销 / 时钟异常 / 签名不符）：``code`` 为对外错误码，``reason_code``
+    为协议层原因码，``error`` 是给用户看的一句话。旧调用点只看 ``ok`` 也能用。
+    """
     raw = (raw or "").strip()
     if not raw:
         return {"ok": False, "code": "empty", "error": "请粘贴许可证内容"}
@@ -410,15 +611,9 @@ def activate_license(raw: str) -> dict:
         return {"ok": False, "code": "incompatible",
                 "error": f"商业扩展包协议版本（{pkg['api_version']}）与当前社区核心"
                          f"（{EXTENSION_API_VERSION}）不匹配，请获取与本版本配套的扩展包"}
-    try:
-        from automind_pro.license import parse_license  # type: ignore[import-not-found]
-
-        info = parse_license(raw)
-    except Exception as e:
-        return {"ok": False, "code": "invalid", "error": f"许可证校验出错：{e}"[:300]}
-    if info is None:
-        return {"ok": False, "code": "invalid",
-                "error": "许可证无效：签名校验未通过或已过期。请确认完整复制了整行许可证"}
+    verified = _verify_license_for_activation(raw)
+    if not verified.get("valid"):
+        return _activation_error(verified)
     path = license_file()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -436,8 +631,47 @@ def activate_license(raw: str) -> dict:
                 "error": "许可证已保存但未能激活。若设置了环境变量 AUTOMIND_LICENSE 或当前目录有 "
                          ".automind_license，它们优先于界面里填写的许可证，请清除后重启。"}
     logger.info("license_activated_in_app", edition=edition, added=sorted(added))
+    diag = license_diagnosis() or {}
     return {"ok": True, "edition": edition, "label": _EDITION_LABELS.get(edition, edition),
-            "license": _state["license"], "added": sorted(added), "lost": sorted(lost)}
+            "license": _state["license"], "added": sorted(added), "lost": sorted(lost),
+            "machine_id": diag.get("machine_id", ""),
+            "license_serial": diag.get("license_serial", ""),
+            "machine_bound": bool(diag.get("machine_bound")),
+            "grace": bool(diag.get("grace"))}
+
+
+def deactivate_license(code: str = "", detail: str = "",
+                       reason: str = "") -> dict:
+    """许可证失效时把当前进程降级回社区版（周期复检 watchdog 调用）。
+
+    **保留**：automind_pro 包安装状态（文件、已 import 的模块都不动）、
+    ``~/.automind/license`` 许可证文件、``_state["loaded"]``（避免每个 API 调用
+    都反复尝试重新激活）。客户续期 / 换绑后续期文件变化，下一次复检会调用
+    :func:`reactivate_license` 恢复，不需要重启。
+
+    返回 ``{edition, lost, code, detail, reason}``（lost = 被摘掉的特性键）。
+    """
+    lost = sorted(_state["features"])
+    _state.update({
+        "edition": EDITION_COMMUNITY,
+        "features": {},
+        "license": None,
+        "license_reason": {"code": code, "detail": detail, "reason": reason},
+    })
+    logger.warning("edition_license_invalidated", code=code, detail=detail, lost=lost)
+    return {"edition": EDITION_COMMUNITY, "lost": lost,
+            "code": code, "detail": detail, "reason": reason}
+
+
+def reactivate_license() -> dict:
+    """许可证恢复有效时就地重新激活扩展（周期复检 watchdog 调用）。"""
+    _state["license_reason"] = None
+    added, lost = _reactivate()
+    edition = _state["edition"]
+    logger.info("edition_license_reactivated", edition=edition, added=sorted(added))
+    return {"edition": edition, "label": _EDITION_LABELS.get(edition, edition),
+            "added": sorted(added), "lost": sorted(lost),
+            "license": _state["license"]}
 
 
 #: 上传扩展包的体积上限：automind-pro 的 wheel 不到 1MB，给足余量
@@ -452,7 +686,11 @@ UPGRADE_MANIFEST = "automind-upgrade.json"
 
 
 def _read_upgrade_bundle(data: bytes) -> dict[str, Any] | None:
-    """是一键升级包就拆出 {wheel, license, manifest}；不是返回 None（按普通 wheel 处理）。"""
+    """是一键升级包就拆出 {wheel, license, crl, manifest}；不是返回 None（按普通 wheel 处理）。
+
+    v1.11.15 起 .ampkg 可选携带 ``license_crl.json``（吊销列表快照），客户装包时
+    自动合并落盘 —— 否则一次"离线发证 + 事后吊销"的批量交付无法闭环。
+    """
     import io
     import zipfile
     try:
@@ -468,8 +706,22 @@ def _read_upgrade_bundle(data: bytes) -> dict[str, Any] | None:
         manifest = {}
     wheels = [n for n in names if n.endswith(".whl") and "/" not in n]
     lic = zf.read("license.txt").decode("utf-8", errors="replace").strip() if "license.txt" in names else ""
+    crl = (zf.read("license_crl.json").decode("utf-8", errors="replace")
+           if "license_crl.json" in names else "")
     return {"manifest": manifest if isinstance(manifest, dict) else {},
-            "wheel": zf.read(wheels[0]) if wheels else b"", "license": lic}
+            "wheel": zf.read(wheels[0]) if wheels else b"", "license": lic,
+            "crl": crl}
+
+
+def _store_license_crl(text: str) -> dict:
+    """把升级包里的 CRL 合并进本地吊销列表（吊销只增不减，原子写）。"""
+    try:
+        from automind_pro.licensing.guard import merge_crl_text  # type: ignore[import-not-found]
+
+        return merge_crl_text(text)
+    except Exception as e:                  # 旧扩展包 / 磁盘问题
+        logger.warning("license_crl_store_failed", error=str(e)[:200])
+        return {"ok": False, "error": str(e)[:200], "added": 0, "count": 0}
 
 
 def install_upgrade(data: bytes) -> dict:
@@ -484,6 +736,12 @@ def install_upgrade(data: bytes) -> dict:
     if not bundle["wheel"] and not pro_package_info()["installed"]:
         return {"ok": False, "error": "升级包里没有扩展包（.whl），请向发行方重新获取"}
     result: dict[str, Any] = {"ok": True, "bundle": True, "manifest": bundle["manifest"], "added": []}
+    # 先落 CRL：随包吊销的许可证必须在同一次装包时就被拒绝，不能等下一次检查
+    if bundle.get("crl"):
+        crl_result = _store_license_crl(bundle["crl"])
+        result["crl_saved"] = bool(crl_result.get("ok"))
+        result["crl_count"] = crl_result.get("count", 0)
+        result["crl_added"] = crl_result.get("added", 0)
     if bundle["wheel"]:
         pkg = install_pro_package(bundle["wheel"])
         if not pkg.get("ok"):
@@ -503,6 +761,9 @@ def install_upgrade(data: bytes) -> dict:
             return act
         result.update({"edition": act["edition"], "label": act.get("label"),
                        "license": act.get("license")})
+        result.update({k: act[k] for k in
+                       ("machine_id", "license_serial", "machine_bound", "grace")
+                       if k in act})
         result["added"] = sorted(set(result["added"]) | set(act.get("added") or []))
         result["lost"] = act.get("lost", [])
     return result
@@ -581,6 +842,18 @@ def install_pro_package(data: bytes) -> dict:
 
 
 def reset_for_tests() -> None:
-    """重置版本状态（仅测试用）。"""
+    """重置版本状态（仅测试用）。
+
+    v1.11.15 起还必须停掉商业包的周期复检线程 —— 否则一个 3600 秒的守护线程
+    会跨用例残留，测试结束时进程看似"干净"，实际上还在后台跑。
+    """
+    try:
+        import sys
+
+        guard = sys.modules.get("automind_pro.licensing.guard")
+        if guard is not None:
+            guard.reset_for_tests()
+    except Exception:                   # 扩展包不可用 / 旧版本没有 guard
+        pass
     _state.update({"edition": EDITION_COMMUNITY, "features": {},
-                   "loaded": False, "license": None})
+                   "loaded": False, "license": None, "license_reason": None})

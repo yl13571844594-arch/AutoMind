@@ -31,34 +31,41 @@ it works out of the box) — for chatting, working, and coding, plus a
 > task history in a local SQLite database, knowledge-base vectors in a local directory.
 > Nothing is sent anywhere except the model provider you configured yourself.
 
-## ✨ What's new in v1.11.13
+## ✨ What's new in v1.11.18
 
-- 🛠 **Higher tool-call success rate**: parameter aliases/types normalized, relative paths
-  anchored to the session workspace, GBK-aware file reads, automatic shell fallback for
-  chained commands — `file_read` / `file_write` / `file_edit` / `terminal` / `pwsh` get it
-  right the first time far more often.
-- 🔍 **`web_search` works out of the box**: with a configured DeepSeek key it uses the
-  official Search API (no extra model turn); otherwise it falls back to keyless web search.
-  Tavily / Serper / Brave / self-hosted SearXNG are still supported explicitly.
-- 🤖 **More reliable Feishu / WeCom / DingTalk bots**: bot sessions use their own `bot-…`
-  namespace and isolated workspace, so IM work never mixes with the Web workspace; writes
-  are no longer misjudged by post-write self-checks, and progress/results are relayed back
-  to the chat.
-- 📋 **Collaboration tools**: todo list, ask-the-user questions, deliverable declarations,
-  automatic context compaction and `/compact`; Pro adds one-shot sub-agent delegation.
+- 🛡 **Unattended evaluation approvals**: the eval executor used to configure approval mode `auto`, so sensitive
+  `terminal` calls were rejected in an eval process with **no approval channel** and the model simply retried —
+  the standard-tools `smoke_run_command` case timed out at **237.2s** and burned **436,698** tokens. The eval
+  executor now defaults to **`approve_all`** unattended approval (`--approval-mode` can override it and the
+  choice is recorded in `report.notes`), and the executor enforces the per-task `timeout_seconds` **hard limit**,
+  so a run can no longer hang for 237s.
+- 🪙 **Chinese writes complete in one shot**: after a successful `file_write` the tool now **reads the file back
+  from disk** and returns `size_bytes` / `chars` / `encoding` / `verified` / `readback_matches` — the model no
+  longer needs a follow-up `file_read` or terminal check (the main cause of the `smoke_chinese_content`
+  token overrun: 180,170 / 139,053 tokens). Tool descriptions and the coding prompt explicitly support
+  Chinese file names / content (UTF-8) and add a "verify once, then finish" discipline for simple tasks.
+- 🧰 **Multi-task & collaboration**: `pwsh` gains a native background channel (`background=true` returns a
+  `task_id` immediately; poll / output / list / kill via `terminal_background`); `subagent_list` accepts an
+  `agent_id` to return one sub-agent's **full output** (with an explicit truncation marker); the new
+  **`team_task`** tool (list / summary / create / update / claim / comment) plugs into the team task board's
+  SQLite store and broadcasts changes to the Web board in real time — agents can dedupe, claim, update and
+  comment alongside humans.
+- 🚀 **v1.11.18 release**: core / Pro extension / web / Windows installer / manual are unified at **1.11.18**.
+  This is a patch release with no commercial-extension or frontend feature changes;
+  `tests/test_version_consistency.py` keeps all six version declarations identical.
 
 ## Screenshots
 
 <table>
 <tr>
 <td width="50%"><img src="docs/images/tools.png" alt="Tools panel"><br>
-<b>🔧 Tools panel</b> — 40 built-in tools plus skills, MCP servers and plugins, labelled by origin, searchable and toggleable</td>
-<td width="50%"><img src="docs/images/observe.png" alt="Observability"><br>
-<b>📈 Observability</b> — a live execution DAG of the current task; see what every step is doing</td>
+<b>🔧 Tools panel</b> — 41 built-in tools (including team tasks, background pwsh and write-readback verification) plus skills, MCP servers and plugins</td>
+<td width="50%"><img src="docs/images/workflow.png" alt="Workflows"><br>
+<b>🧩 Workflows</b> — every step pinned in YAML: reviewable, diffable and versionable for reproducible long-running work</td>
 </tr>
 <tr>
-<td width="50%"><img src="docs/images/plan.png" alt="Plan view"><br>
-<b>📋 Plan view</b> — hierarchical goal tree with per-step status, preconditions and expected results</td>
+<td width="50%"><img src="docs/images/team.png" alt="Team board"><br>
+<b>👥 Team board</b> — live members, shared tasks, comments and status flow; agents and humans work on one board</td>
 <td width="50%"><img src="docs/images/kb.png" alt="Knowledge base"><br>
 <b>📚 RAG knowledge base</b> — drop documents in, chat answers retrieve and cite them</td>
 </tr>
@@ -103,6 +110,22 @@ license is configured — see [docs/EDITIONS.md](docs/EDITIONS.md).
 > Security features (auth, rate limiting, secret redaction, audit) **all stay in the
 > Community Edition** — security is never behind a paywall.
 
+> 💼 **Commercial activation (since v1.11.14; license v3 in v1.11.15)**: a Community → Pro/Enterprise
+> entitlement is an **offline Ed25519 license** (`AMP2-…`). The client only embeds the verification
+> public key, so it validates with no network and cannot be forged or edited (tier / expiry / seats are
+> signed). v1.11.15 adds **serials, machine binding and not-before dates** (v3, backward compatible with
+> v2) plus **batch issuance with a ledger, trial licenses (`--days`), offline CRL revocation, periodic
+> re-checks with grace periods and smooth key rotation**. Given the vendor's one-file `.ampkg` upgrade
+> (wheel + license), drag it into **Settings → ⭐ Upgrade Pro / Enterprise → ⚡ One-click upgrade** to
+> install *and* activate — no pip, no env vars, no admin rights.
+> **Upgrade with an `.ampkg` matching the core version (currently v1.11.18; this patch adds no commercial-extension changes, so a v1.11.17 package keeps working)** (the public key was not rotated, so existing
+> licenses remain valid and old `.ampkg` files still activate; the current package also carries the v3
+> license / machine-binding / CRL / re-check capabilities, and v1.11.17 fixes commercial feature route
+> mounting for semantic cache / model routing / cost dashboard / Pro KB). On the release side, the 12-check
+> `issue_license.py doctor` validates keys, wheel, versions, CRL, rotation and re-check configuration
+> before a bundle ships. Full flow: [docs/COMMERCIAL_ACTIVATION.md](docs/COMMERCIAL_ACTIVATION.md);
+> operations SOP: [docs/LICENSE_OPERATIONS.md](docs/LICENSE_OPERATIONS.md).
+
 ## Five Interaction Modes
 
 | Mode | Description | Best for |
@@ -125,6 +148,10 @@ The dropdown at the top switches the approval policy for tool calls
 
 ## Loop Engineering / Scheduling / Statistics
 
+- **🪙 Token-budget windows and multi-mode continuation (v1.11.16)**: the per-task token budget is a
+  **window**; when it is exhausted the agent compacts context and opens the next one automatically.
+  Multi-agent / loop / sub-agent runs no longer fail silently on exhaustion — they persist a resumable
+  checkpoint and the UI offers "Continue multi-agent / Continue loop", picking up the unfinished parts.
 - **Loop mode** (Pro) has built-in stop conditions (task complete / no progress for N
   rounds / max rounds) plus manual interruption, so it cannot spin forever.
 - **⏰ Scheduled tasks** (Pro): run a task at a fixed interval in any mode, scheduled in
@@ -137,6 +164,37 @@ The dropdown at the top switches the approval policy for tool calls
   agent is stuck. Community shows the **current task**'s live DAG (read-only); Pro adds a
   live board (success rate / P50·P95 / tool heat / failure attribution), run history and
   export; Enterprise adds per-session grouping.
+
+## 🧭 Smart Routing & Cost (Pro and up; UI rebuilt in v1.11.15, stability fixes in v1.11.16, route-mounting fix in v1.11.17)
+
+The sidebar's **🧭 Routing & Cost** page covers semantic caching, model routing and cost analysis;
+v1.11.15 rebuilt the whole view:
+
+- **Five KPI cards**: total cost / total tokens / cache hit rate / routing hits / 30-day average daily
+  cost — cost and tokens use real 30-day series in mini bar charts; when cache or routing have no
+  per-day data the page uses hit-rate bars and tier-distribution bars instead of **drawing fake curves**.
+- **Semantic cache**: an SVG ring gauge for hit rate, a capacity bar and estimated savings (near-identical
+  questions are answered instantly at 0 tokens).
+- **Model routing**: a 0–100 complexity ladder with editable tiers (2 tiers in Pro, N in Enterprise); the
+  "route preview" takes a task description and shows, via a complexity ring, which tier it will hit.
+- **Enterprise cost dashboard**: 30-day bar charts in both amount and token views, per-model cost share,
+  cache savings and methodology notes.
+- **Methodology**: costs are estimated from the built-in price table (unknown models count as 0).
+  `GET /api/costs` keeps every legacy field and adds `total_tokens` / `by_day` / `by_model[*].share` /
+  `top_model` etc., so the UI and the API share one definition.
+- **Permission states**: Community / Pro / Enterprise are rendered as capability cards; locked features
+  show an upgrade entry instead of pretending to be zero data.
+- **Stability and legacy-data compatibility (v1.11.16)**: an old `/api/cache` response without
+  `threshold` used to crash `toFixed` and blank the page. `/cache`, `/router` and `/costs` responses are
+  now sanitised (missing fields / nulls / string numbers / bad tiers) and numbers are formatted only
+  after a valid check; page-level and five block-level error boundaries degrade just the affected card,
+  and 403 / error payloads show an explicit error panel instead of silently displaying zeros.
+- **Route-mounting fix (v1.11.17)**: activated Pro / Enterprise machines could still see
+  "feature not enabled or version-gated (feature=semantic_cache)" because the community core's
+  hand-maintained attach list omitted every commercial feature that ships its own REST routes — the real
+  routes were never registered and requests hit the 403 fallback. The list is now derived from
+  `COMMERCIAL_FEATURES`, and both startup and hot activation mount the real routes; if a 403 shows up
+  again the message points at "restart / install the same-version extension package" instead.
 
 ## Quick Start
 
@@ -151,15 +209,21 @@ cd AutoMind
 pip install -e ".[web]"
 
 # Option C: install from PyPI
-pip install "automind-agent[web]"     # Web + OpenAI-compatible backends
-# Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
+pip install "automind-agent[web]==1.11.18"     # current version · Web + OpenAI-compatible backends
+# Upgrade: pip install -U "automind-agent[web]==1.11.18"; use [full] for every backend
 ```
 
-> ✅ **PyPI is up to date with v1.11.13**: `pip install -U "automind-agent[web]"` gets
-> the same version as this repository. Desktop installers live on
-> [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
-> (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`),
-> and each release ships a `SHA256SUMS` file you can check with `sha256sum -c`.
+> ✅ **v1.11.18 is ready**: this repository, the Pro extension and the manual are all at v1.11.18.
+> The Community wheel/sdist, the PyPI upload and the three desktop installers are a **source-level
+> release** and are produced by the pipeline in [RELEASE.md](RELEASE.md) — install from source or use
+> the offline bundle until they are published; afterwards `pip install -U "automind-agent[web]"`
+> picks up exactly this release.
+> Installers live on [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+> (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`), and each release ships a
+> `SHA256SUMS` file you can check with `sha256sum -c`.
+>
+> For air-gapped machines, run `pip download "automind-agent[web]==1.11.18"` on a connected
+> host, copy the wheel directory over, and follow [docs/OFFLINE_OPS.md](docs/OFFLINE_OPS.md).
 
 ```bash
 # Start the Web workbench (recommended)
@@ -192,6 +256,17 @@ Open the Web workbench and click **⚙ Settings → 🔑 API Keys** (bottom left
   (e.g. `https://api.your-proxy.com/v1`), a default model and an API key to use any
   service compatible with OpenAI's `/v1/chat/completions`.
 - Every provider lets you type an arbitrary model name.
+- **🧠 Model picker in the composer (v1.11.15)**: the dropdown next to the input switches models on the
+  fly — default model / configured models grouped by provider (only providers with a usable key, plus
+  local Ollama models; favourites pinned). The choice persists for subsequent messages and is honoured
+  by resume/retry. If a manually selected model fails to initialise, the receipt explains why and the
+  previous model is kept — **the app never silently swaps in a model you did not pick**; the
+  `task_start` receipt reports the effective provider/model.
+- **🗺 Automatic routing (Pro / Enterprise)**: switch the picker to "Automatic routing" and the server
+  scores task complexity (0–100 heuristic), picks the routing tier and switches the model for this run;
+  the `task_start` receipt reports tier, complexity and target provider/model. Community shows 🔒 with an
+  upgrade prompt, and the server only replies "Pro/Enterprise required" when it receives `auto` — it does
+  not quietly substitute a model. Priority: **explicit manual choice > automatic routing > global default**.
 - API keys are stored only in the local `.automind_config.json` and are never uploaded.
   Environment variables work too (`OPENAI_API_KEY`, `DEEPSEEK_API_KEY`,
   `MOONSHOT_API_KEY`, …).
@@ -214,6 +289,13 @@ Open the Web workbench and click **⚙ Settings → 🔑 API Keys** (bottom left
 - **🗂 Workspaces**: manage and switch between workspaces from the badge at the top
   right. Each workspace = its own directory + its own context, so tasks never pollute
   each other.
+- **💬 Session manager (v1.11.17: group / sort / filter / search)**: a 🔍 quick search sits in the
+  sidebar session list, and ⚙️ next to the "Sessions" header (or Settings → 💬 Session Manager) opens a
+  full manager — scope current / all workspaces, live search over title / archived summary / session id
+  (space-separated keywords, all must match), filters all / pinned / running / archived, grouping by
+  none / time / status / workspace, sorting by last activity / created / title / turns with pinned always
+  first. Open / rename / pin / archive / restore / delete in one place; the view settings persist.
+  Archiving still writes the summary into the workspace long-term memory (see manual §8.7.1).
 - **📚 Template library**: 10 built-in starter templates (website, scaffolding, bug fix,
   tests, data analysis, scraping, …), one click from the welcome screen or the 📚 button.
   A 4-step onboarding tour runs on first open (replay with ❓).
@@ -223,21 +305,43 @@ Open the Web workbench and click **⚙ Settings → 🔑 API Keys** (bottom left
   (built-in pricing for mainstream models, customisable).
 - **↩️ Undo / rollback**: files the agent changed are listed under "File changes" on the
   right; revert one file or roll back everything.
-- **▶ Resume**: after an interruption or error, "Continue this task" picks up where it
-  stopped instead of redoing the work.
+- **▶ Resume (four modes, v1.11.16)**: after an interruption, error or a spent token budget, **plan /
+  ReAct / multi-agent / loop** runs all resume from a checkpoint (discoverable after a process restart):
+  only the remaining steps / roles / iterations run, finished work is not redone, and the
+  same-millisecond checkpoint-id collision that silently overwrote checkpoints is fixed.
 - **📄 Code editor (Web IDE)**: the 📄 Code tab on the right = file tree + Monaco editor
   + change diff preview. Edit code straight from the browser (Ctrl+S to save, undoable)
   without disturbing the chat.
 - **🎓 Expert marketplace**: 10 curated official experts installable in one click, plus
   your own (3 in Community). Once activated every task runs with that role's setup; Pro
   adds unlimited creation, sharing, import/export and statistics.
-- **👥 Team collaboration**: a task assignment board plus live activity notifications (you
-  get told when a colleague's agent changes a file). Workspaces, templates and experts are
-  server-level storage, so one deployment is shared by the team.
+- **👥 Team collaboration**: v1.11.15 turns this into a full team workbench (live presence, four-column
+  board, priority, due dates, comments, summaries). Workspaces, templates and experts are server-level
+  storage, so one deployment is shared by the team — see the next section.
 - **🔌 Agent integration**: a built-in OpenAI-compatible endpoint
   (`/v1/chat/completions`, SSE streaming). ⚙ Settings → 🔌 Agent integration generates
   ready-made **Continue.dev** (VS Code / JetBrains) and **Cline** configs; any other
   OpenAI client (Zed, …) works the same way.
+
+## 👥 Team Collaboration Workbench (v1.11.15)
+
+One deployment = one team. The sidebar's **👥 Team** view is now a complete workbench:
+
+- **Live presence**: WebSocket connect / disconnect / rename events are broadcast in real time; the
+  online-members strip shows avatar initials, online dots and task counts. Multiple tabs are aggregated
+  per person; nicknames persist locally and are restored after a restart.
+- **Richer tasks**: beyond title and assignee, tasks now carry **priority** (low / normal / high /
+  urgent), **due date**, **tags**, **comments** and an **activity timeline**, plus a **blocked** status.
+  Existing tasks get defaults on read — zero migration, ids preserved.
+- **Four-column board**: To do / In progress / Blocked / Done, with priority colour bars, red overdue
+  badges, assignee, comment count and tags; search plus filters by assignee, priority and status, and
+  sort by due date.
+- **Live updates and summaries**: create / update / comment / claim / move events broadcast to online
+  members instantly; five stat cards summarise completion rate, overdue, today's and 7-day completions
+  and recent activity, alongside per-person workload. The detail drawer edits fields, moves status,
+  comments and confirms deletion.
+- **Single-instance semantics**: "online members" reflects WebSocket connections **inside the current
+  process**, not a cross-machine cluster; multiple instances each track their own presence.
 
 ## Chat History
 
@@ -271,11 +375,46 @@ deleting single entries or clearing everything.
 - **📎 Multimodal**: attach images for vision models; images, links and tables in output
   are rendered inline.
 
+## 🤖 IM Bots (Feishu / WeCom / DingTalk)
+
+Add a bot under **Settings → Bots**, fill in the platform credentials / webhook, then simply
+message it from that chat — the agent runs locally and relays progress and results back to the
+same conversation:
+
+- **One chat = one session**: Feishu, WeCom, DingTalk and generic webhooks are supported;
+  `/new` starts a fresh session, `/stop` cancels, `/mode` switches chat / work / coding, and
+  `/apply` copies isolated-workspace artifacts back into the project.
+- **Approvals inside the chat**: dangerous operations arrive as a numbered approval message —
+  reply "approve / reject". A timeout counts as reject (fail-closed); nothing slips through.
+- **Workspace isolation (v1.11.13)**: bot sessions use their own `bot-…` namespace and isolated
+  working copy, invisible to the Web workspace and to other chats; relative paths are anchored
+  to that copy.
+- **Formatted per platform (v1.11.14)**: replies are converted to what each platform actually
+  renders — tables degrade to field lists, WeCom code blocks become quotes, titles respect
+  platform limits; long replies split at block boundaries and **never inside a code fence**,
+  with "(continued N/M)" markers. See the "Markdown rendering rules per platform" section of
+  [docs/IM_BOTS.md](docs/IM_BOTS.md) and [docs/FEISHU.md](docs/FEISHU.md).
+
 ## Security Audit
 
 The sidebar's **🛡️ Security audit** shows the risk score and authorisation decision for
 every tool call (allowed / needs confirmation / dangerous). Destructive commands
 (`rm -rf`, `git push --force`, …) are classified as dangerous and require confirmation.
+
+## Workflow Automation & Governance (v1.11.16)
+
+- **🔀 Workflow automation**: step-level `if` / `unless`, failure fallback
+  `on_failure: fallback(<step-id>)`, workflow-wide `timeout_seconds`, and per-step / whole-run token
+  accounting in reports and the dashboard. Pro triggers add cron catch-up (`catch_up` /
+  `max_delay_seconds`) and webhook replay protection (`dedupe_window`). Every new field is optional and
+  defaults to the old behaviour; existing workflows keep working unchanged. See
+  [docs/WORKFLOWS.md](docs/WORKFLOWS.md).
+- **🛡 Execution governance**: **all 26 parameters** under **Settings → Execution Governance** now really
+  take effect (7 classes of "saved but ignored" were fixed: trace switch/retention, terminal timeouts and
+  background channel, write-conflict policy, approval timeout/action, task token-budget propagation, …).
+  Each setting is labelled with its effective timing ("immediate / next task / next approval / next call /
+  next write") and the API returns `applied / rejected / effective`. Defaults, read points, timing and
+  tuning advice: [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
 ## Production Deployment / Multi-user
 
@@ -306,6 +445,20 @@ The frontend sends `Authorization: Bearer <token>`; WebSocket uses
 
 - **Health check**: `GET /api/health` (no auth) returns version, running task count,
   concurrency limit and uptime — for liveness probes and load balancers.
+- **Commercial activation & upgrades (v1.11.15)**: the same offline flow works for intranet /
+  production deployments — drag the vendor's `.ampkg` into the in-app
+  **⭐ Upgrade Pro / Enterprise** panel (no pip, no outbound network). One activation covers the
+  whole host; confirm the tier via `edition` on `GET /api/health`
+  (`community` / `pro` / `enterprise`). Activation and upgrades are admin actions: local requests
+  work directly, remote ones need the admin token (`AUTOMIND_ADMIN_TOKEN`). See
+  [docs/COMMERCIAL_ACTIVATION.md](docs/COMMERCIAL_ACTIVATION.md).
+- **License operations (v1.11.15)**: v3 licenses support **serials, machine binding and not-before
+  dates**. Vendors can batch-issue with `issue_license.py issue-batch` plus a 12-column ledger,
+  revoke offline with `revoke` + CRL, issue trials with `--days`, and schedule activation with
+  `--start`. Clients re-check periodically (`AUTOMIND_LICENSE_RECHECK`, default 3600s), honour a grace
+  period (`AUTOMIND_LICENSE_GRACE_DAYS`, default 0), and downgrade when the system clock is rolled back
+  by more than one day. See [docs/COMMERCIAL_ACTIVATION.md](docs/COMMERCIAL_ACTIVATION.md) and
+  [docs/LICENSE_OPERATIONS.md](docs/LICENSE_OPERATIONS.md).
 
 > Note: the Community Edition gives full multi-user isolation for chat mode; work/coding
 > execution shares a single agent. **Enterprise** adds a session-agent pool so execution

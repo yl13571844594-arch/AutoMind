@@ -98,11 +98,17 @@ description: ...        # 可选，给人看的一句话说明
 inputs: {...}           # 可选，声明式入参
 metadata: {...}         # 可选，自由扩展（谁维护、走什么评审），不参与执行但会进报告
 steps: [...]            # 必填，至少一步
+timeout_seconds: 600    # 可选（v1.11.16）：整轮硬超时（秒）；0/缺省 = 不限
 # ── 以下三项属于专业版（v1.9.0，见第 14 节）──
 triggers: [...]         # 可选，定时（cron）/ 入站 webhook 触发器
 on_restart: notify      # 可选，服务重启时被打断的触发运行：resume 自动续跑 / notify 只通知（默认）
 notify: {...}           # 可选，触发运行的通知：{on: [failed, partial, interrupted, ok], channels: [webhook, im, desktop]}
 ```
+
+> **`timeout_seconds` 与步骤级 `timeout` 的分工**（v1.11.16）：步骤级 `timeout` 管"单步最多多久"
+> （含该步重试的总时长）；`timeout_seconds` 是**整轮兜底** —— 无论卡在第几步、是否在重试 / 循环 /
+> 并行，到点整轮中止：当前步骤记 `aborted`、未执行的步骤记 `skipped`、整轮状态 `aborted`，
+> 报告 `error` 写明"工作流超时"。无人值守任务（触发器）建议总是配一个。
 
 > **为什么版本不认识要报错而不是"按最接近的版本跑"**：按错误的语义**静默跑完**一份
 > 客户已批准的流程，比直接失败严重得多。前者会在生产系统上留下没人预期的结果。
@@ -137,9 +143,68 @@ inputs:
 | 字段 | 必填 | 说明 |
 |---|---|---|
 | `id` | **是** | 唯一标识。后续步骤用 `{{ steps.<id>.output }}` 引用它。不能含 `.` |
-| `type` | **是** | `tool` \| `llm` \| `human` \| `branch` \| `agent`（v1.8.0）\| `foreach`（v1.8.0） |
+| `type` | **是** | `tool` \| `llm` \| `human` \| `branch` \| `agent`（v1.8.0）\| `foreach`（v1.8.0）\| `parallel`（v1.9.0，专业版） |
 | `timeout` | 否 | 秒。到点该步骤判超时失败（**步骤级**上限，会兜住多次重试的总时长） |
-| `on_failure` | 否 | `abort`（默认）\| `continue` \| `retry(n)` |
+| `on_failure` | 否 | `abort`（默认）\| `continue` \| `retry(n)` \| `fallback(<步骤id>)`（v1.11.16） |
+| `if` | 否 | 条件成立才执行（v1.11.16）。语法同 `branch` 条件；不成立时该步骤记 `skipped` |
+| `unless` | 否 | 条件成立时**跳过**（v1.11.16）。与 `if` 互斥（同时写会在加载期报错） |
+
+#### 步骤级条件：`if` / `unless`（v1.11.16）
+
+```yaml
+steps:
+  - id: fetch
+    type: tool
+    tool: http_request
+    args: {url: "{{ inputs.url }}", method: GET}
+
+  - id: only_on_success
+    type: tool
+    if: "{{ steps.fetch.output.ok }} == true"      # 成立才执行
+    tool: notify
+    args: {text: 抓取成功}
+
+  - id: unless_prod
+    type: tool
+    unless: "{{ inputs.env }} == prod"             # 成立则跳过
+    tool: notify
+    args: {text: 非生产环境才通知}
+
+  - id: only_if_has_id
+    type: tool
+    if: "{{ steps.fetch.output.ticket_id }} exists"   # 变量取得到且不为空
+    tool: file_write
+    args: {path: out/ticket.txt, content: "{{ steps.fetch.output.ticket_id }}"}
+```
+
+语义（与 `branch` 共用同一套白名单比较，**不做表达式求值**）：
+
+- `if` 不成立 / `unless` 成立 → 该步骤记 `skipped`，报告 `detail.condition` 里带
+  `field / matched / left / right / should_run`，**不写空串到输出**：被跳过步骤的输出是 `null`，
+  后续步骤若引用它会在渲染期**明确报错**（而不是拿到空串一路往下走）；
+- 条件**无法判定**（数值比较两侧不是数字、`in` 的右侧不是列表等）→ 该步骤判**失败**，
+  绝不当成"条件不成立"静默跳过 —— 判不了就走某一条路，等于让执行路径变成掷硬币；
+- 条件里的模板引用照常做加载期校验：引用不存在的步骤 / 未声明的入参，**加载期即报错**；
+- **`branch` 步骤不支持 `if` / `unless`**（加载期报错）：branch 本身就是条件跳转，再叠一层跳过
+  会让 then / else 两段都被顺序执行 —— 这类"报告全绿、实际多做了事"的错误必须在加载期拦住；
+  要按条件选路请把判断合并进 branch 的 `condition`；
+- **foreach / parallel 的子步骤也支持**：子步骤被条件跳过不算这一项 / 这一组失败
+  （parallel 组在 `detail.skipped_children` 里列出被跳过的子步骤）；
+- dry-run 里**只渲染条件预览、不据此跳过**：真跑时才有的上游输出在试运行里是占位对象，
+  拿它判定等于给出假的执行路径；但"条件里模板写错"仍会在 dry-run 阶段暴露。
+
+#### 工作流级硬超时：`timeout_seconds`（v1.11.16）
+
+```yaml
+version: 1
+name: 无人值守日报
+timeout_seconds: 900       # 整轮最多 15 分钟；到点中止
+steps: [...]
+```
+
+步骤级 `timeout` 管单步；整轮超时兜的是"多步叠加 / 重试 / 循环展开把总时长拖长"。
+超时后：当前步骤 `aborted`、未执行步骤 `skipped`、整轮 `aborted`（CLI 退出码 1），
+报告 `error` 与 `workflow.timeout` 日志都写明上限值。`0` / 缺省 = 不限（与旧行为一致）。
 
 #### `type: tool`
 
@@ -405,23 +470,65 @@ args:
 ## 5. 失败策略
 
 ```yaml
-on_failure: abort        # 默认：整轮中止，后续步骤标 skipped
-on_failure: continue     # 本步记失败，后续照常跑；整轮状态变 partial
-on_failure: retry(3)     # 最多重试 3 次（共最多执行 4 次）；仍失败则视为失败
+on_failure: abort              # 默认：整轮中止，后续步骤标 skipped
+on_failure: continue           # 本步记失败，后续照常跑；整轮状态变 partial
+on_failure: retry(3)           # 最多重试 3 次（共最多执行 4 次）；仍失败则视为失败
+on_failure: fallback(recover)  # v1.11.16：失败后跳到 recover 步骤做降级处理
 ```
 
-写法容错（大小写不敏感）：`retry`（默认 1 次）、`retry(3)`、`retry:3`。
-上限 100 次 —— 需要更多请用外层调度重跑，而不是让一步无限重试。
+写法容错（大小写不敏感）：`retry`（默认 1 次）、`retry(3)`、`retry:3`、`fallback(<id>)`、`fallback:<id>`。
+retry 上限 100 次 —— 需要更多请用外层调度重跑，而不是让一步无限重试。
 
-### 三条硬规则
+#### 失败降级 `fallback(<步骤id>)`（v1.11.16）
+
+```yaml
+steps:
+  - id: push_to_prod
+    type: tool
+    tool: http_request
+    args: {url: "{{ inputs.prod_url }}", method: POST}
+    on_failure: fallback(notify_admin)   # 推送失败 → 走告警，而不是整轮中止
+
+  - id: verify_prod                       # 依赖 push 的输出 → 失败时被跳过
+    type: tool
+    tool: http_request
+    args: {url: "{{ steps.push_to_prod.output.url }}", method: GET}
+
+  - id: notify_admin                      # 降级步骤（可以再引用失败原因）
+    type: tool
+    tool: notify
+    args:
+      text: "生产推送失败：{{ steps.push_to_prod.error }}"
+
+  - id: cleanup                           # 降级跑完后从这一行继续
+    type: tool
+    tool: file_write
+    args: {path: out/run-done, content: done}
+```
+
+语义（与 `branch` 的区别：`branch` 是"条件选路"，fallback 是"失败才走的路"）：
+
+- 失败步骤**仍记 `failed`**（整轮至少 `partial`）—— 降级路径跑通 ≠ 原来的失败没发生；
+- 失败后**跳到**目标步骤继续执行，失败步骤与目标之间的步骤记 `skipped`（原因写明
+  "前序步骤 X 失败，已按 on_failure: fallback 跳转到 Y"）——它们多半依赖失败步骤的输出，不该再跑；
+- 目标步骤里可以用 `{{ steps.<失败步骤>.error }}` 读失败原因；降级步骤自己的 `on_failure` 照常生效；
+- 目标必须**存在于同一文件、排在当前步骤之后**（往回跳 = 循环，加载期报错；指向自己同样报错）；
+- 只支持**顶层步骤**：foreach / parallel 的子步骤写 fallback 在加载期被拒绝
+  （"第几项走到哪"无法逐行对照 —— 与 branch 不放进去的理由一致）；
+- 降级步骤失败且自身策略为 `abort`（默认）→ 整轮中止；需要"降级也失败还能继续"就显式写
+  `continue` 或再套一层 fallback。
+
+### 四条硬规则
 
 1. **失败不许记成成功。** `on_failure: continue` 只是"不中断后续步骤"，
    该步骤在报告里**依然是 `failed`**，整轮状态是 `partial` 而不是 `ok`，
    CLI 退出码仍然是 1。把失败美化成成功，等于让 CI 和客户都失去判据。
+   `fallback` 同理：降级步骤跑通不改变"原步骤失败"这个事实。
 2. **`retry(n)` 用尽后按 `abort` 处理。** 重试是给一次机会，不是"允许失败"。
 3. **`branch` 的跳转目标不存在 = 控制流坏了 → 无条件中止。**
    此时无论 `on_failure` 写什么都不会放行：放行会让主循环从当前位置继续往下走，
    把两条互斥分支都执行掉 —— 那是"报告全绿、实际多做了事"的静默错误。
+4. **`fallback` 目标不存在 / 不向后 = 控制流坏了 → 无条件中止**（加载期已拦，执行期是第二道闸）。
 
 ---
 
@@ -481,6 +588,8 @@ python -m automind.workflow run change_request.yaml --dry-run --input ticket_id=
 - **不调模型**（不消耗 token）；
 - **不弹审批窗**；
 - **参数照常渲染** —— 模板引错变量、工具没挂上，都在这一步暴露；
+- **步骤级 `if` / `unless` 只渲染预览、不据此跳过**（v1.11.16）：真跑时才有的上游输出在 dry-run 里
+  是占位对象，拿它判定等于给出假的执行路径；条件里的模板写错仍会在 dry-run 阶段报"试运行渲染失败"；
 - 输出一份可打印的"将执行什么"清单，含每个工具的 `get_execution_plan()` 预览。
 
 dry-run 的整轮状态是 `dry_run`，CLI 退出码 **0**（试运行本身没有失败）。
@@ -513,11 +622,15 @@ dry-run 的整轮状态是 `dry_run`，CLI 退出码 **0**（试运行本身没�
   "warnings": [],
   "summary": {"total": 6, "succeeded": 4, "failed": 1, "skipped": 1,
               "cancelled": 0, "ok": false, "exit_code": 1},
+  "tokens": {"prompt": 1200, "completion": 340, "total": 1540},
   "steps": [
     {"id": "fetch_ticket", "type": "tool", "status": "ok",
      "started_at": "…", "finished_at": "…", "duration_ms": 812.4,
      "output_digest": "b10af861768f0de0", "error": "", "retries": 0,
-     "line": 45, "detail": {"tool": "http_request", "attempts": 1}}
+     "line": 45, "detail": {"tool": "http_request", "attempts": 1}},
+    {"id": "draft", "type": "llm", "status": "ok", "duration_ms": 2301.7,
+     "tokens": {"prompt": 900, "completion": 340, "total": 1240},
+     "line": 61, "detail": {"prompt_chars": 1832}}
   ]
 }
 ```
@@ -530,7 +643,8 @@ dry-run 的整轮状态是 `dry_run`，CLI 退出码 **0**（试运行本身没�
 | `line` | 该步骤在文件里的行号（前端可做"点击报告跳到定义"） |
 | `source_digest` | 源文件 sha256 —— **报告与文件版本对得上的凭据** |
 | `retries` | 实际重试次数 |
-| `detail` | 工具名、尝试次数、实际参数、审批结果、branch 判定等 |
+| `tokens` | （v1.11.16）本步 / 整轮 token 用量：`llm` 步骤来自响应 usage，`agent` 步骤来自 D6 输出的 `tokens`；拿不到就是 0（**不按字符数估算**）。看板与通知都读它 |
+| `detail` | 工具名、尝试次数、实际参数、审批结果、branch 判定、`if/unless` 判定（`detail.condition`）、fallback 去向（`detail.fallback`）等 |
 
 `--include-outputs` 才会把各步完整输出放进 JSON（默认只有摘要：工具输出可能有
 几十万字，报告要能进日志、进前端、进 CI 产物）。
@@ -663,15 +777,18 @@ YAML 就成了代码，评审与权限模型同时失效。
 
 | 限制 | 说明 | 替代做法 |
 |---|---|---|
-| 不支持循环 | `branch` 只能向后跳；往回跳加载期报错 | 用外层调度重跑整条流程 |
+| 不支持循环 | `branch` / `fallback` 只能向后跳；往回跳加载期报错 | 用外层调度重跑整条流程 |
 | 并行属专业版 | 社区版严格按文件顺序执行；`parallel` 组 / foreach 逐项并发在加载期拦截 | 拆成多个工作流并发跑 |
-| 不支持表达式 | 模板只取值；`branch` 只有白名单比较（9 个算子） | 把计算放进上游工具步骤 |
+| 不支持表达式 | 模板只取值；`branch` / `if` / `unless` 只有白名单比较（10 个算子） | 把计算放进上游工具步骤 |
+| 条件不能基于"未来" | `if` / `unless` 只能看已产生的输入与前面的步骤输出；判不了就失败（不静默跳过） | 调整步骤顺序，或把判断放进上游工具 |
+| fallback 只向后、只顶层 | 不能跳回、不能跨到 foreach / parallel 子步骤 | 把降级逻辑放成普通顶层步骤 |
 | 不支持子工作流 | 一个文件一条流程 | 用工具/服务编排 |
 | 不支持动态步骤 | 步骤集合在加载期固定 | 需要动态时用 ReAct / Plan |
 | 前向引用只警告 | `{{ steps.后面的步骤.output }}` 结构合法但当前路径多半取不到值 | 调整步骤顺序；执行时取不到会明确报错 |
 | 续跑只在 Web / REST | v1.8.0 起支持断点续跑（见第 13 节），CLI 仍从头跑 | CLI 场景用 `idempotency` 类入参让流程可安全重跑 |
 | 触发器属专业版 | `triggers` 在社区版校验阶段即拦截 | 外部 cron / CI 调用 REST 接口 |
-| 定时不补跑 | 服务停机期间错过的定时触发不补；上一次没跑完时到点的那一次跳过 | 需要"必须跑"的用 `retry` + 外部监控 |
+| 错过补偿有上限 | 服务停机期间错过的定时点默认**补跑一次**（不是补 N 次）；可用 `catch_up: skip` 不补、`max_delay_seconds` 限制迟到多久才补 | 需要"每次都不能少"请用可重入流程 + 外部监控 / 消息队列 |
+| 同一触发器不重叠 | 上一次触发的运行还没结束时，到点的那一次**跳过**并记录（不排队）；不同触发器 / 手动运行之间不受此限（`singleton` 跨触发器治理尚未提供） | 让流程跑得比触发间隔快，或拆成不同工作流 |
 | foreach 迭代有上限 | 社区版 20 项 / 专业版 1000 项；foreach / parallel 内不支持 branch 与嵌套 | 上游步骤先筛选或分批 |
 
 ---
@@ -787,10 +904,13 @@ triggers:
     inputs: {region: east}       # 触发时的入参（必须是已声明的入参）
     retry: 2                     # 可选：没全绿时从断点自动续跑的次数（0–5，默认 0）
     retry_delay: 120             # 可选：每次重试前等多少秒（10–86400，默认 60）
+    catch_up: once               # 可选（v1.11.16）：错过的定时点 once=补跑一次（默认）/ skip=不补
+    max_delay_seconds: 3600      # 可选（v1.11.16）：迟到超过该秒数就不补跑（0=不限制）
     description: 工作日早上的日报
     enabled: true                # 可选：文件里的默认启停；界面上的开关优先
   - id: from_ci                  # 可选：触发器 id（默认 t1 / t2 …），状态与令牌按"文件名 + id"记
     webhook: true                # 入站 webhook；令牌由服务端生成，绝不写进文件
+    dedupe_window: 300           # 可选（v1.11.16）：重放保护窗口（秒）；0=关闭（默认）
 on_restart: notify               # resume | notify（默认）
 notify:
   on: [failed, partial, interrupted]   # 可选 ok；默认就是这三个
@@ -799,10 +919,16 @@ notify:
 
 加载期就会拦下的写法：cron 写错（6 段 / `L` `W` `#` / 2 月 30 号这种永不触发的）、**定时间隔低于
 版本下限**（专业版 5 分钟、企业版 1 分钟 —— 按一整年取样算出的最短间隔判定）、触发入参没声明过、
-**定时触发没给全必填入参**（定时运行时没有人补参数）、一个触发器同时写了 cron 与 webhook。
+**定时触发没给全必填入参**（定时运行时没有人补参数）、一个触发器同时写了 cron 与 webhook、
+`catch_up` / `max_delay_seconds` 写在 webhook 上、`dedupe_window` 写在 cron 上。
 
 - 时区是**服务进程的本地时间**；日与周同时受限时按 cron 传统取并集（"每月 1 号**或**每周一"）；
-- 服务停机期间错过的不补跑；上一次触发的运行还没结束时，到点的那一次**跳过**并记录；
+- **错过补偿**（v1.11.16）：服务停机 / 睡眠导致某个定时点没跑时，恢复后默认**补跑一次**
+  （与 v1.9.0 的隐式行为一致，不是把错过的 N 次全补上）；`catch_up: skip` 表示错过就跳过；
+  `max_delay_seconds` 限制"迟到多久以内才补跑"。迟到判定有 60 秒容差（调度 tick 本身的间隔）。
+  跳过 / 补跑都会写进触发器状态（`missed_runs` / `last_catch_up` / `last_status=catch_up_skipped`），
+  界面与 `GET /api/workflow/triggers` 可见；
+- 上一次触发的运行还没结束时，到点的那一次**跳过**并记录（同一触发器串行）；
 - 触发运行使用专用会话 `wf_<文件名>`（D4），与手动运行走**同一套**校验、入参、限额与每日额度判定。
 
 ### 14.2 入站 webhook
@@ -816,6 +942,10 @@ curl -X POST http://<服务>/api/workflow/hooks/<触发器键> \
 - 令牌在界面「⏰ 触发器 → 🔑 生成令牌」得到，**只显示这一次**；服务端只存 sha256 摘要，重置后旧令牌立即失效；
 - 令牌缺失 / 错误 / 触发器不存在一律 **401**（不让外部探测哪些键存在）；触发器停用或超出上限 409；
   缺必填入参 422；成功返回 `run_id`；
+- **重放保护**（v1.11.16）：触发器写 `dedupe_window: 300` 后，同一去重键在窗口内重复到达
+  只会真正触发一次，后续请求返回 `{"ok": true, "duplicate": true, "skipped": true, "run_id": <首次>}`。
+  去重键优先取调用方的 `Idempotency-Key` 头，没给就用**请求体 sha256**（平台侧网络重试通常原样重放
+  同一个请求体，正是要拦的场景）。默认 `0` = 关闭，保持旧行为；
 - 这个路径**不需要**平台访问令牌（凭的是触发器自己的令牌），纳入速率限制；
 - 触发器键由"文件名 + 触发器 id"算出：改文件名会换键，需要重新生成令牌。
 
@@ -823,7 +953,7 @@ curl -X POST http://<服务>/api/workflow/hooks/<触发器键> \
 
 | 接口 | 说明 |
 |---|---|
-| `GET  /api/workflow/triggers?file=` | 全部触发器：是否生效及原因、下次运行时间、最近一次结果、活跃数与上限 |
+| `GET  /api/workflow/triggers?file=` | 全部触发器：是否生效及原因、下次运行时间、最近一次结果、活跃数与上限；v1.11.16 起还含 `catch_up` / `max_delay_seconds` / `dedupe_window` / `missed_runs` / `last_catch_up` |
 | `POST /api/workflow/triggers/{key}/toggle` | `{enabled}` 启停；超出活跃上限时 403 + 升级提示 |
 | `POST /api/workflow/triggers/{key}/token` | 生成 / 重置 webhook 令牌（明文只返回这一次） |
 | `POST /api/workflow/triggers/{key}/run` | 立即触发一次（同样遵守"上一次未完则跳过"） |
@@ -837,7 +967,8 @@ curl -X POST http://<服务>/api/workflow/hooks/<触发器键> \
 - **失败自动续跑**：触发运行 partial / failed 时，按该触发器的 `retry` 在 `retry_delay` 秒后**从断点续跑**
   —— 已成功的步骤（包括并行组里已成功的子步骤）不再执行；运行记录里的 `attempt` 记第几次尝试。
   被人为停止（cancelled）的不重试。
-- **通知**：按 `notify.on` 判断要不要发、按 `channels` 发到哪；内容含失败步骤（行号）与原因、是否将自动续跑。
+- **通知**：按 `notify.on` 判断要不要发、按 `channels` 发到哪；内容含失败步骤（行号）与原因、是否将自动续跑；
+  v1.11.16 起还带**整轮耗时、token 消耗、最慢步骤**（无人值守排障最先问的三个数字）。
   `webhook` 通道就是出站事件（failed / partial 由社区核心发，interrupted / ok 由专业版补发）；
   `im` 用 `AUTOMIND_IM_WEBHOOK` / `AUTOMIND_IM_PROVIDER`（与 `im_integration` 工具同一份配置）；
   `desktop` 是本机桌面通知。手动运行不发通知（有人看着）。

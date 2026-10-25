@@ -20,7 +20,7 @@
 | ③ | 机器人发消息 | 出站 | 平台 OpenAPI | 是（用 IM 就必须） | 无替代；只能收敛到白名单出口 |
 | ④ | 依赖 / 更新 | 出站 | pypi / npm / GitHub | 部署期需要，运行期不必 | 离线 wheel + 内网镜像；`updater` 可关 |
 | ⑤ | 检索 / 知识库 | 出站 | embedding / 搜索 API | 否 | 特征哈希离线 embedding（`rag/kb.py:5`、`memory/long_term.py:199`）、自建 SearXNG |
-| ⑥ | 许可证激活 | 双向 | 激活服务器 | 否 | 离线 HMAC 许可（`docs/EDITIONS.md:143`） |
+| ⑥ | 许可证激活 | 双向 | 激活服务器 | 否 | **离线 Ed25519 许可证 v2**（`AMP2-…`，客户机只带公钥、不联网验签）；发行方用 `pro/tools/issue_license.py bundle` 出 `.ampkg`，客户拖进应用内「⚡ 一键升级 / 激活」面板完成装包+激活 —— 见 `docs/COMMERCIAL_ACTIVATION.md` |
 
 **结论**：必须出网的只剩 **③（IM 出站）** 和 **①（若不用本地模型）**；
 最容易致命、也最容易消掉的是 **②** —— 一旦选了 HTTP 回调模式，
@@ -92,55 +92,89 @@
 | 接口鉴权 | `AUTOMIND_AUTH_TOKEN`；管理动作另加 `AUTOMIND_ADMIN_TOKEN` | `server.py:55`、`server.py:125` |
 | 反代 / 内网域名访问 | `AUTOMIND_TRUSTED_HOSTS=automind.corp.local`（否则 403，防 DNS 重绑定） | `core/http_guard.py:110` |
 | 模型走内网网关 | `provider=custom` + `api_base=http://relay.corp.local/v1`（仅接受合法 URL） | `core/llm.py:578`、`server_store.py:105` |
-| 机器人接入（推荐） | 长连接桥接：`integrations/feishu_bridge.py`（只做出站，不监听端口） | `integrations/feishu_bridge.py:7` |
+| 机器人接入（推荐） | 出站长连接（服务进程托管，只做出站、不监听端口）：飞书 / 钉钉 Stream / 企微智能机器人；在设置 →「🤖 机器人」里选「长连接（推荐）」 | `bots/longconn.py`、`docs/IM_BOTS.md:20` |
 | 机器人接入（回调模式） | 需 `public_base_url` + hook token，**必须**公网可达 | `bots/manager.py:55`、`server.py:325` |
 | 审批落到人 | 机器人在聊天里审批（`/work` 模式）；或出站 webhook 到本机监听器 | `bots/manager.py:19`、`core/webhooks.py:326` |
 | 出站事件到内网收集器 | `AUTOMIND_WEBHOOKS=http://127.0.0.1:8766/hook`（本机/内网直连，不走代理） | `core/webhooks.py:462` |
-| 依赖镜像 / 断网退避 | `AUTOMIND_PIP_MIRROR` / `AUTOMIND_NPM_MIRROR` / `AUTOMIND_NET_MIRROR=0` | `core/netresilience.py:207` |
-| 关掉更新检查 | `AUTOMIND_UPDATE_MIRRORS=direct` 只是省镜像；离线应直接停用检查 | `core/updater.py:108` |
-| 内网搜索 | 自建 SearXNG + `AUTOMIND_SEARCH_PROVIDER=searxng` + `AUTOMIND_SEARCH_ENDPOINT` | `tools/net_tools.py:193` |
-| 访问内网系统 | 连接器（`~/.automind/connectors/*.py`）优于 `http_request allow_private=true` | `docs/CONNECTORS.md:12`、`tools/net_tools.py:61` |
+| 依赖镜像 / 断网退避 | `AUTOMIND_PIP_MIRROR` / `AUTOMIND_NPM_MIRROR` / `AUTOMIND_NET_MIRROR=0` | `core/netresilience.py` |
+| 出网总闸 / 白名单 / 审计 | `AUTOMIND_OFFLINE=1` 或 `AUTOMIND_NETWORK_POLICY=offline\|allowlist\|open`；`AUTOMIND_EGRESS_ALLOW` / `AUTOMIND_EGRESS_ALLOW_FILE` / `AUTOMIND_EGRESS_DENY`；审计 `<数据目录>/logs/egress.log`（`AUTOMIND_EGRESS_AUDIT=0` 可关） | `core/offline.py`、`tools/net_tools.py`、`tools/browser.py` |
+| 探测目标可配置 | `AUTOMIND_PROBE_HOSTS`（公网）/ `AUTOMIND_GATEWAY_PROBE`（网关）/ `AUTOMIND_LOCAL_PROBES`（本地服务）；三态见 `net_check` | `core/netresilience.py`、`builtin_plugins/net_resilience/hooks.py` |
+| 关掉更新检查 | offline / allowlist 下 `updater.check()` 自动短路（不发请求，返回 `skipped=True` / "离线模式已跳过更新检查"） | `core/updater.py` |
+| 内网搜索 | 自建 SearXNG + `AUTOMIND_SEARCH_PROVIDER=searxng` + `AUTOMIND_SEARCH_ENDPOINT`（内网目标在出网策略里默认放行） | `tools/net_tools.py` |
+| 访问内网系统 | 连接器（`~/.automind/connectors/*.py`）优于 `http_request allow_private=true` | `docs/CONNECTORS.md:12`、`tools/net_tools.py` |
 | 数据 / 工作区 | `AUTOMIND_DATA_DIR`、`AUTOMIND_FS_ROOTS`、工作区隔离 | `core/paths.py:47`、`server.py:2032` |
-| 脱敏与留痕 | `AUTOMIND_REDACT_SECRETS=1`、`/api/audit`、`AUTOMIND_TRACE` / `AUTOMIND_REPLAY` | `server.py:87`、`core/trace.py:78` |
-| 许可（无需联网） | 离线 HMAC 许可；扩展包放 `<数据目录>/extensions/`，免 pip | `docs/EDITIONS.md:87`、`:143` |
+| 脱敏与留痕 | `AUTOMIND_REDACT_SECRETS=1`、`/api/audit`、`AUTOMIND_TRACE` / `AUTOMIND_REPLAY`；出网留痕见 `egress.log` | `server.py:87`、`core/trace.py:78`、`core/offline.py` |
+| 许可（无需联网） | **离线 Ed25519 许可证 v2**：客户机只内置验签公钥（私钥不随包），完全断网也能验签激活；旧 v1 `AMP-…`（对称 HMAC）默认拒绝。升级包 `.ampkg`（wheel + 许可证 + 清单）用 `python pro/tools/issue_license.py bundle` 生成，客户拖进应用内「⚡ 一键升级 / 激活」面板即可装包+激活；扩展包也可放 `<数据目录>/extensions/` | `docs/COMMERCIAL_ACTIVATION.md`、`docs/EDITIONS.md:85`、`pro/tools/issue_license.py` |
+| 离线安装 / 备份 / 回滚 / 验收 | `scripts\offline\install.ps1`（离线 wheel 安装 + 写策略 + 可选自启）→ `backup.ps1`（zip + SHA-256 清单 + 保留策略）→ `rollback.ps1`（先备份当前状态再原子替换）→ `verify.ps1`（一键验收自检）；全程 PS 5.1、支持 `-WhatIf` | `scripts/offline/`、`docs/OFFLINE_OPS.md` |
 
 ---
 
-## 5. 缺口清单：要改的代码
+## 5. 缺口清单：已全部实现（v1.11.14）
 
-这部分是"设计"真正的落点 —— 现有实现里有 6 处会在内网环境里**说谎或空转**：
+> **状态（v1.11.14）：本节 6 条缺口已全部落地为可验证实现。** 每条给出环境变量 /
+> 文件锚点；客户验收直接跑 `scripts\offline\verify.ps1`（见第 7 节），
+> 运维步骤见 `docs/OFFLINE_OPS.md`。
 
-1. **没有"离线总闸"**。缺一个 `AUTOMIND_OFFLINE=1`（或 `network_policy: offline|allowlist|open`）：
-   出站工具（`http_request` / `web_fetch` / `web_search` / `browser` / terminal 里的 `curl`）
-   在非白名单目标上**当场拒绝**并说明原因，而不是先超时 30 秒再报错。
+1. **离线总闸 —— 已实现（v1.11.14）**。
+   `AUTOMIND_OFFLINE=1` 等价 offline；`AUTOMIND_NETWORK_POLICY=open|allowlist|offline`
+   为显式开关（优先级：显式 policy > OFFLINE 开关 > 默认 open；非法值 fail-closed 按 offline）。
+   出站工具（`http_request` / `web_fetch` / `web_search` / `browser`）在非白名单目标上
+   **当场返回失败结果**（不发起连接、不先超时 30 秒），错误信息含"当前策略 + 怎么放行"。
+   - 实现：`automind/core/offline.py`（唯一判定出口：`policy_status` / `check_egress` /
+     `is_offline` / `is_allowlist`）；`tools/_toolkit.py`（`check_url` 叠加策略层，
+     SSRF 与出网策略两层独立）、`tools/net_tools.py`、`tools/browser.py`；
+     `core/updater.py` 在 offline / allowlist 下短路更新检查。
+   - 边界：应用层拦不住 `terminal` 里的 `curl`、连接器与 MCP —— 网络层（正向代理 /
+     防火墙 / DNS）仍需同步配置白名单，两层叠加才叫设计（与 10.2 节一致）。
 
-2. **`net_check` 在内网必然误报**。探测目标是硬编码公网（`core/netresilience.py:105`
-   的 `PROBE_HOSTS`：baidu / pypi / github / 1.1.1.1）。内网部署下它永远返回
-   "所有目标都不可达"，进而触发"等待网络恢复 60s × 3 次重试"（`netresilience.py:240`），
-   把**普通失败误判成网络抖动**，白烧预算。
-   → 改造：`PROBE_HOSTS` 支持环境变量覆盖；网关/离线模式下改用 relay 主机做探测，
-   并让 `net_check` 的措辞区分"公网不可达（预期）"与"网关不可达（故障）"。
+2. **`net_check` 误报 —— 已实现（v1.11.14）**。
+   探测目标不再硬编码公网：`AUTOMIND_PROBE_HOSTS`（格式 `host:port,host:port`）覆盖公网
+   探测，`AUTOMIND_GATEWAY_PROBE`（可选）探测模型网关 / relay，`AUTOMIND_LOCAL_PROBES`
+   （可选）探测本地服务。结果三态：`online` / `expected_offline`（离线策略下公网不可达
+   **是预期**）/ `degraded`（网关或本地服务不可达 = 真故障）。
+   离线模式下 `network_up()` **不发起公网探测**、立即返回 expected_offline；
+   `ResilientDispatch` 不再"等待网络恢复 60s × 3 次"空转。
+   - 实现：`automind/core/netresilience.py`（`probe_hosts` / `gateway_probe` /
+     `local_probes` / `classify_state` / `network_state` / `network_up`）、
+     `automind/builtin_plugins/net_resilience/hooks.py`（net_check 三段式 + `policy` 字段）。
 
-3. **只有"防外泄内网"，没有"限制出网白名单"**。`tools/_toolkit.py:287` 的
-   `check_url` 默认拒绝私网/回环/云元数据（防 SSRF），这是**入向**的护栏；
-   内网部署真正需要的是**出向**白名单 —— 否则模型被提示词注入后可以把内网数据
-   发到任意公网地址。两种模式必须显式二选一，并把重定向逐跳校验（`tools/net_tools.py:82`）
-   的思路复用到白名单判定上（重定向、代理、DNS 都是绕过路径）。
+3. **出向白名单 + 出网审计 —— 已实现（v1.11.14）**。
+   `AUTOMIND_EGRESS_ALLOW`（逗号 / 分号分隔；支持 `host`、`host:port`、`*.example.com`
+   通配、IP / CIDR）可叠加 `AUTOMIND_EGRESS_ALLOW_FILE`（每行一条，# 注释；
+   不分大小写），`AUTOMIND_EGRESS_DENY` 为可选拒绝列表（优先级最高）。
+   与 SSRF 防护**两层独立**：`allow_private=true` 只放行私网校验，**不会**顺手关掉
+   出网白名单；反过来白名单命中也不能绕过私网防护。重定向与搜索后端逐跳校验。
+   审计：每次放行 / 拒绝写 `<数据目录>/logs/egress.log`（JSONL，
+   `AUTOMIND_EGRESS_AUDIT=0` 可关），只记 `scheme://host:port/path` 前 200 字符，
+   **query 与 userinfo 不落盘**（避免把 `?api_key=…` 抄进日志）。
+   - 实现：`automind/core/offline.py`（`check_egress` / `sanitize_target` / 审计）、
+     `tools/net_tools.py`（含每一跳重定向）、`tools/browser.py`（WebFetch 补上 SSRF +
+     策略；Browser 导航接入策略）、`tools/_toolkit.py`。
+   - 边界：白名单是**协作层**，强制层仍在代理 / 防火墙（同上）。
 
-4. **长连接还只是脚本**。`bots/` 里四个渠道都是回调形态（`bots/manager.py:5`），
-   免公网的接入方式只存在于 `integrations/feishu_bridge.py`（仓库外挂脚本）。
-   建议把"出站长连接渠道"提升为一等公民：`channels: feishu_ws / dingtalk_stream`，
-   与现有 `Incoming` 抽象复用，审批、会话上下文、进度节流全部继承
-   （现在桥接脚本走 `POST /api/run`，会掉进 `docs/FEISHU.md:243` 的审批陷阱）。
+4. **长连接渠道 —— 已实现（v1.11.7 起，v1.11.14 文档同步）**。
+   免公网入站的一等公民渠道已经落地：`automind/bots/longconn.py` 由服务进程托管出站
+   长连接（飞书 / 钉钉 Stream / 企微智能机器人），断线按 1s→60s 指数退避重连，
+   不监听任何端口；回调渠道继续保留。配置与排障见 `docs/IM_BOTS.md`。
+   - 实现：`automind/bots/longconn.py`、`automind/bots/manager.py`、
+     `automind/bots/channels.py`。
 
-5. **运行期仍会主动出网**，即使没人用：更新检查（`core/updater.py:95`，
-   失败时还会"系统代理 → 直连"各试一次）、Monaco CDN（已优雅回退，
-   `static/js/editor.js:2`）、MCP 的 `npx` 首次拉包。
-   → 离线模式下一律短路；Monaco / MCP 依赖随包内置或预置 vendor 目录。
+5. **运行期主动出网已收敛 —— 已实现（v1.11.14）**。
+   更新检查在 offline / allowlist 下**不发任何请求**（`updater.check()` 返回
+   `skipped=True`，理由"离线模式已跳过更新检查"；`apply_update()` 同样短路）；
+   Monaco 编辑器已有本地回退。
+   MCP 的 `npx` 首次拉包属于第三方进程行为，应用层无法可靠拦截 —— 离线交付时请把
+   MCP server 依赖预置到内网镜像 / vendor 目录，并在网络层阻断。这是**已知边界**，
+   不要把它当成"应用层已解决"。
+   - 实现：`automind/core/updater.py`（`check` / `apply_update` 短路）。
 
-6. **内网链路需要"可诊断"**。现在缺一份"我为什么连不上"的统一回答：
-   建议 `net_check` 输出增加三段式判定 —— 本地服务 / 网关 / 公网，
-   并把它接进 `/api/health`，让运维一条命令看清断在哪。
+6. **统一诊断 —— 已实现（v1.11.14）**。
+   `net_check` 输出三段式（本地服务 / 网关 / 公网）+ 三态结论 + `policy` 字段，
+   保留逐目标 DNS / 可达明细；`/api/health` 新增 `network_policy`（当前策略摘要）与
+   `network`（三态快照；缓存 + 后台刷新，不拖慢探针）。运维一条命令看清断在哪。
+   - 实现：`automind/core/netresilience.py`（`network_state` /
+     `network_state_cached`）、`automind/server.py`（`/api/health`）、
+     `automind/builtin_plugins/net_resilience/hooks.py`（net_check 输出）。
 
 ---
 
@@ -170,7 +204,10 @@
 | 降级正确 | 关掉 relay | 界面/机器人回"网关不可达"，而非"任务失败/工具坏了" |
 | 长连接韧性 | 网关重启 / 弱网 30 秒 | 桥接自动重连，消息不丢（去重仍生效） |
 | 入站为零 | 从公网扫内网机端口 | 无监听、无映射、无隧道 |
-| 诊断一致 | 离线状态下调用 `net_check` | 结论是"公网不可达（预期）"，不诱导模型反复重试 |
+| 诊断一致 | 离线状态下调用 `net_check` | 结论是"公网不可达（预期，不是故障）"，不诱导模型反复重试；输出含 `policy` 字段 |
+| 策略生效（机器可读） | `python scripts\offline\smoke_offline.py --json`（`verify.ps1` 内部调用） | `policy.mode=offline`、`network.state=expected_offline`、`updater.skipped=true`、公网出网被拒绝 |
+| **一键验收** | `powershell -NoProfile -ExecutionPolicy Bypass -File scripts\offline\verify.ps1 -ExpectMode offline` | 全部 PASS、退出码 0（失败逐项给修复建议）；逐条检查项见 `docs/OFFLINE_OPS.md` 第 9 节 |
+| 备份可回滚 | `backup.ps1` → 修改数据 → `rollback.ps1 -Yes` | SHA-256 校验通过、数据恢复、回滚前状态另存一份 |
 
 ---
 
@@ -178,10 +215,11 @@
 
 - **P0（约 1 天，纯配置）**：回环绑定 + 双令牌 + 关更新检查 + 离线 wheel/依赖预置。
   目标：内网能跑、不误报、不被同网段驱动。
-- **P1（3–5 天）**：`api_base` 指内网网关（或本地 Ollama）+ 飞书长连接桥接 + 聊天内审批。
-  目标：机器人在无入站条件下真正可用。
-- **P2（1–2 周）**：`AUTOMIND_OFFLINE` 总闸 + 出网白名单 + `net_resilience` 探测改造 + 出网审计。
-  目标：出网受控且可证明。
+- **P1（已完成，v1.11.7 起）**：`api_base` 指内网网关（或本地 Ollama）+ 出站长连接渠道
+  （`automind/bots/longconn.py`）+ 聊天内审批。目标：机器人在无入站条件下真正可用。
+- **P2（已完成，v1.11.14）**：`AUTOMIND_OFFLINE` 总闸 + 出网白名单 + `net_resilience`
+  探测改造（三态）+ 出网审计 + 安装/备份/回滚/验收脚本（`scripts/offline/`与
+  `docs/OFFLINE_OPS.md`）。目标：出网受控且可证明。
 - **P3**：DMZ relay（OpenAI 兼容 + 长连接托管 + 队列）+ 多租户配额。
   目标：从"一台机器"扩到"一个机房"。
 

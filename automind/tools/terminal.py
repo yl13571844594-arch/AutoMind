@@ -13,6 +13,7 @@ from typing import Any
 
 from automind.core.logging import get_logger
 from automind.core.types import PermissionTier, ToolResult
+from automind.tools._toolkit import live_execution_config
 from automind.tools.base import AbstractTool
 
 logger = get_logger("automind.tools.terminal")
@@ -284,6 +285,32 @@ class TerminalTool(AbstractTool):
         self.background_enabled = background_enabled
         self._last_result: ToolResult | None = None
 
+    def apply_execution_config(self, ex: Any) -> None:
+        """v1.11.16：把「执行治理」里的终端参数实时下发到本实例。
+
+        工具实例在 Agent 构造时创建、注册表在会话克隆之间共享，所以超时与
+        后台通道不能只在 ``__init__`` 读一次 —— 否则设置里改完显示"已保存"，
+        实际要到重启/重建 Agent 才生效。每次执行前调用本方法（见 ``execute``），
+        语义是"下一次终端调用生效"，对正在等待返回的命令不追溯。
+        """
+        try:
+            timeout = float(getattr(ex, "tool_timeout_seconds", self.timeout))
+        except (TypeError, ValueError):
+            timeout = self.timeout
+        try:
+            max_timeout = float(getattr(ex, "tool_timeout_max_seconds", self.max_timeout))
+        except (TypeError, ValueError):
+            max_timeout = self.max_timeout
+        if timeout > 0:
+            self.timeout = timeout
+        self.max_timeout = max(self.timeout, max_timeout if max_timeout > 0
+                               else self.max_timeout)
+        try:
+            self.background_enabled = bool(getattr(
+                ex, "terminal_background_enabled", self.background_enabled))
+        except Exception:                       # pragma: no cover - 防御性
+            pass
+
     # ── 超时解释 ────────────────────────────────────────────
 
     def _effective_timeout(self, requested: Any) -> tuple[float, str]:
@@ -469,6 +496,10 @@ class TerminalTool(AbstractTool):
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         command = kwargs["command"]
+        # v1.11.16：按当前任务的实时执行配置刷新超时/后台通道（改完下次调用即生效）
+        live_ex = live_execution_config()
+        if live_ex is not None:
+            self.apply_execution_config(live_ex)
         workdir = self._session_workdir(kwargs.get("workdir"))
         timeout, timeout_note = self._effective_timeout(kwargs.get("timeout"))
         want_background = bool(kwargs.get("background", False))
@@ -724,21 +755,25 @@ class TerminalBackgroundTool(AbstractTool):
 
     name = "terminal_background"
     description = (
-        "Manage background shell tasks started with terminal(background=true). "
+        "Manage background tasks started with terminal(background=true) or "
+        "pwsh(background=true) — both share this single entry point. "
         "action='poll' returns status and output tail for a task_id; "
-        "'list' lists all tasks; 'output' returns the full captured output; "
-        "'kill' terminates a task. Poll instead of re-running long commands."
+        "'list' lists all tasks (kind=shell|pwsh); 'output' returns the full "
+        "captured output; 'kill' terminates a task. Poll instead of re-running "
+        "long commands."
     )
     parameters = {
         "type": "object",
         "properties": {
             "action": {
                 "type": "string",
+                "enum": ["poll", "list", "output", "kill"],
                 "description": "poll (default) | list | output | kill",
             },
             "task_id": {
                 "type": "string",
-                "description": "Task id returned by terminal(background=true).",
+                "description": ("Task id returned by terminal(background=true) "
+                                "or pwsh(background=true)."),
             },
             "tail_chars": {
                 "type": "number",
@@ -750,6 +785,10 @@ class TerminalBackgroundTool(AbstractTool):
     permission_tier = PermissionTier.SAFE
     risk_score = 5
 
+    #: 合法动作 —— 写错时明确报错，而不是静默按 poll 处理（模型会以为 kill
+    #: 成功了，或者反过来以为自己查的是全量输出）。
+    ACTIONS: tuple[str, ...] = ("poll", "list", "output", "kill")
+
     def __init__(self) -> None:
         self._last_result: ToolResult | None = None
 
@@ -757,6 +796,13 @@ class TerminalBackgroundTool(AbstractTool):
         from automind.tools import background as bg
 
         action = str(kwargs.get("action") or "poll").lower()
+        if action not in self.ACTIONS:
+            return ToolResult(
+                tool_name=self.name, success=False,
+                error=(f"未知的 action：{action!r}。允许的动作："
+                       f"{' / '.join(self.ACTIONS)}。"
+                       "取结果用 poll 或 output，终止用 kill，查看全部用 list。"),
+            )
         task_id = str(kwargs.get("task_id") or "")
         try:
             tail = int(kwargs.get("tail_chars") or 2000)
@@ -774,7 +820,8 @@ class TerminalBackgroundTool(AbstractTool):
         if not task_id:
             return ToolResult(
                 tool_name=self.name, success=False,
-                error="缺少 task_id。请先 terminal(background=true) 启动命令，"
+                error="缺少 task_id。请先 terminal(background=true) 或 "
+                      "pwsh(background=true) 启动命令，"
                       "或使用 action='list' 查看现有后台任务。",
             )
 
@@ -783,7 +830,8 @@ class TerminalBackgroundTool(AbstractTool):
             return ToolResult(
                 tool_name=self.name, success=False,
                 error=f"后台任务不存在或已被清理：{task_id}。"
-                      f"请用 action='list' 确认现有任务；若已丢失，需要重新执行该命令。",
+                      f"请用 action='list' 确认现有任务（terminal 与 pwsh 的后台任务"
+                      f"都在同一个列表里）；若已丢失，需要重新执行该命令。",
             )
 
         if action == "kill":

@@ -57,6 +57,21 @@ const TABS: { key: RightTab; icon: string; label: string; width: number }[] = [
   { key: 'code', icon: '📄', label: '代码', width: 560 },
 ];
 
+/**
+ * v1.11.14：按后缀决定「点一下怎么打开」。
+ * .md/.markdown/.mdx → 📄 文档视图（渲染排版）；HTML/图片 → 安全预览；其它 → 代码标签。
+ * 与 Bubbles 交付卡片、摘要产物保持同一套判定，避免同一文件在不同入口打开方式不一致。
+ */
+function openArtifactPath(path: string) {
+  if (/\.(?:md|markdown|mdx)$/i.test(path)) {
+    useUi.getState().openDoc({ path, label: path });
+  } else if (/\.(?:html?|svg|png|jpe?g|gif|webp|bmp|ico)$/i.test(path)) {
+    useUi.getState().openPreview({ url: `/api/preview/file?path=${encodeURIComponent(path)}`, label: path });
+  } else {
+    usePanel.getState().openInCode(path);
+  }
+}
+
 // v1.11.11 待办/子智能体的状态图标与中文映射见 panelLabels.ts（摘要标签共用一份）
 
 export default function RightPanel() {
@@ -351,9 +366,13 @@ function ObservePanel() {
               <>
                 {dedupChanges.map((c) => (
                   <div key={c.path} style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '3px 0', fontSize: '.8em' }}>
-                    <span title={c.path} style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    <a
+                      title={`打开 ${c.path}（.md 用文档视图）`}
+                      onClick={() => openArtifactPath(c.path)}
+                      style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', cursor: 'pointer', color: 'var(--text2)' }}
+                    >
                       {c.created ? '✨' : '✏️'} {c.path.split(/[\\/]/).pop()}
-                    </span>
+                    </a>
                     <span className="hint-text">{c.time || ''}</span>
                     <a style={{ cursor: 'pointer' }} title="撤销该文件的全部改动" onClick={() => rollback(c.path)}>↩</a>
                   </div>

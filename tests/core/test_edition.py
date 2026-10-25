@@ -36,6 +36,37 @@ class TestCommunityDefaults:
         assert edition.license_info() is None
 
 
+class TestUpgradeHint:
+    """v1.11.17：版本已够但实现没加载时，提示不能再让用户"安装 automind-pro 并配许可证"。
+
+    此前 upgrade_hint() 只看特性所需版本，不看当前版本：Pro 许可证下
+    semantic_cache 因扩展包缺注入而 403 时，文案是"当前为专业版。请安装
+    automind-pro 并配置有效许可证…"—— 用户明明已经是专业版，自相矛盾。
+    """
+
+    def test_below_required_version_keeps_upgrade_hint(self):
+        # 社区版 < 专业版：原有的升级引导保持（既有断言见 TestCommunityDefaults）
+        hint = edition.upgrade_hint("semantic_cache")
+        assert "专业版" in hint and "请安装 automind-pro 并配置有效许可证" in hint
+
+    def test_licensed_but_missing_impl_points_at_extension_package(self, monkeypatch):
+        # 模拟"已激活专业版、但扩展包没注入 semantic_cache"（旧扩展包 / 热激活未完成）
+        monkeypatch.setitem(edition._state, "edition", "pro")
+        monkeypatch.setitem(edition._state, "loaded", True)
+        hint = edition.upgrade_hint("semantic_cache")
+        assert "已授权" in hint
+        assert "扩展包未注入该特性" in hint
+        assert "同版本" in hint and "重启服务" in hint
+        assert "请安装 automind-pro 并配置有效许可证" not in hint
+
+    def test_enterprise_with_missing_pro_feature_also_points_at_package(self, monkeypatch):
+        # 企业版 ≥ 专业版：企业版下缺一个专业版特性同样属于"实现未加载"
+        monkeypatch.setitem(edition._state, "edition", "enterprise")
+        monkeypatch.setitem(edition._state, "loaded", True)
+        hint = edition.upgrade_hint("model_router")
+        assert "已授权" in hint and "扩展包未注入该特性" in hint
+
+
 class TestExtensionAPI:
     def test_register_and_query(self):
         api = edition.ExtensionAPI()

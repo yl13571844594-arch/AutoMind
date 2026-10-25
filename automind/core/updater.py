@@ -248,7 +248,28 @@ def _fetch_sha256(assets: list[dict], filename: str) -> str:
 
 
 def check(force: bool = False) -> dict:
-    """检查最新版本（带 6h 缓存）。永不抛异常，失败返回 error 字段。"""
+    """检查最新版本（带 6h 缓存）。永不抛异常，失败返回 error 字段。
+
+    v1.11.14：offline / allowlist 模式下**不发任何请求**，直接返回
+    ``skipped=True`` 与"离线模式已跳过更新检查"——否则内网机器每次启动都会
+    先走一次"系统代理 → 直连"各试一遍（``_open`` 的双通道策略），白等十几秒。
+    """
+    from automind.core import offline
+
+    policy = offline.policy_status()
+    base = {"mode": "desktop" if _is_frozen() else "pip",
+            "current": __version__, "can_auto_install": can_auto_install(),
+            "cached": False, "policy": policy}
+    if policy["mode"] in (offline.MODE_OFFLINE, offline.MODE_ALLOWLIST):
+        reason = ("离线模式已跳过更新检查（AUTOMIND_NETWORK_POLICY=offline / "
+                  "AUTOMIND_OFFLINE=1）：未发起任何请求"
+                  if policy["mode"] == offline.MODE_OFFLINE
+                  else "白名单模式已跳过更新检查：发版地址不在出网白名单内，"
+                       "升级请使用离线安装包")
+        logger.info("update_check_skipped", mode=policy["mode"])
+        return {**base, "available": False, "latest": "", "error": "",
+                "notes": reason, "skip_reason": reason, "skipped": True,
+                "checked_at": time.time()}
     from automind.core.db import get_db
     db = get_db()
     cached = db.kv_get("update_check", {})
@@ -296,7 +317,8 @@ def check(force: bool = False) -> dict:
         result = {"available": False, "latest": "", "error": f"检查失败：{e}",
                   "checked_at": time.time()}
     return {**result, "cached": False, "mode": "desktop" if _is_frozen() else "pip",
-            "current": __version__, "can_auto_install": can_auto_install()}
+            "current": __version__, "can_auto_install": can_auto_install(),
+            "policy": offline.policy_status()}
 
 
 def check_async(force: bool = True) -> None:
@@ -376,6 +398,12 @@ def _set(status: str, progress: int = 0, error: str = "", **extra) -> None:
 
 def apply_update() -> dict:
     """启动后台升级流程；立即返回，前端轮询 state()。"""
+    from automind.core import offline
+
+    if offline.policy_mode() in (offline.MODE_OFFLINE, offline.MODE_ALLOWLIST):
+        return {"error": "当前为离线 / 白名单模式，已跳过更新检查与下载；"
+                         "请使用离线安装包升级（参见 docs/OFFLINE_OPS.md）",
+                "skipped": True, "policy": offline.policy_status()}
     if not _is_frozen():
         return {"error": "当前为 pip/源码运行模式，请使用 pip install -U automind-agent 升级"}
     if not can_auto_install():

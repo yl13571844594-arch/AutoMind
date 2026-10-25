@@ -631,10 +631,58 @@ const GOVERNANCE_LABELS: Record<string, [string, string]> = {
   isolate_workspace: ['🗂 会话独立工作目录', '每个会话一份工作副本，从根上消除跨会话覆盖；会改变产物落点，默认关闭'],
 };
 
+// v1.11.16：执行治理参数的**生效时机**（与后端 /api/config/autopilot 返回的
+// effective 字段一致；旧服务端没有该字段时用这份兜底）。诚实边界：
+// 「即时生效」= 下一次调度/调用/事件即按新值，正在执行的那一步不追溯；
+// 「下次任务生效」= 执行器按任务构造，正在跑的任务用旧值跑完。
+const EFFECTIVE_FALLBACK: Record<string, [string, string]> = {
+  // [时机标签, 说明]
+  auto_review: ['下次任务生效', '收尾阶段读取；已进入收尾的任务不追溯'],
+  auto_verify: ['下次任务生效', '收尾阶段读取；已进入收尾的任务不追溯'],
+  auto_test: ['下次任务生效', 'TDD 内环与收尾测试按任务读取'],
+  parallel_execution: ['即时生效', '下一次调度生效；当前批次不追溯'],
+  subtask_cache: ['即时生效', '当前批次已缓存的结果不受影响'],
+  isolate_workspace: ['下次任务生效', '任务开始时准备工作区'],
+  terminal_background_enabled: ['下次调用生效', '下一次终端调用即按新值'],
+  release_slot_on_approval_wait: ['下次审批生效', '下一次审批等待时读取'],
+  trace_enabled: ['即时生效', '下一条轨迹事件起生效；已写文件保留'],
+  tool_timeout_seconds: ['下次调用生效', '下一次终端调用即按新值'],
+  tool_timeout_max_seconds: ['下次调用生效', '下一次终端调用即按新值'],
+  approval_timeout_seconds: ['下次审批生效', '下一次审批等待时读取'],
+  tool_output_max_chars: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  auto_verify_max_rounds: ['下次任务生效', '收尾验收时读取；已进入收尾的任务不追溯'],
+  trace_max_runs: ['即时生效', '下一次轮转按新上限淘汰'],
+  goal_timeout_seconds: ['即时生效', '下一次调度生效；已开始的步骤不追溯'],
+  react_tool_timeout_seconds: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  max_task_seconds: ['下次任务生效', '任务开始时计算墙钟预算'],
+  react_tool_budget: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  react_repeat_action_threshold: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  react_no_progress_limit: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  task_token_budget: ['下次任务生效', '任务开始时按新预算重置窗口'],
+  max_iterations: ['下次任务生效', 'ReAct 执行器按任务构造'],
+  budget_auto_continue: ['即时生效', '下一个预算窗口即按新值'],
+  approval_timeout_action: ['下次审批生效', '下一次审批超时处置即按新值'],
+  write_conflict_policy: ['下次写入生效', '下一次文件写入即按新策略'],
+};
+
+// 单个参数的生效时机标签（优先用服务端返回的 effective，保证文案单一来源）
+function EffTag({ k, effective }: { k: string; effective?: any }) {
+  const info = effective?.[k];
+  const fallback = EFFECTIVE_FALLBACK[k] || ['下次任务生效', ''];
+  const label = info?.label || fallback[0];
+  const note = info?.note || fallback[1] || '该参数不是对所有正在运行的步骤立即生效';
+  return (
+    <span className="hint-text" title={note}
+      style={{ fontSize: '.72em', marginLeft: 6, whiteSpace: 'nowrap', fontWeight: 400 }}>
+      · {label}
+    </span>
+  );
+}
+
 // 数值型执行参数（超时 / 输出上限）：排障时不必重建 Agent 即可调整
 const NUMERIC_KNOBS: Array<[string, string, number, number, number, string]> = [
-  ['tool_timeout_seconds', '终端默认超时(秒)', 30, 3600, 10, '模型未显式指定时的默认值；安装/编译类命令建议 600+'],
-  ['tool_timeout_max_seconds', '终端超时上限(秒)', 60, 7200, 60, '模型可通过 timeout 参数申请的上限'],
+  ['tool_timeout_seconds', '终端默认超时(秒)', 1, 3600, 10, '模型未显式指定时的默认值；安装/编译类命令建议 600+。工具执行前读实时配置，改完下一次命令即生效'],
+  ['tool_timeout_max_seconds', '终端超时上限(秒)', 1, 7200, 60, '模型可通过 timeout 参数申请的上限'],
   ['tool_output_max_chars', '单条工具输出上限(字符)', 0, 200000, 1000, '0 = 不限制。这是 token 成本与上下文超载的最大单一来源'],
   ['approval_timeout_seconds', '审批等待上限(秒)', 30, 3600, 30, '超时按下方策略处置，并明确告知'],
   ['react_tool_timeout_seconds', '工具单步超时(秒)', 0, 3600, 30,
@@ -665,14 +713,17 @@ const NUMERIC_KNOBS: Array<[string, string, number, number, number, string]> = [
   ['budget_auto_continue', '预算窗口自动续开次数', 0, 100, 1,
     '长任务到预算上限不再中断：压缩上下文后开新窗口接着跑。总花费上限 ≈ 预算 ×（1 + 该值）；'
     + '0 = 关闭（用尽即收尾，1.10 及之前的行为）'],
+  ['trace_max_runs', '每会话保留轨迹数', 1, 500, 5,
+    '执行证据（JSONL）每个会话保留多少个 run，超出淘汰最旧的；改完下一次轮转即生效'],
 ];
 
 // 数值输入：本地编辑、失焦/回车才提交（并夹到合法区间）。
 // v1.7.6 修复：此前每按一个键就 POST 一次 —— 输入 600 会依次提交 6、60、600，
 // 中间值低于下限时服务端照单全收，瞬间把超时设成 6 秒。
-function NumKnob({ k, label, min, max, step, tip, value, onCommit }: {
+function NumKnob({ k, label, min, max, step, tip, value, eff, effNote, onCommit }: {
   k: string; label: string; min: number; max: number; step: number; tip: string;
-  value: number | undefined; onCommit: (k: string, v: number) => void;
+  value: number | undefined; eff?: string; effNote?: string;
+  onCommit: (k: string, v: number) => void;
 }) {
   const [v, setV] = useState<number | null>(value ?? null);
   useEffect(() => { setV(value ?? null); }, [value]);
@@ -690,6 +741,9 @@ function NumKnob({ k, label, min, max, step, tip, value, onCommit }: {
       <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
         <Text style={{ fontSize: '.82em' }}>{label}</Text>
         <Tooltip title={tip}><span className="hint-text" style={{ cursor: 'help', fontSize: '.8em' }}>ⓘ</span></Tooltip>
+        <Tooltip title={effNote || tip}>
+          <span className="hint-text" style={{ fontSize: '.72em', marginLeft: 4, whiteSpace: 'nowrap' }}>· {eff || '下次任务生效'}</span>
+        </Tooltip>
       </div>
       <InputNumber style={{ width: '100%' }} min={min} max={max} step={step}
         value={v} placeholder={value === undefined ? '（读取中）' : ''}
@@ -831,11 +885,13 @@ function GeneralModal() {
 
         <Divider style={{ margin: 0 }} />
 
-        <Section icon="🚀" title="自主任务闭环" desc="任务完成后自动 多Agent审查 → Loop 语义验收 → 未达标带反馈自动修复（工作 / 编程模式，默认全开）">
+        <Section icon="🚀" title="自主任务闭环" desc="任务完成后自动 多Agent审查 → Loop 语义验收 → 未达标带反馈自动修复（工作 / 编程模式，默认全开）。标签后标注的是生效时机：收尾阶段读取，对进行中的任务不追溯">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
             {Object.entries(AUTOPILOT_LABELS).map(([k, [label, tip]]) => (
               <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={(e) => patchAutopilot(
-                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>{label}</Checkbox>
+                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>
+                {label}<EffTag k={k} effective={autopilot.effective} />
+              </Checkbox>
             ))}
           </div>
         </Section>
@@ -848,22 +904,31 @@ function GeneralModal() {
 
         <Divider style={{ margin: 0 }} />
 
-        <Section icon="🛡" title="执行治理" desc="超时 / 上下文体积 / 并发写冲突 / 审批等待 —— 这些是「看不见的损失」最常发生的地方">
+        <Section icon="🛡" title="执行治理"
+          desc="超时 / 上下文体积 / 并发写冲突 / 审批等待 —— 这些是「看不见的损失」最常发生的地方。改动即时保存；每个参数的实际生效时机见其标签（例如「下次任务生效」表示正在跑的任务仍用旧值跑完）">
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '6px 14px' }}>
             {Object.entries(GOVERNANCE_LABELS).map(([k, [label, tip]]) => (
               <Checkbox key={k} checked={!!autopilot[k]} title={tip} onChange={(e) => patchAutopilot(
-                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>{label}</Checkbox>
+                { [k]: e.target.checked }, `${label} 已${e.target.checked ? '开启' : '关闭'}`)}>
+                {label}<EffTag k={k} effective={autopilot.effective} />
+              </Checkbox>
             ))}
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px 14px', marginTop: 12 }}>
-            {NUMERIC_KNOBS.map(([k, label, min, max, step, tip]) => (
-              <NumKnob key={k} k={k} label={label} min={min} max={max} step={step} tip={tip}
-                value={typeof autopilot[k] === 'number' ? autopilot[k] : undefined}
-                onCommit={(key, v) => patchAutopilot({ [key]: v }, `${label} → ${v}`)} />
-            ))}
+            {NUMERIC_KNOBS.map(([k, label, min, max, step, tip]) => {
+              const effInfo = autopilot.effective?.[k];
+              const fallback = EFFECTIVE_FALLBACK[k] || ['下次任务生效', ''];
+              return (
+                <NumKnob key={k} k={k} label={label} min={min} max={max} step={step} tip={tip}
+                  eff={effInfo?.label || fallback[0]} effNote={effInfo?.note || fallback[1]}
+                  value={typeof autopilot[k] === 'number' ? autopilot[k] : undefined}
+                  onCommit={(key, v) => patchAutopilot({ [key]: v }, `${label} → ${v}（${effInfo?.label || fallback[0]}）`)} />
+              );
+            })}
             <div title="超时后如何处置：自动拒绝更安全（fail-closed）；自动批准只适合完全可信的环境">
-              <Text style={{ fontSize: '.82em' }}>审批超时处置</Text>
+              <Text style={{ fontSize: '.82em' }}>审批超时处置
+                <EffTag k="approval_timeout_action" effective={autopilot.effective} /></Text>
               <Select style={{ width: '100%' }} value={autopilot.approval_timeout_action || 'reject'}
                 onChange={(v) => patchAutopilot({ approval_timeout_action: v },
                   `审批超时改为「${v === 'approve' ? '自动批准' : '自动拒绝'}」`)}
@@ -873,7 +938,8 @@ function GeneralModal() {
                 ]} />
             </div>
             <div title="并发写冲突策略：warn 仍写入但明确提示；block 直接拒绝并回显当前内容">
-              <Text style={{ fontSize: '.82em' }}>并发写冲突策略</Text>
+              <Text style={{ fontSize: '.82em' }}>并发写冲突策略
+                <EffTag k="write_conflict_policy" effective={autopilot.effective} /></Text>
               <Select style={{ width: '100%' }} value={autopilot.write_conflict_policy || 'warn'}
                 onChange={(v) => patchAutopilot({ write_conflict_policy: v }, `并发写冲突策略：${v}`)}
                 options={[
@@ -892,7 +958,7 @@ function GeneralModal() {
         <Divider style={{ margin: 0 }} />
 
         <Space style={{ justifyContent: 'space-between', width: '100%' }}>
-          <span className="hint-text">所有设置改动即时保存并同步到正在使用的会话</span>
+          <span className="hint-text">所有设置改动即时保存；生效时机以各参数标签为准（「下次任务生效」对进行中的任务不追溯）</span>
           <Button type="primary" onClick={close}>完成</Button>
         </Space>
       </Space>

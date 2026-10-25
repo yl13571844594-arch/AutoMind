@@ -230,7 +230,7 @@ export default function HistoryView() {
             <Card size="small" style={{ maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap', fontSize: '.88em' }}>{detail.task || ''}</Card>
             <Text strong style={{ display: 'block', marginTop: 10 }}>完整产出（可复制回收好代码）</Text>
             <Card size="small" style={{ maxHeight: 340, overflowY: 'auto', fontSize: '.86em' }}>
-              <div id="hist-output" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.output || '（无输出）') }} />
+              <div id="hist-output" className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.output || '（无输出）') }} />
             </Card>
           </>
         )}

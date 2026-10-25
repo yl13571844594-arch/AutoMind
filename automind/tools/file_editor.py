@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import os
 import time
 from pathlib import Path
 from typing import Any
@@ -270,10 +271,15 @@ class _RootGuard:
 
 
 def _write_guard() -> Any:
-    """构造本次写入的冲突守卫（会话身份 + 策略均来自 contextvar/配置）。
+    """构造本次写入的冲突守卫（会话身份 + 策略均来自 contextvar/实时配置）。
 
     会话身份走 contextvar 而不是实例属性：工具注册表在会话克隆之间是**共享**
     的，把 session 挂到工具实例上会被并发会话互相覆盖。
+
+    v1.11.16：策略改为读**当前任务绑定 Agent 的实时 ExecutionConfig**。此前
+    这里 ``ExecutionConfig()`` 新造一份出厂默认配置 —— 用户在「设置 → 执行
+    治理」里把 write_conflict_policy 改成 block，实际写入仍然按 warn 放行
+    （"保存了但不生效"）。现在下一次文件写入即按新策略判定。
     """
     from automind.tools.write_guard import WriteGuard
 
@@ -284,12 +290,23 @@ def _write_guard() -> Any:
     except Exception:
         sid = ""
     policy = "warn"
+    live = None
     try:
-        from automind.core.config import ExecutionConfig
+        from automind.tools._toolkit import live_execution_config
 
-        policy = ExecutionConfig().write_conflict_policy
-    except Exception:
-        pass
+        live = live_execution_config()
+    except Exception:                       # pragma: no cover - 防御性
+        live = None
+    candidate = str(getattr(live, "write_conflict_policy", "") or "")
+    if candidate in ("off", "warn", "block"):
+        policy = candidate
+    else:
+        try:
+            from automind.core.config import ExecutionConfig
+
+            policy = ExecutionConfig().write_conflict_policy
+        except Exception:
+            pass
     return WriteGuard(session=sid, policy=policy)
 
 
@@ -465,21 +482,32 @@ class FileWriteTool(AbstractTool):
         · 可选 ``expected_hash``：声明"我改的是我读到的那一版"（``file_read``
           会返回 ``content_hash``），不匹配即失败并附当前内容指纹，
           让模型基于真实状态重做。
+
+    写入即校验（Token 治理）：
+        ``write_text`` 不抛异常只代表"写调用完成"，磁盘被占用/编码被平台换行
+        翻译/并发覆盖都可能让落盘内容与内存里的 content 不一致。模型对此不
+        确定时会再开一次 file_read / terminal 复核 —— 每一步都要重发全量上下文，
+        这正是"写一个中文文件"这类简单任务 token 超限的主因。因此成功后立刻
+        从磁盘回读，把 size_bytes / encoding / readback_matches / verified /
+        preview 放进回执，并明确告诉模型"不必再复核"，让任务一次调用即收尾。
     """
 
     name = "file_write"
     description = (
-        "Write content to a file, creating or overwriting it. "
-        "When overwriting a file another session may have changed, pass "
-        "expected_hash (from file_read's content_hash) to guarantee you are "
-        "not clobbering concurrent edits."
+        "Write content to a file, creating or overwriting it. Unicode/Chinese "
+        "file names and content are supported natively (UTF-8 by default; pass "
+        "encoding only for legacy files). The success receipt is verified by "
+        "reading the file back from disk (verified=true / readback_matches / "
+        "size_bytes / encoding / preview), so no extra file_read or terminal "
+        "check is needed. Pass expected_hash (from file_read) when overwriting "
+        "a file another session may have changed."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to write. Relative to the project root (e.g. `src/app.py`); an absolute path inside the project also works."},
-            "content": {"type": "string", "description": "Content to write."},
-            "encoding": {"type": "string", "description": "File encoding (default: utf-8)."},
+            "path": {"type": "string", "description": "Path to the file to write (Unicode/Chinese names such as `备注.txt` are fine). Relative to the project root (e.g. `src/app.py`); an absolute path inside the project also works."},
+            "content": {"type": "string", "description": "Content to write (Unicode/Chinese text is fine; UTF-8 by default)."},
+            "encoding": {"type": "string", "description": "File encoding (default: utf-8; only needed for legacy files, e.g. gb18030)."},
             "expected_hash": {
                 "type": "string",
                 "description": ("Content hash you expect the file to currently have "
@@ -492,8 +520,67 @@ class FileWriteTool(AbstractTool):
     permission_tier = PermissionTier.SENSITIVE
     risk_score = 40
 
+    #: 回执里 preview 字段最多回显多少个字符（足够让模型确认内容，又不占上下文）
+    PREVIEW_CHARS = 80
+
     def __init__(self, project_root: str | Path | None = None) -> None:
         self._guard = _RootGuard(project_root)
+
+    @classmethod
+    def _verify_from_disk(cls, path: Path, content: str,
+                          encoding: str) -> dict[str, Any]:
+        """从磁盘回读校验，返回回执要用的校验字段（本方法不抛异常）。
+
+        为什么必须回读：``write_text`` 返回只代表"写调用没抛异常" —— 磁盘被
+        占用、落盘时被平台换行翻译、别的进程并发覆盖，都可能让真实内容与内存
+        里的 ``content`` 不一致。模型若拿不到确定性答案，就会再开一次
+        file_read / terminal 复核，而每一步都会重发全量上下文，这是简单任务
+        token 超限的主因。所以校验结论必须跟成功回执一起给出来。
+
+        换行翻译的边界：Windows 上 ``write_text`` 默认把每个 ``\\n`` 翻译成
+        ``os.linesep``（CRLF），``read_text`` 读时再反向归一化 —— 常规内容
+        两者可逆，但内容里本来就带 ``\\r\\n`` 时会被二次翻译。这里先用
+        read_text 比对（覆盖绝大多数情况），不一致时再拿**磁盘原始文本**与
+        "写入时预期落盘的文本"比对，避免把平台行为误报成回读失败。
+        """
+        fields: dict[str, Any] = {
+            # 磁盘字节数（含编码/BOM/换行翻译后的真实大小），不是 len(content)
+            "size_bytes": None,
+            "chars": len(content),
+            "encoding": encoding,
+            "preview": content[:cls.PREVIEW_CHARS],
+        }
+        try:
+            fields["size_bytes"] = path.stat().st_size
+        except OSError as e:
+            # 大小读不到不影响内容判定；只有"内容也校验失败"时才把原因带给模型
+            fields["readback_error"] = f"无法读取文件大小：{type(e).__name__}: {e}"
+        matches = False
+        error = ""
+        try:
+            if path.read_text(encoding=encoding) == content:
+                matches = True
+            else:
+                # 见上方 docstring：排除平台换行翻译造成的"假不一致"
+                raw = path.read_bytes().decode(encoding)
+                matches = raw in (content, content.replace("\n", os.linesep))
+        except (OSError, UnicodeDecodeError, LookupError) as e:
+            error = f"{type(e).__name__}: {e}"
+        fields["readback_matches"] = matches
+        fields["verified"] = matches
+        if matches:
+            # 内容已确认一致：大小读取失败只是元数据问题，别让模型误以为要重试
+            fields.pop("readback_error", None)
+        else:
+            fields["readback_error"] = error or fields.get(
+                "readback_error", "回读内容与写入内容不一致")
+            fields["readback_warning"] = (
+                "回读校验未通过：写入调用成功，但从磁盘读回的内容与写入内容不一致"
+                + (f"（{error}）" if error else "")
+                + "。请重新 file_read 该文件确认真实内容；若已被并发改写，"
+                  "请基于当前真实内容重做，不要凭记忆覆盖。"
+            )
+        return fields
 
     async def execute(self, **kwargs: Any) -> ToolResult:
         raw_content = kwargs["content"]
@@ -510,6 +597,11 @@ class FileWriteTool(AbstractTool):
                 raw_content = str(raw_content)
         content = raw_content
         encoding = kwargs.get("encoding", "utf-8")
+        if not isinstance(encoding, str) or not encoding.strip():
+            # 显式 encoding=None/空串会退回 locale 默认编码（中文 Windows 上是
+            # cp936），落盘编码不可预期、回读也没法按"同一编码"校验；
+            # 统一落到 UTF-8，与工具描述默认值一致（模型传 None 几乎都是疏忽）。
+            encoding = "utf-8"
         expected = kwargs.get("expected_hash") or None
         try:
             path = self._guard.resolve(kwargs["path"])
@@ -557,14 +649,27 @@ class FileWriteTool(AbstractTool):
                 guard.note_write(str(path), self.name)
                 out: dict[str, Any] = {
                     "path": str(path),
+                    # 既有字段保持语义不变（字符数/创建标记/内存内容哈希），
+                    # 避免破坏现有测试与前端；真实磁盘信息放在下面的新字段里。
                     "size": len(content),
                     "created": not existed,
                     "overwritten": existed,
                     "content_hash": _content_hash(content),
                 }
+                # 写完立刻回读磁盘：把"写对了"的结论直接放进回执，
+                # 模型不必再 file_read/terminal 复核（见类 docstring）。
+                out.update(self._verify_from_disk(path, content, encoding))
+                if out["verified"]:
+                    out["note"] = (
+                        "写入成功且已从磁盘回读校验（readback_matches=true）；"
+                        "不需要再用 file_read / terminal 复核。")
                 if conflict.get("foreign"):
                     out["conflict"] = conflict
                     out["warning"] = _conflict_note(conflict)
+                    if "note" in out:
+                        # 冲突提示要求重新读取核对，与"不必复核"冲突——显式说明
+                        # 例外，避免模型收到两条矛盾指令
+                        out["note"] += "（并发写冲突时除外：见 warning，仍需重新读取核对。）"
                 return ToolResult(tool_name=self.name, success=True, output=out)
             except Exception as e:
                 return ToolResult(tool_name=self.name, success=False, error=str(e))

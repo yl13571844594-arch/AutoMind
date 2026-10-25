@@ -1367,6 +1367,18 @@ button.sb-edition:hover { background: var(--bg2); box-shadow: 0 0 0 3px var(--ac
 }
 .lic-err a { cursor: pointer; }
 .lic-warn { color: var(--yellow); }
+/* v1.11.14：扩展包与主程序版本不匹配的警示条（仅服务端给出 version_reason 时出现） */
+.lic-verwarn {
+  display: flex; align-items: flex-start; gap: 10px; margin-top: 12px; padding: 10px 12px;
+  border: 1px solid rgba(245, 197, 66, .5); border-left-width: 3px; border-radius: 10px;
+  background: var(--yellow-bg); color: var(--text); font-size: .82em; line-height: 1.6;
+}
+html.light body .lic-verwarn, body.light .lic-verwarn { border-color: rgba(199, 141, 27, .45); }
+.lic-verwarn-ico { flex-shrink: 0; font-size: 1.1em; line-height: 1.35; }
+.lic-verwarn-main { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.lic-verwarn-main b { color: var(--yellow); font-weight: 650; }
+.lic-verwarn-line { overflow-wrap: anywhere; }
+.lic-verwarn-line.hint-text { font-size: .94em; }
 .lic-done {
   display: flex; flex-direction: column; align-items: center; gap: 8px; text-align: center;
   padding: 22px 10px 8px;
@@ -1838,3 +1850,343 @@ html.light .safe-select { background: #fff; color: #1d2433; border-color: #d5dce
 .safe-select:focus { outline: none; border-color: #7b9fff; }
 .safe-select:disabled { opacity: .55; cursor: not-allowed; }
 .sm-pop.conv-menu { width: 200px; }
+
+/* ══════════════════════════════════════════════════════════════
+   v1.11.14 · Markdown 排版（.md 作用域）
+   聊天气泡 / 执行轨迹 / 摘要 / 历史详情 / 📄 文档视图共用。
+   所有选择器都以 .md 开头，不会影响非 Markdown 区域。
+   ══════════════════════════════════════════════════════════════ */
+.md { line-height: 1.78; word-break: break-word; overflow-wrap: anywhere; }
+.md > *:first-child { margin-top: 0 !important; }
+.md > *:last-child { margin-bottom: 0 !important; }
+
+/* ── 标题：层级分明、h1/h2 带分隔线 ── */
+.md .md-h { font-weight: 700; line-height: 1.35; letter-spacing: -.01em; margin: 1.15em 0 .5em; }
+.md .md-h1 { font-size: 1.38em; padding-bottom: .3em; border-bottom: 1px solid var(--border); }
+.md .md-h2 { font-size: 1.2em; padding-bottom: .24em; border-bottom: 1px solid var(--border); }
+.md .md-h3 { font-size: 1.08em; }
+.md .md-h4 { font-size: 1em; }
+.md .md-h5 { font-size: .94em; color: var(--text2); }
+.md .md-h6 { font-size: .9em; color: var(--text3); }
+.md .md-h code { font-size: .86em; }
+.md .md-h a { font-weight: inherit; }
+
+/* ── 段落 / 换行 ── */
+.md .md-p { margin: .62em 0; }
+.md .md-p:first-child { margin-top: 0; }
+.md .md-p:last-child { margin-bottom: 0; }
+
+/* ── 引用：渐变左边线 + 轻背景，可嵌套 ── */
+.md .md-quote {
+  margin: .85em 0; padding: .55em 1em;
+  border-left: 3px solid var(--accent); border-image: var(--accent-grad) 1;
+  border-radius: 0 10px 10px 0;
+  background: linear-gradient(90deg, var(--bg2), transparent 130%);
+  color: var(--text2);
+}
+.md .md-quote > *:first-child { margin-top: 0; }
+.md .md-quote > *:last-child { margin-bottom: 0; }
+.md .md-quote .md-quote { margin: .5em 0; background: rgba(127, 140, 180, .06); }
+.md .md-quote .md-p { margin: .4em 0; }
+
+/* ── 列表：嵌套缩进 / 任务列表 checkbox ── */
+.md .md-list { margin: .55em 0; padding-left: 1.55em; }
+.md .md-list .md-list { margin: .3em 0; padding-left: 1.45em; }
+.md .md-li { margin: .22em 0; }
+.md .md-ul > .md-li::marker { color: var(--accent); }
+.md .md-ol > .md-li::marker { color: var(--accent); font-weight: 600; }
+.md .md-li > .md-p { margin: .18em 0; }
+.md .md-li > .md-p:first-child { margin-top: 0; }
+.md .md-task { list-style: none; }
+.md .md-task-box {
+  display: inline-block; width: .95em; height: .95em; margin: 0 .45em 0 0;
+  border: 1.5px solid var(--border-focus); border-radius: 4px; background: var(--bg0);
+  vertical-align: -.12em; position: relative;
+}
+.md .md-task-box.done { background: var(--accent); border-color: var(--accent); }
+.md .md-task-box.done::after {
+  content: '✓'; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: .72em; font-weight: 700; line-height: 1;
+}
+
+/* ── 表格：圆角、斑马纹、宽表横向滚动 ── */
+.md .md-tbl-wrap {
+  margin: .85em 0; overflow-x: auto; border: 1px solid var(--border);
+  border-radius: 12px; background: var(--bg1);
+  -webkit-overflow-scrolling: touch;
+}
+.md .md-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: .92em; line-height: 1.6; }
+.md .md-table th, .md .md-table td {
+  padding: 8px 14px; border-bottom: 1px solid var(--border); border-right: 1px solid var(--border);
+  text-align: left; vertical-align: top;
+}
+.md .md-table th:last-child, .md .md-table td:last-child { border-right: 0; }
+.md .md-table tbody tr:last-child td { border-bottom: 0; }
+.md .md-table thead th { background: var(--bg2); font-weight: 600; color: var(--text); white-space: nowrap; }
+.md .md-table tbody tr:nth-child(even) td { background: rgba(127, 140, 180, .05); }
+.md .md-table tbody tr:hover td { background: rgba(123, 159, 255, .08); }
+.md .md-th.md-al-l, .md .md-td.md-al-l { text-align: left; }
+.md .md-th.md-al-c, .md .md-td.md-al-c { text-align: center; }
+.md .md-th.md-al-r, .md .md-td.md-al-r { text-align: right; }
+
+/* ── 行内代码 / 强调 / 高亮 / 键盘键 ── */
+.md code {
+  background: var(--bg3); border: 1px solid var(--border); border-radius: 5px;
+  padding: .06em .36em; font-family: var(--mono); font-size: .88em;
+  word-break: break-word;
+}
+.md .code-block pre code, .md .html-block pre code {
+  background: none; border: 0; border-radius: 0; padding: 0; font-size: .84em;
+}
+.md b, .md strong { font-weight: 650; }
+.md del { opacity: .68; }
+.md mark {
+  background: linear-gradient(135deg, rgba(245, 197, 66, .42), rgba(245, 197, 66, .2));
+  color: inherit; border-radius: 4px; padding: .04em .3em;
+}
+html.light body .md mark, body.light .md mark {
+  background: linear-gradient(135deg, rgba(199, 141, 27, .3), rgba(199, 141, 27, .14));
+}
+.md kbd {
+  font-family: var(--mono); font-size: .82em; padding: .1em .45em;
+  border: 1px solid var(--border); border-bottom-width: 2px; border-radius: 6px;
+  background: var(--bg2); color: var(--text2);
+}
+
+/* ── 链接 / 图片 / 分隔线 ── */
+.md .md-link { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; transition: border-color .15s ease; }
+.md .md-link:hover { border-bottom-color: currentColor; }
+.md img { max-width: 100%; height: auto; border-radius: 10px; border: 1px solid var(--border); margin: .35em 0; }
+.md img.mm { max-width: 220px; max-height: 180px; object-fit: contain; }
+.md .md-hr {
+  height: 1px; margin: 1.4em 0; border: 0;
+  background: linear-gradient(90deg, transparent, var(--border), transparent);
+}
+
+/* ── 代码块：头栏 / 语言标签 / 复制 ── */
+.md .code-block, .md .html-block { margin: .85em 0; }
+.md .code-block .code-head { background: var(--bg2); }
+.md .code-lang { letter-spacing: .04em; text-transform: uppercase; font-size: .92em; color: var(--text2); }
+.md .code-block pre { max-height: 480px; }
+.md .code-block .copy-code {
+  border: 1px solid transparent; border-radius: 6px; padding: 1px 8px; font-size: .92em;
+}
+.md .code-block .copy-code:hover { border-color: var(--border); background: var(--bg3); }
+.md .html-block { background: var(--bg0); }
+
+/* ── 气泡里长文档的阅读体验：正文限宽、块间距收敛一点 ── */
+.msg .bubble .md { display: block; max-width: 100%; }
+.msg .bubble .md .md-p { max-width: 76ch; }
+.msg .bubble .md .md-h1 { font-size: 1.28em; }
+.msg .bubble .md .md-h2 { font-size: 1.14em; }
+.msg .bubble .md .md-tbl-wrap { max-width: 100%; }
+/* 执行轨迹里的 Markdown：字号与间距要更紧凑，别把轨迹条撑很高 */
+.trace-body.md { line-height: 1.65; }
+.trace-body.md .md-h { font-size: 1em !important; margin: .5em 0 .2em !important; padding: 0 !important; border: 0 !important; color: inherit; }
+.trace-body.md .md-p { margin: .28em 0; max-width: none; }
+.trace-body.md .md-tbl-wrap, .trace-body.md .code-block { margin: .4em 0; }
+.trace-body.md .md-list { margin: .3em 0; }
+/* 摘要标签里的 AI 摘要：小一号、更紧凑 */
+.sum-md.md .md-h1, .sum-md.md .md-h2 { font-size: 1.02em; border: 0; padding: 0; margin: .5em 0 .2em; }
+.sum-md.md .md-h3, .sum-md.md .md-h4 { font-size: .98em; margin: .4em 0 .15em; }
+.sum-md.md .md-p { margin: .3em 0; max-width: none; }
+.sum-md.md .md-tbl-wrap, .sum-md.md .code-block { margin: .45em 0; }
+
+/* ══════════════════════════════════════════════════════════════
+   v1.11.14 · 📄 Markdown 文档视图弹窗
+   ══════════════════════════════════════════════════════════════ */
+.mdoc-modal .ant-modal-content { padding: 0; overflow: hidden; border-radius: 16px; }
+.mdoc-modal .ant-modal-header {
+  margin: 0; padding: 11px 16px; border-bottom: 1px solid var(--border);
+  background: var(--bg1);
+}
+.mdoc-modal .ant-modal-title { font-size: .95em; }
+.mdoc-modal .ant-modal-close { top: 10px; }
+.mdoc-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; padding-right: 24px; }
+.mdoc-title-path { font-size: .78em; font-weight: 400; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+
+.mdoc-toolbar {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg2);
+}
+.mdoc-toolbar-main { display: flex; align-items: baseline; gap: 10px; min-width: 0; flex: 1 1 260px; }
+.mdoc-path {
+  font-size: .78em; color: var(--text2); overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 44vw;
+}
+.mdoc-meta { flex-shrink: 0; white-space: nowrap; }
+.mdoc-acts { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; }
+.mdoc-tab, .mdoc-btn {
+  border: 1px solid var(--border); background: var(--bg1); color: var(--text2);
+  border-radius: 8px; padding: 4px 10px; font-family: var(--font); font-size: .8em;
+  cursor: pointer; white-space: nowrap;
+}
+.mdoc-tab:hover, .mdoc-btn:hover { color: var(--text); border-color: var(--border-focus); }
+.mdoc-tab.on { color: #fff; background: var(--accent-grad); border-color: transparent; }
+.mdoc-btn:disabled { opacity: .45; cursor: not-allowed; }
+.mdoc-sep { width: 1px; height: 18px; background: var(--border); margin: 0 2px; }
+
+.mdoc-body { display: flex; height: 76vh; min-height: 320px; background: var(--bg0); }
+.mdoc-toc {
+  width: 236px; flex-shrink: 0; border-right: 1px solid var(--border);
+  background: var(--bg1); overflow-y: auto; padding: 12px 8px 24px;
+}
+.mdoc-toc-title { font-size: .72em; font-weight: 650; letter-spacing: .08em; color: var(--text3); padding: 0 8px 8px; }
+.mdoc-toc-list { display: flex; flex-direction: column; }
+.mdoc-toc-item {
+  display: block; width: 100%; text-align: left; border: 0; background: transparent;
+  color: var(--text2); font-family: var(--font); font-size: .78em; line-height: 1.45;
+  padding: 4px 8px; border-radius: 6px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mdoc-toc-item:hover { background: var(--bg2); color: var(--text); }
+.mdoc-toc-item.lv2 { font-weight: 600; color: var(--text); }
+.mdoc-toc-item.lv3 { color: var(--text3); font-size: .74em; }
+
+.mdoc-scroll { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 22px 24px 64px; min-width: 0; }
+.mdoc-scroll-src { padding: 0; }
+.mdoc-paper {
+  max-width: 880px; margin: 0 auto; padding: 34px 44px 56px;
+  background: var(--bg1); border: 1px solid var(--border); border-radius: 14px;
+  box-shadow: 0 12px 44px rgba(0, 0, 0, .28);
+  font-size: 1em; line-height: 1.75;
+}
+html.light body .mdoc-paper, body.light .mdoc-paper {
+  box-shadow: 0 10px 30px rgba(30, 45, 90, .1);
+}
+.mdoc-paper.md .md-p { max-width: none; }
+.mdoc-paper.md img.mm { max-width: 100%; max-height: none; }
+.mdoc-paper.md .md-tbl-wrap { max-width: 100%; }
+.mdoc-paper.md .code-block pre { max-height: 560px; }
+
+.mdoc-src {
+  margin: 0; padding: 18px 22px 40px; font-family: var(--mono); font-size: .86em;
+  line-height: 1.65; color: var(--text2); white-space: pre-wrap; word-break: break-word;
+  min-height: 60vh;
+}
+.mdoc-warn {
+  padding: 8px 16px; background: var(--yellow-bg); color: var(--yellow);
+  font-size: .8em; border-bottom: 1px solid var(--border);
+}
+.mdoc-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; height: 52vh; min-height: 260px; padding: 20px; text-align: center;
+  background: var(--bg0);
+}
+.mdoc-error-ico { font-size: 2.4em; }
+.mdoc-error-title { font-weight: 650; }
+.mdoc-error-msg {
+  font-size: .84em; color: var(--red); max-width: 620px;
+  word-break: break-word; overflow-wrap: anywhere;
+}
+.mdoc-error-acts { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+
+/* 交付卡片里的「文档视图」小标签 */
+.dlv-md-tag {
+  display: inline-block; margin-left: 6px; padding: 0 6px; border-radius: 999px;
+  font-size: .68em; font-weight: 500; color: var(--accent);
+  border: 1px solid var(--accent); background: rgba(123, 159, 255, .12);
+  vertical-align: .08em; white-space: nowrap;
+}
+html.light body .dlv-md-tag, body.light .dlv-md-tag { background: rgba(74, 111, 232, .08); }
+
+/* 小屏：目录收起、正文满宽、工具条换行 */
+@media (max-width: 820px) {
+  .mdoc-toc { display: none; }
+  .mdoc-scroll { padding: 14px 12px 40px; }
+  .mdoc-paper { padding: 20px 18px 36px; border-radius: 12px; }
+  .mdoc-body { height: 74vh; }
+  .mdoc-path { max-width: 60vw; }
+  .mdoc-toolbar { padding: 6px 10px; }
+  .mdoc-toolbar-main { flex-basis: 100%; }
+  .msg .bubble .md .md-p { max-width: none; }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   v1.11.17 · 会话管理（分组 / 排序 / 筛选 / 搜索）
+   侧栏只加了轻量搜索与入口；完整的管理控件都在 SessionsModal 里。
+   ══════════════════════════════════════════════════════════════ */
+
+/* ── 侧栏会话区标题右侧的 🔍 / ⚙️ ── */
+.sb-conv-acts { display: flex; align-items: center; gap: 1px; margin-left: 6px; }
+.sb-icon-btn {
+  border: none; background: transparent; color: var(--text3); cursor: pointer;
+  width: 22px; height: 22px; border-radius: 6px; font-size: .95em; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center;
+  letter-spacing: 0; padding: 0;
+}
+.sb-icon-btn:hover { background: var(--bg2); color: var(--text); }
+.sb-icon-btn.on { background: var(--bg3); color: var(--accent); }
+.sb-conv-search { padding: 2px 2px 6px; }
+.sb-conv-empty { display: flex; align-items: center; gap: 6px; padding: 4px 12px; }
+.sb-conv-empty a { color: var(--accent); cursor: pointer; }
+.sb-conv-empty a:hover { text-decoration: underline; }
+
+/* ── 会话管理面板 ── */
+.ssm-toolbar { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+.ssm-row1 { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.ssm-search { flex: 1; min-width: 200px; }
+.ssm-row2 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ssm-field { display: inline-flex; align-items: center; gap: 6px; }
+.ssm-count { margin-left: auto; font-size: .78em; color: var(--text3); white-space: nowrap; }
+
+.ssm-body { max-height: min(58vh, 540px); overflow-y: auto; overflow-x: hidden; margin: 0 -4px; padding: 0 4px; }
+.ssm-group + .ssm-group { margin-top: 6px; }
+.ssm-group-head {
+  position: sticky; top: 0; z-index: 2;
+  display: flex; align-items: center; gap: 8px;
+  padding: 6px 4px; font-size: .76em; font-weight: 600; color: var(--text2);
+  letter-spacing: .04em; background: var(--bg2);
+}
+html.light body .ssm-group-head , body.light .ssm-group-head { background: #fff; }
+
+.ssm-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg1); margin-bottom: 6px; min-width: 0;
+  /* 行不响应单击：打开走右侧「打开」按钮，双击标题只用于重命名 */
+  cursor: default;
+}
+html.light body .ssm-row , body.light .ssm-row { background: #fff; }
+.ssm-row:hover { border-color: var(--border-focus); }
+.ssm-row.active {
+  border-color: var(--accent);
+  background: linear-gradient(90deg, rgba(123, 159, 255, .14), rgba(181, 148, 255, .06));
+}
+html.light body .ssm-row.active , body.light .ssm-row.active {
+  background: linear-gradient(90deg, rgba(74, 111, 232, .10), rgba(139, 95, 224, .05));
+}
+.ssm-row.archived { opacity: .82; }
+.ssm-row.editing { padding: 6px 8px; cursor: default; }
+.ssm-main { flex: 1; min-width: 0; }
+.ssm-title { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: .9em; font-weight: 500; }
+.ssm-title-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ssm-title .ant-tag { margin-inline-end: 0; flex-shrink: 0; }
+.ssm-ws-tag { max-width: 170px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.ssm-meta {
+  font-size: .74em; color: var(--text3); margin-top: 2px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.ssm-acts { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+/* 行内的 ⋯ 不用侧栏的"悬停才出现"：管理面板里动作入口应该随时看得见 */
+.ssm-acts .conv-more { opacity: .6; }
+.ssm-row:hover .ssm-acts .conv-more, .ssm-acts .conv-more:focus-visible { opacity: 1; }
+
+.ssm-state { padding: 6px 4px; }
+.ssm-empty { padding: 24px 0 8px; }
+.ssm-warn {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 6px 10px; margin-bottom: 8px; border-radius: 8px;
+  background: var(--yellow-bg); color: var(--yellow); font-size: .8em;
+}
+.ssm-foot { display: flex; align-items: center; gap: 12px; }
+.ssm-foot .hint-text { flex: 1; text-align: left; }
+
+/* 窄屏：工具条纵向堆叠，行内动作换到第二行，长标题不把操作挤出去 */
+@media (max-width: 640px) {
+  .ssm-row { flex-wrap: wrap; }
+  .ssm-main { flex-basis: calc(100% - 24px); }
+  .ssm-acts { margin-left: auto; }
+  .ssm-body { max-height: 54vh; }
+}

@@ -5,6 +5,7 @@
 // 折叠后变为图标栏，给宽屏阅读/代码留出空间。
 import { App, Input, Tooltip } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
+import { sessionMatches } from '../lib/sessionView';
 import { EDITION_LABELS, useApp, type View } from '../store/app';
 import { relTime, useConv, type Conversation } from '../store/conv';
 import { useUi } from '../store/ui';
@@ -120,6 +121,10 @@ export default function Sidebar() {
   const openModal = useUi((s) => s.openModal);
   const { items, loaded, error, load, create } = useConv();
   const [editing, setEditing] = useState('');
+  // v1.11.17：会话区轻量搜索。只过滤当前工作区列表，复用会话管理面板的匹配规则；
+  // 状态不落盘 —— 每次打开侧栏都是干净的（管理面板里的搜索才是持久工作区）。
+  const [convSearch, setConvSearch] = useState(false);
+  const [convQuery, setConvQuery] = useState('');
   const [showArchived, setShowArchived] = useStoredFlag('automind_nav_archived', false);
   const [workOpen, setWorkOpen] = useStoredFlag('automind_nav_work', true);
   // v1.11.1：「系统」分组默认收起 —— 观测 / 统计 / 审计这些是偶尔看一眼的页面，
@@ -139,6 +144,22 @@ export default function Sidebar() {
 
   const active = useMemo(() => items.filter((c) => !c.archived), [items]);
   const archived = useMemo(() => items.filter((c) => c.archived), [items]);
+  const searching = convSearch && !!convQuery.trim();
+  const shownActive = useMemo(
+    () => (searching ? active.filter((c) => sessionMatches(c, convQuery)) : active),
+    [active, convQuery, searching]);
+  const shownArchived = useMemo(
+    () => (searching ? archived.filter((c) => sessionMatches(c, convQuery)) : archived),
+    [archived, convQuery, searching]);
+  // 搜索命中了已归档会话时自动展开该分组 —— 否则搜到了却藏在折叠区里，
+  // 看起来就像"没找到"
+  const archivedOpen = showArchived || (searching && shownArchived.length > 0);
+  const noMatch = searching && !shownActive.length && !shownArchived.length;
+
+  const toggleConvSearch = () => {
+    if (convSearch) { setConvSearch(false); setConvQuery(''); }
+    else setConvSearch(true);
+  };
 
   const editionColor = edition === 'enterprise' ? 'var(--purple)'
     : edition === 'pro' ? 'var(--accent)' : 'var(--text3)';
@@ -181,6 +202,8 @@ export default function Sidebar() {
       onClick: () => { useApp.getState().toggleTheme(); message.info(theme === 'light' ? '已切换到深色模式' : '已切换到浅色模式'); },
     },
     { key: 'workspaces', label: '🗂 工作区管理', onClick: () => openModal('workspaces') },
+    // v1.11.17：会话管理（分组 / 排序 / 筛选 / 搜索）
+    { key: 'sessions', label: '💬 会话管理（分组 / 排序 / 筛选 / 搜索）', onClick: () => openModal('sessions') },
     { type: 'divider' as const },
     { key: 'update', label: '🔄 检查更新', onClick: () => openModal('update') },
     { key: 'shortcuts', label: '⌨ 键盘快捷键', onClick: () => openModal('shortcuts') },
@@ -225,6 +248,9 @@ export default function Sidebar() {
           <Tooltip title="新建会话（Ctrl+N）" placement="right">
             <button className="nav-btn" onClick={() => create()} aria-label="新建会话"><span className="nav-ico">＋</span></button>
           </Tooltip>
+          <Tooltip title="会话管理" placement="right">
+            <button className="nav-btn" onClick={() => openModal('sessions')} aria-label="会话管理"><span className="nav-ico">💬</span></button>
+          </Tooltip>
         </div>
       ) : (
         <>
@@ -239,28 +265,53 @@ export default function Sidebar() {
           </button>
 
           <div className="sb-scroll">
-            <div className="nav-group static">
+            <div className="nav-group static sb-conv-head">
               <span>会话</span>
-              <span className="nav-group-extra">{active.length || ''}</span>
+              <span className="nav-group-extra">
+                {searching ? `${shownActive.length}/${active.length}` : (active.length || '')}
+              </span>
+              <span className="sb-conv-acts">
+                <Tooltip title={convSearch ? '收起搜索' : '搜索当前工作区会话'}>
+                  <button className={'sb-icon-btn' + (convSearch ? ' on' : '')}
+                    onClick={toggleConvSearch} aria-label="搜索会话">🔍</button>
+                </Tooltip>
+                <Tooltip title="会话管理：分组 / 排序 / 筛选 / 搜索">
+                  <button className="sb-icon-btn" onClick={() => openModal('sessions')}
+                    aria-label="会话管理">⚙️</button>
+                </Tooltip>
+              </span>
             </div>
+            {convSearch && (
+              <div className="sb-conv-search">
+                <Input size="small" allowClear autoFocus value={convQuery}
+                  placeholder="搜索标题 / 要点 / sid"
+                  onChange={(e) => setConvQuery(e.target.value)} />
+              </div>
+            )}
             <div className="conv-list">
               {error && !loaded && (
                 <div className="hint-text" style={{ padding: '4px 12px' }}>
                   会话列表加载失败 <a onClick={() => load()}>重试</a>
                 </div>
               )}
-              {active.map((c) => (
+              {shownActive.map((c) => (
                 <ConvRow key={c.sid} c={c} active={c.suffix === convSuffix}
                   editing={editing === c.sid} onEdit={() => setEditing(c.sid)} onDone={() => setEditing('')} />
               ))}
             </div>
+            {noMatch && (
+              <div className="hint-text sb-conv-empty">
+                没有匹配的会话
+                <a onClick={() => setConvQuery('')}>清除</a>
+              </div>
+            )}
             {archived.length > 0 && (
               <>
-                {groupHead(`已归档`, showArchived, () => setShowArchived(!showArchived),
-                  archived.length)}
-                {showArchived && (
+                {groupHead(`已归档`, archivedOpen, () => setShowArchived(!showArchived),
+                  searching ? shownArchived.length : archived.length)}
+                {archivedOpen && (
                   <div className="conv-list">
-                    {archived.map((c) => (
+                    {shownArchived.map((c) => (
                       <ConvRow key={c.sid} c={c} active={c.suffix === convSuffix}
                         editing={false} onEdit={() => undefined} onDone={() => undefined} />
                     ))}

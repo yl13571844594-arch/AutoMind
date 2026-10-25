@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from automind.bots import crypto
+from automind.bots.md_format import adapt_for_channel, plain_text, render_title
 from automind.core.logging import get_logger
 
 logger = get_logger("automind.bots.channels")
@@ -292,10 +293,13 @@ class FeishuChannel(Channel):
 
     async def send(self, bot, msg, text, title=""):
         tok = await self._token(bot)
+        body = adapt_for_channel(self.key, text)
         card = {"config": {"wide_screen_mode": True},
-                "elements": [{"tag": "markdown", "content": text}]}
+                "elements": [{"tag": "markdown", "content": body}]}
         if title:
-            card["header"] = {"title": {"tag": "plain_text", "content": title[:60]}}
+            head = render_title(self.key, title)
+            if head:
+                card["header"] = {"title": {"tag": "plain_text", "content": head}}
         payload = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
         mid = msg.reply.get("message_id")
         if mid:
@@ -374,8 +378,10 @@ class DingTalkChannel(Channel):
         exp = msg.reply.get("expires")
         if exp and time.time() * 1000 > float(exp):
             raise ChannelError("钉钉 sessionWebhook 已过期（约 1.5 小时有效），请重新 @ 机器人", status=502)
+        body = adapt_for_channel(self.key, text)
+        head = render_title(self.key, title) or "AutoMind"
         d = await _post_json(url, {"msgtype": "markdown",
-                                   "markdown": {"title": (title or "AutoMind")[:30], "text": text}})
+                                   "markdown": {"title": head, "text": body}})
         if d.get("errcode") not in (0, None):
             raise ChannelError(f"钉钉发送失败：{d.get('errmsg') or d}", status=502)
 
@@ -443,7 +449,7 @@ class WeComChannel(Channel):
 
     async def send(self, bot, msg, text, title=""):
         tok = await self._token(bot)
-        body = f"**{title}**\n{text}" if title else text
+        body = adapt_for_channel(self.key, text, title=title)
         d = await _post_json(
             f"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token={tok}",
             {"touser": msg.reply.get("touser") or msg.user_id, "msgtype": "markdown",
@@ -478,7 +484,7 @@ class WeComBotChannel(Channel):
 
     async def send(self, bot, msg, text, title=""):
         from automind.bots.longconn import wecom_bot_send
-        await wecom_bot_send(bot, msg, f"**{title}**\n\n{text}" if title else text)
+        await wecom_bot_send(bot, msg, text, title=title)
 
 
 # ── 微信公众号（服务号 / 测试号）────────────────────────────────
@@ -541,11 +547,11 @@ class WeChatMPChannel(Channel):
 
     async def send(self, bot, msg, text, title=""):
         tok = await self._token(bot)
-        body = f"【{title}】\n{text}" if title else text
+        body = adapt_for_channel(self.key, text, title=title)
         d = await _post_json(
             f"https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token={tok}",
             {"touser": msg.reply.get("openid") or msg.user_id, "msgtype": "text",
-             "text": {"content": _plain(body)}})
+             "text": {"content": body}})
         if d.get("errcode") not in (0, None):
             raise ChannelError(f"微信客服消息发送失败：{d.get('errmsg') or d}", status=502)
 
@@ -556,11 +562,8 @@ def hmac_eq(a: str, b: str) -> bool:
 
 
 def _plain(md: str) -> str:
-    """公众号文本消息不渲染 Markdown：去掉最常见的标记，保留内容。"""
-    s = re.sub(r"```[\w-]*\n?", "", md)
-    s = re.sub(r"\*\*(.+?)\*\*", r"\1", s)
-    s = re.sub(r"`([^`]+)`", r"\1", s)
-    return re.sub(r"^#{1,6}\s*", "", s, flags=re.M)
+    """公众号文本消息不渲染 Markdown：去掉标记、保留结构（v1.11.14 起由适配层实现）。"""
+    return plain_text(md)
 
 
 # ── 通用 Webhook ───────────────────────────────────────────────

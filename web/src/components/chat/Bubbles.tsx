@@ -150,7 +150,9 @@ export const MsgBubble = memo(function MsgBubble({ item, onDelete, onResend }: {
               </div>
             </div>
           ) : (
-            <span dangerouslySetInnerHTML={{ __html: renderMarkdown(item.md) }} />
+            // md 作用域：标题/列表/表格/引用等块级排版样式统一由 .md 前缀限定，
+            // 不会波及气泡里的 chips、操作条等非 Markdown 内容
+            <span className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(item.md) }} />
           )}
         </div>
         <div className="time">{item.meta || ''}</div>
@@ -180,11 +182,11 @@ function StreamBody({ buf }: { buf: string }) {
     acc.current = { at: prefix.length, html: renderMarkdown(prefix) };
   }
   return (
-    <>
+    <span className="md">
       {acc.current.html && <span dangerouslySetInnerHTML={{ __html: acc.current.html }} />}
       {/* 尾巴只做转义 —— 它每 50ms 都在变，绝不能走 Markdown 解析 */}
       <span className="stream-tail" dangerouslySetInnerHTML={{ __html: esc(tail) }} />
-    </>
+    </span>
   );
 }
 
@@ -229,7 +231,7 @@ const Traces = memo(function Traces(
       {traces.map((t, i) => (
         <div key={i} className={`trace-item trace-${t.kind || 'info'}`}>
           <div className="trace-label" dangerouslySetInnerHTML={{ __html: t.label }} />
-          <div className="trace-body" dangerouslySetInnerHTML={{ __html: t.body }} />
+          <div className="trace-body md" dangerouslySetInnerHTML={{ __html: t.body }} />
         </div>
       ))}
     </div>
@@ -284,7 +286,7 @@ export const MultiBubble = memo(function MultiBubble({ item }: { item: Extract<C
               </span>{' '}
               <b>{MA_ROLES[s.role] || s.role}</b>{' '}
               <span style={{ color: 'var(--text2)' }}>{s.subtask}</span>
-              {s.output && <div className="ma-out" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.output + (s.output.length >= 600 ? ' …' : '')) }} />}
+              {s.output && <div className="ma-out md" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.output + (s.output.length >= 600 ? ' …' : '')) }} />}
             </div>
           ))}
         </div>
@@ -296,6 +298,10 @@ export const MultiBubble = memo(function MultiBubble({ item }: { item: Extract<C
 const LOOP_STOP: Record<string, string> = {
   completed: '✅ 已完成', no_progress: '⏹ 连续无进展，已停止', converged: '🔄 输出已收敛，已停止',
   idle: '💤 连续多轮未执行操作，已停止', max_iterations: '⛔ 达到最大轮数',
+  // v1.11.16：预算耗尽不再假装跑完 —— 明确"断点已保存，可继续"，
+  // 否则循环卡片看起来只是安静地停在了某一轮。
+  budget_exhausted: '⏸ Token 预算已用尽，已保存断点（可点上方「从断点续跑」继续）',
+  task_budget: '⏸ Token 预算已用尽，已保存断点（可点上方「从断点续跑」继续）',
 };
 
 export const LoopBubble = memo(function LoopBubble({ item }: { item: Extract<ChatItem, { kind: 'loop' }> }) {
@@ -309,7 +315,7 @@ export const LoopBubble = memo(function LoopBubble({ item }: { item: Extract<Cha
             <div key={it.iter} className={`loop-card ${it.done ? 'done' : it.obs ? 'retry' : ''}`}>
               <b>第 {it.iter} 轮 / 最多 {it.max}</b>
               {!it.action && !it.done && <span className="cursor"> ▍</span>}
-              {it.action && <div style={{ fontSize: '.9em', color: 'var(--text2)', marginTop: 4 }}
+              {it.action && <div className="md" style={{ fontSize: '.9em', color: 'var(--text2)', marginTop: 4 }}
                 dangerouslySetInnerHTML={{ __html: '🛠 ' + renderMarkdown(it.action) }} />}
               {it.done === true && <div style={{ color: 'var(--green)', marginTop: 4 }}>✓ 观察：任务已完成</div>}
               {it.done === false && it.obs && <div style={{ color: 'var(--yellow)', marginTop: 4 }}>↻ 观察：{it.obs}</div>}
@@ -484,6 +490,8 @@ export const WorkspaceBubble = memo(function WorkspaceBubble({ item }: {
  * 只存路径与说明：文件内容随时可能再被改，点开时现读才是最新的。
  */
 const OPEN_PREVIEW_RE = /\.(?:html?|svg|png|jpe?g|gif|webp|bmp|ico)$/i;
+/** v1.11.14：这些后缀走「📄 文档视图」而不是代码编辑器 / iframe 源码 */
+const MD_DOC_RE = /\.(?:md|markdown|mdx)$/i;
 
 export const DeliverableBubble = memo(function DeliverableBubble({ item }: {
   item: Extract<ChatItem, { kind: 'deliverable' }>;
@@ -492,10 +500,13 @@ export const DeliverableBubble = memo(function DeliverableBubble({ item }: {
   const files = item.files || [];
   const nameOf = (f: { path: string; name?: string }) =>
     f.name || f.path.split(/[\\/]/).pop() || f.path;
-  // 打开方式：HTML/图片类交给预览弹窗（服务端按文件 MIME 返回；SVG 可内嵌渲染），
+  // 打开方式：Markdown 文档交给文档视图（渲染排版，不再是 iframe 里的源码）；
+  // HTML/图片类交给预览弹窗（服务端按文件 MIME 返回；SVG 可内嵌渲染），
   // 其它文件切到「代码」标签用编辑器打开。绝对路径与相对路径两端都接受（服务端校验项目边界）。
   const openFile = (path: string) => {
-    if (OPEN_PREVIEW_RE.test(path)) {
+    if (MD_DOC_RE.test(path)) {
+      useUi.getState().openDoc({ path, label: path });
+    } else if (OPEN_PREVIEW_RE.test(path)) {
       useUi.getState().openPreview({ url: `/api/preview/file?path=${encodeURIComponent(path)}`, label: path });
     } else {
       usePanel.getState().openInCode(path);
@@ -518,7 +529,12 @@ export const DeliverableBubble = memo(function DeliverableBubble({ item }: {
           {files.map((f) => (
             <div key={f.path} className="dlv-row">
               <span className="dlv-main" title={f.path}>
-                <a className="dlv-name" onClick={() => openFile(f.path)}>{nameOf(f)}</a>
+                <a className="dlv-name" onClick={() => openFile(f.path)}>
+                  {nameOf(f)}
+                  {MD_DOC_RE.test(f.path) && (
+                    <span className="dlv-md-tag" title="以文档视图打开（渲染 Markdown 排版）">文档视图</span>
+                  )}
+                </a>
                 {f.description && <span className="dlv-desc">{f.description}</span>}
                 <span className="dlv-path mono">{f.path}</span>
               </span>

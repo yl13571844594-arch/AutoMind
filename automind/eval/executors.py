@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import time
@@ -207,32 +208,82 @@ def detect_llm_target(provider: str = "", model: str = "") -> LLMTarget:
     return target
 
 
-def make_agent_config(workspace: Path, provider: str = "", model: str = "") -> Any:
+#: 评测执行器支持的审批模式（与 ``PermissionEngine.APPROVAL_MODES`` 一致）。
+#: 评测是**无人值守**场景：没有任何人工审批通道。``auto`` 模式下 terminal 命令
+#: 的 preflight 风险分是 60，``PermissionEngine`` 会返回 ASK_USER，而
+#: ``react_executor._gate`` 对"问不到人"是 fail-closed 拒绝 —— 模型拿不到结果
+#: 只会换着写法反复重试，实测把一条几秒的命令拖成 237s 超时 + 43.7 万 token。
+#: 因此默认全批准（敏感工具自动放行）。
+EVAL_APPROVAL_MODES = ("approve_all", "auto", "ask")
+DEFAULT_EVAL_APPROVAL_MODE = "approve_all"
+
+
+def make_agent_config(workspace: Path, provider: str = "", model: str = "",
+                      approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE) -> Any:
     """按任务工作区构造 AgentConfig（不读用户仓库里的 automind.yaml）。
 
     刻意不用 ``AgentConfig.auto_load``：评测要求**可复现** —— 结果不应随
     "当前目录下恰好有一个 automind.yaml"而变。
+
+    ``approval_mode`` 默认 ``approve_all``（理由见 ``EVAL_APPROVAL_MODES``）：
+    无人值守评测没有审批通道，需要人工确认的调用会被 fail-closed 拒绝，进而
+    触发模型的反复重试。``auto`` / ``ask`` 只建议用于"对比审批模式影响"的实验
+     —— 它们在这个环境里跑出来的耗时/token 会被"审批被拒"放大。
     """
     from automind.core.config import AgentConfig
+
+    if approval_mode not in EVAL_APPROVAL_MODES:
+        # 不静默回退到 auto：那样会把"全批准"悄悄降级成"无人可问 → 拒绝"，
+        # 正是本次要消除的失效形态。宁可让配置错误在开始跑之前就暴露。
+        raise ValueError(
+            f"未知的 approval_mode={approval_mode!r}；"
+            f"可选：{', '.join(EVAL_APPROVAL_MODES)}")
 
     cfg = AgentConfig(project_root=str(workspace),
                       **_llm_config_kwargs(provider, model))
     # 轨迹落盘默认就会被 AUTOMIND_DATA_DIR 隔离到临时目录（见 runner），
-    # 这里不需要也不应该改 ExecutionConfig 的字段。
-    cfg.execution.approval_mode = "auto"          # 评测不该卡在人工审批上
+    # 这里不需要也不应该改其它 ExecutionConfig 字段。
+    cfg.execution.approval_mode = approval_mode
     return cfg
+
+
+def align_task_budget(cfg: Any, timeout_seconds: float) -> None:
+    """把 agent 自己的墙钟预算（``max_task_seconds``）夹到评测任务上限内。
+
+    为什么执行器还要再设一道：agent 的默认预算是 1800s，而评测套件给单任务的
+    上限通常是 180s。只靠外层 ``asyncio.wait_for`` 硬超时的话，到点会**直接取消**
+    agent —— 拿不到它已做出的部分交付，报告里只剩一句"超时"。把内部预算对齐到
+    同一上限后，agent 会先走到自己的截止线、主动收尾并返回部分结果；外层硬超时
+    只作为"连收尾都卡住"时的最后保险。
+
+    取 ``min`` 而不是直接覆盖：调用方（套件/用户配置）把预算设得**更小**时那是
+    更严格的约束，不能因为评测上限更大就放宽；``current <= 0`` 表示"不限"，
+    这时任务上限就是唯一约束。
+    """
+    if timeout_seconds <= 0:
+        return
+    execution = getattr(cfg, "execution", None)
+    if execution is None:
+        return
+    current = float(getattr(execution, "max_task_seconds", 0) or 0)
+    execution.max_task_seconds = (min(current, timeout_seconds) if current > 0
+                                  else timeout_seconds)
 
 
 class AutoMindExecutor:
     """默认执行器：每个任务建一个独立的 AutoMindAgent + 独立工作目录。"""
 
     def __init__(self, provider: str = "", model: str = "",
-                 keep_workspace: bool = False, agent_factory: Any = None) -> None:
+                 keep_workspace: bool = False, agent_factory: Any = None,
+                 approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE) -> None:
         self.provider = provider
         self.model = model
         self.keep_workspace = keep_workspace
         #: 可注入的 agent 工厂（测试用）：签名 ``(config) -> agent``
         self.agent_factory = agent_factory
+        #: 无人值守审批模式（默认 approve_all，理由见 make_agent_config）。
+        #: runner 通过 ``--approval-mode`` 覆盖它，并写进报告 notes。
+        self.approval_mode = approval_mode
 
     def _build_agent(self, config: Any) -> Any:
         if self.agent_factory is not None:
@@ -248,7 +299,9 @@ class AutoMindExecutor:
         started = time.monotonic()
         agent = None
         try:
-            config = make_agent_config(ctx.workspace, self.provider, self.model)
+            config = make_agent_config(ctx.workspace, self.provider, self.model,
+                                       self.approval_mode)
+            align_task_budget(config, ctx.timeout_seconds)
             agent = self._build_agent(config)
             if getattr(agent, "llm", None) is None:
                 raise RuntimeError(
@@ -261,7 +314,16 @@ class AutoMindExecutor:
                 agent.session_id = f"eval-{ctx.case.id}"
 
             method_name = _MODE_METHOD.get(ctx.mode, "run")
-            result = await self._invoke(agent, method_name, ctx.case.prompt)
+            invocation = self._invoke(agent, method_name, ctx.case.prompt)
+            if ctx.timeout_seconds > 0:
+                # 硬超时（无人值守评测修复）：任务内部可能卡在审批等待 / LLM
+                # 重试 / 工具循环里，单靠 runner 的**事后**判定救不了"挂死"。
+                # wait_for 到点会取消任务（触发 agent 的中断落盘），随后
+                # finally 里的 _close 仍会执行，不会漏掉资源释放。
+                result = await asyncio.wait_for(invocation,
+                                                timeout=ctx.timeout_seconds)
+            else:
+                result = await invocation
             seconds = time.monotonic() - started
             usage = _usage_of(agent, result)
             return EvalOutcome(
@@ -273,10 +335,14 @@ class AutoMindExecutor:
                 **usage,
             )
         except TimeoutError:
+            # asyncio.wait_for 的硬超时（以及 agent 自身入口抛出的 TimeoutError）。
+            # 注意：agent 到点主动收尾时不会走到这里 —— 那是"返回部分结果"路径，
+            # 由报告里的 max_seconds 断言判定。
             seconds = time.monotonic() - started
+            limit = f"（上限 {ctx.timeout_seconds:g}s）" if ctx.timeout_seconds > 0 else ""
             return EvalOutcome(
                 output="", success=False, tool_calls=calls, seconds=seconds,
-                error=f"任务超时（{ctx.timeout_seconds:g}s）", timed_out=True,
+                error=f"任务超时{limit}", timed_out=True,
                 artifacts=list_artifacts(ctx.workspace, ctx.ignore_dirs),
                 **_usage_of(agent, None))
         except Exception as e:

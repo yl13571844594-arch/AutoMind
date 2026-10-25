@@ -436,8 +436,16 @@ def parse_wecom_bot(frame: dict[str, Any]) -> Incoming | None:
                     reply={"req_id": (frame.get("headers") or {}).get("req_id", ""), "chatid": chat})
 
 
-async def wecom_bot_send(bot: dict[str, Any], msg: Incoming, text: str) -> None:
-    """第一条用 aibot_respond_msg（流式、finish=true）回复这条消息；之后主动推送 markdown。"""
+async def wecom_bot_send(bot: dict[str, Any], msg: Incoming, text: str, title: str = "") -> None:
+    """第一条用 aibot_respond_msg（流式、finish=true）回复这条消息；之后主动推送 markdown。
+
+    v1.11.14：正文统一过一遍 :func:`adapt_for_channel`（表格转列表、图片转链接、
+    HTML 去标签），标题渲染成正文首行 ``## 标题`` —— 智能机器人 markdown 上限 20480 字节，
+    围栏代码块保留；超长分片由 :class:`~automind.bots.manager.BotManager` 统一处理。
+    """
+    from automind.bots.md_format import adapt_for_channel
+
+    body = adapt_for_channel("wecom_bot", text, title=title)
     live = _WECOM_LIVE.get(bot["id"])
     if not live:
         raise ChannelError("企业微信智能机器人长连接未建立，消息暂时发不出去", status=503)
@@ -445,10 +453,10 @@ async def wecom_bot_send(bot: dict[str, Any], msg: Incoming, text: str) -> None:
         msg.reply["responded"] = True
         frame = {"cmd": "aibot_respond_msg", "headers": {"req_id": msg.reply["req_id"]},
                  "body": {"msgtype": "stream",
-                          "stream": {"id": uuid.uuid4().hex, "finish": True, "content": text}}}
+                          "stream": {"id": uuid.uuid4().hex, "finish": True, "content": body}}}
     else:
         frame = {"cmd": "aibot_send_msg", "headers": {"req_id": uuid.uuid4().hex},
                  "body": {"chatid": msg.reply.get("chatid") or msg.chat_id, "msgtype": "markdown",
-                          "markdown": {"content": text}}}
+                          "markdown": {"content": body}}}
     async with live["lock"]:
         await live["ws"].send(json.dumps(frame, ensure_ascii=False))

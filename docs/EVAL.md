@@ -1,6 +1,6 @@
 # 评测与可重放轨迹（Evaluation & Replay）
 
-> 版本：v1.7.4 · 相关代码：`automind/eval/`、`automind/core/replay.py`
+> 版本：v1.11.18（评测/重放基线 v1.7.4；v1.11.18 新增 §2.4 无人值守审批与硬超时）· 相关代码：`automind/eval/`、`automind/core/replay.py`
 
 这份文档回答四个问题：**为什么要评测**、**怎么跑冒烟评测**、**怎么写自己的套件**、
 **怎么把它接进 CI**；最后两节讲报告字段与常见的坑。
@@ -79,6 +79,7 @@ python -m automind.eval run automind/eval/suites/smoke.yml --include smoke_write
 | `--include a,b` | 只跑指定任务 id（改一处提示词时只跑相关几条） |
 | `--limit 3` | 只跑前 3 个任务 |
 | `--timeout 120` | 任务级默认超时（秒），任务里写了的以任务为准 |
+| `--approval-mode approve_all` | 无人值守审批模式（默认 `approve_all`，见 §2.4；可选 `auto` / `ask`） |
 | `--out report.json` | 报告落盘（CI 里做归档/对比用） |
 | `--json` | 报告打到 stdout（机器消费） |
 | `--keep-workspace` | 保留任务工作目录，排障用 |
@@ -104,6 +105,31 @@ $ echo $LASTEXITCODE
 
 把 1 与 2 分开是有意的：看到 1 应该去查提示词/模型，看到 2 应该去查环境；
 混在一起会让排查方向从一开始就是错的。
+
+### 2.4 无人值守审批（默认 `approve_all`）
+
+评测进程**没有人工审批通道**：没人能点"批准"，也没人盯着终端。而 `auto` 模式
+（CLI/Web 的默认值）下，`terminal` 命令的 preflight 风险分是 60，`PermissionEngine`
+会返回 `ASK_USER`；执行器对"问不到人"按 **fail-closed 拒绝**。模型拿不到命令结果，
+往往换着写法反复重试 —— 这才是"一条几秒的 `python -c` 命令跑到 237s 超时、烧掉
+43 万 token"的根因，**不是模型能力退化**。
+
+因此评测执行器默认使用 `approve_all`，并把这行写进报告的 `notes`，便于跨报告对比：
+
+```
+注：评测无人值守审批模式=approve_all（敏感工具自动放行；否则审批通道缺失会按拒绝处理）
+```
+
+只有做"审批模式对结果影响"的对比实验时才需要显式覆盖（`auto` / `ask` 在无人值守
+环境下依然会把需要确认的调用拒掉，数字会被这个因素放大）：
+
+```powershell
+python -m automind.eval run automind/eval/suites/smoke.yml --approval-mode auto
+```
+
+同类保护还有一道：执行器按任务的 `timeout_seconds` 加**硬超时**（`asyncio.wait_for`），
+并把 agent 自己的墙钟预算（`max_task_seconds`）对齐到同一上限。到点时 agent 先主动
+收尾、返回部分结果；收不住才被外层强制取消 —— 评测不会挂死到几倍超时。
 
 ---
 

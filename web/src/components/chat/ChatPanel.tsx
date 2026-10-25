@@ -6,12 +6,15 @@ import { apiGet, apiPost } from '../../api/client';
 import {
   describeResumable, dismissResumable, EMPTY_OVERRIDES, fetchResumable, hasOverrides,
   isTextFile, MAX_ATTACH_BYTES, MODE_ICON, pendingChips, stripResumePrefix,
-  TEXT_RESUME_PREFIX, toggleIn, toWire, type PendingOverrides, type ResumableInfo,
+  TEXT_RESUME_PREFIX, toggleIn, toWire, RESUMABLE_ICON,
+  type PendingOverrides, type ResumableInfo,
   liveMentions, mentionKey, mentionLabel, type Mention,
 } from '../../lib/overrides';
 import { buildCommands } from '../../lib/commands';
+import { wireModelOverrides } from '../../lib/modelChoice';
 import { useConv } from '../../store/conv';
 import { useRefs } from '../../store/refs';
+import { useModelChoice } from '../../store/modelChoice';
 import { chatSid, MODE_FEATURE, MODE_LABELS, useApp, workspaceSid, type Mode } from '../../store/app';
 import { uid, useChat, type ChatItem } from '../../store/chat';
 import { usePanel } from '../../store/panel';
@@ -24,6 +27,7 @@ import {
 import { TEMPLATES } from '../../lib/templates';
 import TaskProgress from './TaskProgress';
 import SafeDropdown from '../ui/SafeDropdown';
+import ModelPicker from './ModelPicker';
 import ComposerSuggest, {
   detectTrigger, type SuggestHandle, type SuggestItem, type Trigger,
 } from './ComposerSuggest';
@@ -46,6 +50,8 @@ export default function ChatPanel() {
   const modalOpen = useUi((s) => s.modal !== null || s.preview !== null);
   const wsSuffix = useApp((s) => s.wsSuffix);
   const convSuffix = useApp((s) => s.convSuffix);
+  // 面板刷新信号（任务完成/压缩等）：断点横幅跟着对一次账，保证预算耗尽后能出现
+  const refreshTick = usePanel((s) => s.refreshTick);
   const listRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
   const composerRef = useRef<HTMLDivElement>(null);
@@ -171,10 +177,19 @@ export default function ChatPanel() {
     // 输入框直接发送时带上 overrides；续跑/重试等"不是从输入框来"的发送不带。
     // 计划模式 / 长期目标是常驻状态：任何一条新消息都带上（直到用户退出 / 摘掉）
     const sticky = useRefs.getState();
+    // v1.11.15 模型选择同样是常驻的（store/modelChoice）：输入框发送、续跑、重试
+    // 都带上；选"默认"时 wire 为 undefined，服务端保持原有的模式模型 + 默认路由行为。
+    const modelWire = wireModelOverrides(useModelChoice.getState().choice);
+    const modelPend: PendingOverrides['model'] = modelWire
+      ? (modelWire.model_mode === 'manual'
+        ? { mode: 'manual', provider: modelWire.provider, model: modelWire.model }
+        : { mode: 'auto' })
+      : undefined;
     const pend: PendingOverrides = {
       ...(override === undefined ? ov : EMPTY_OVERRIDES),
       ...(sticky.planMode ? { plan: true } : {}),
       ...(sticky.goal ? { goal: sticky.goal } : {}),
+      ...(modelPend ? { model: modelPend } : {}),
     };
     // 输入框里已经删掉的 @ 引用不再发送（删字 = 不要它了）
     if (pend.mentions?.length) pend.mentions = liveMentions(text, pend.mentions);
@@ -204,11 +219,18 @@ export default function ChatPanel() {
     setResumable(null);
   };
 
-  // 断点续跑（v1.7.7）：服务端从检查点接着跑 —— 计划只跑剩余目标，ReAct 带着
-  // 已完成动作清单继续。任务原文由服务端取自断点，这里只负责展示与发起。
+  // 断点续跑（v1.7.7；v1.11.16 支持 plan/react/multi/loop 四种形态）：服务端从
+  // 检查点接着跑 —— 计划只跑剩余目标、ReAct 带着已完成动作、multi 跳过已完成
+  // role、loop 从下一迭代继续。任务原文由服务端取自断点，这里只负责展示与发起。
   const resumeFromCheckpoint = async (r: ResumableInfo) => {
     if (useApp.getState().running) { message.error('任务正在执行中'); return; }
     if (!wsReady()) { message.error('未连接到服务器，请稍候重试'); return; }
+    // v1.11.16：断点可能属于另一种模式（multi/loop/…）。先切到那个模式，
+    // 否则多智能体/循环的进度面板会画在当前模式的会话视图里，看起来像丢了。
+    const target = (r.interaction || r.run_mode || '') as Mode;
+    if (target && MODE_LABELS[target] && target !== useApp.getState().mode) {
+      await useApp.getState().setMode(target);
+    }
     const st = useChat.getState();
     const cur = useApp.getState().mode;
     const msgId = uid();
@@ -220,9 +242,12 @@ export default function ChatPanel() {
     st.setLastTask({ text: stripResumePrefix(r.task), mode: (r.interaction as Mode) || cur });
     useApp.getState().setRunning(true);
     st.append(cur, { kind: 'typing', id: uid() });
+    // v1.11.15 续跑也按当前模型选择跑（服务端会保留续跑的模型覆盖）
+    const modelWire = wireModelOverrides(useModelChoice.getState().choice);
     sendRun(r.task, [], {
       ref: msgId, resume_checkpoint: r.id,
       ...(r.interaction ? { interaction: r.interaction } : {}),
+      ...(modelWire ? { overrides: modelWire } : {}),
     });
     setResumable(null);
   };
@@ -288,13 +313,16 @@ export default function ChatPanel() {
     await send(wrap ? TEXT_RESUME_PREFIX + raw : raw);
   };
 
-  // 进入会话 / 任务结束时查一次：本会话最近一次任务若没跑完，提示可续跑
+  // 进入会话 / 任务结束 / 面板刷新时查一次：本会话最近一次任务若没跑完，提示可续跑。
+  // v1.11.16：去掉"对话模式不查"的旧限制 —— 断点可能属于 work/multi/loop，
+  // 用户切到对话模式后照样要能看到「继续」入口；四种 kind 的文案见 describeResumable。
+  // refreshTick 覆盖"任务因预算耗尽而结束"：task_complete 会 bumpRefresh，横幅必然对账。
   useEffect(() => {
-    if (running || mode === 'chat') { setResumable(null); return; }
+    if (running) { setResumable(null); return; }
     let alive = true;
     fetchResumable(chatSid()).then((r) => { if (alive) setResumable(r); });
     return () => { alive = false; };
-  }, [running, mode, wsSuffix, convSuffix]);
+  }, [running, wsSuffix, convSuffix, refreshTick]);
 
   // 编辑后重发：先砍掉这条及其之后的消息（基于旧问题的回答已经失效，
   // 留着会让上下文自相矛盾），再把改好的内容作为一条新消息发出去。
@@ -758,10 +786,20 @@ export default function ChatPanel() {
 
       {resumable && !running && (
         <div className="resume-banner">
-          <span>⏸ 本会话上一个任务没跑完：<b>{resumable.task.slice(0, 60)}{resumable.task.length > 60 ? '…' : ''}</b>
-            <span className="hint-text">（{describeResumable(resumable)}）</span></span>
+          <span title={resumable.task}>
+            {RESUMABLE_ICON[resumable.kind] || '⏸'} 本会话上一个任务没跑完：
+            <b>{resumable.task.slice(0, 60)}{resumable.task.length > 60 ? '…' : ''}</b>
+            <span className="hint-text">（{describeResumable(resumable)}）</span>
+            {resumable.budget_exhausted && (
+              <span className="hint-text"> · Token 预算已用尽，续跑会重新计一份</span>
+            )}
+          </span>
           <span style={{ flex: 1 }} />
-          <button className="err-btn primary" onClick={() => resumeFromCheckpoint(resumable)}>↻ 从断点续跑</button>
+          <button className="err-btn primary" onClick={() => resumeFromCheckpoint(resumable)}>
+            ↻ {resumable.kind === 'multi' ? '继续协同'
+              : resumable.kind === 'loop' ? '继续循环'
+                : resumable.kind === 'plan' ? '继续计划' : '从断点续跑'}
+          </button>
           <button className="err-btn" onClick={() => { dismissResumable(resumable.id, chatSid()); setResumable(null); }}>忽略</button>
         </div>
       )}
@@ -860,6 +898,8 @@ export default function ChatPanel() {
             <button className={'plus-btn' + (hasOverrides(ov) ? ' active' : '')}
               title="附件 · 语音 · 本条模式 · 专家 / MCP / 技能引用 · 计划模式 · 目标" aria-label="更多输入选项">＋</button>
           </SafeDropdown>
+          {/* v1.11.15 本条消息使用的模型（默认 / 已配置模型 / 专业·企业版自动路由） */}
+          <ModelPicker />
           {recognizing && (
             <button className="composer-pill listening" title="停止语音输入" onClick={toggleVoice}>
               <span className="rec-dot" />聆听中 · 点击停止

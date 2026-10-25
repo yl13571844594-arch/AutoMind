@@ -13,7 +13,15 @@ import { useUi } from '../../store/ui';
 
 interface UpgradeStatus {
   edition: string; label: string;
-  license: null | { tier: string; customer: string; expiry: string | null; seats?: number; issued?: string };
+  license: null | {
+    tier: string; customer: string; expiry: string | null; seats?: number; issued?: string;
+    // v1.11.15（服务端可选字段）：许可证协议 v3
+    serial?: string | null;
+    machine?: string | null;
+    machine_bound?: boolean;
+    not_before?: string | null;
+    license_version?: number;
+  };
   package: { installed: boolean; version: string; compatible: boolean; api_version: number | null; error?: string };
   step: 'active' | 'need_package' | 'incompatible' | 'need_license';
   reason_text: string;
@@ -21,6 +29,29 @@ interface UpgradeStatus {
   extensions_dir: string;
   features: Record<string, boolean>;
   feature_labels: Record<string, { tier: string; label: string }>;
+  // v1.11.14（服务端可选字段，旧版本没有）：扩展包与主程序的版本一致性。
+  // 协议兼容（package.compatible）≠ 版本配套：不同号的扩展包可能缺新功能，
+  // 这类"能激活但功能不全"的问题必须显式提醒，否则用户以为已经升级成功。
+  core_version?: string;
+  version_match?: boolean;
+  version_reason?: string;
+  version_step?: string;
+  // v1.11.15（服务端可选字段）：商业运营状态（机器绑定 / CRL / 宽限 / 复检 / 时钟）。
+  // 旧服务端没有这些字段时保持原界面（全部 optional）。
+  license_version?: number;
+  machine_id?: string;
+  license_serial?: string;
+  machine_bound?: boolean;
+  grace_days?: number;
+  grace_left?: number;
+  grace?: boolean;
+  recheck_seconds?: number;
+  crl_path?: string;
+  crl_revoked_count?: number;
+  clock_ok?: boolean;
+  last_check?: number | null;
+  reason_code?: string;
+  detail?: string;
 }
 
 const fmtExpiry = (e: string | null | undefined) =>
@@ -95,7 +126,26 @@ export default function LicenseModal() {
     }
   };
 
+  const copyMachineId = async () => {
+    const text = st?.machine_id || '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      message.success('本机指纹已复制，可直接发给发行方');
+    } catch {
+      message.warning('复制失败：请手动选中本机指纹后复制');
+    }
+  };
+
   const stepIdx = !st ? 0 : st.step === 'active' ? 2 : st.step === 'need_license' ? 1 : 0;
+  // 版本不匹配警示：只在**扩展包已安装且服务端明确给出原因**时显示；
+  // 字段缺失（旧服务端）/ 未安装扩展包时保持原界面，不额外打扰。
+  const verMismatch = !!st && st.version_match === false && !!st.version_reason;
+  const verAction = !st
+    ? ''
+    : st.version_step === 'replace_package'
+      ? `处理方式：重新拖入与主程序同版本（v${st.core_version || '?'}）的 .ampkg / .whl 升级包。`
+      : '处理方式：请向发行方获取与当前主程序配套的新版升级包。';
   const groups = useMemo(() => {
     if (!st) return [];
     const by: Record<string, [string, string, boolean][]> = { pro: [], enterprise: [] };
@@ -123,11 +173,63 @@ export default function LicenseModal() {
                 <div>授权给 <b>{st.license.customer || '—'}</b></div>
                 <div>有效期至 <b>{fmtExpiry(st.license.expiry)}</b>
                   {st.license.seats ? <> · {st.license.seats} 席位</> : null}</div>
+                {/* v1.11.15：序列号 / 生效日 / 机器绑定一眼可见（客服排障不用命令行） */}
+                {st.license_serial && (
+                  <div>序列号 <b>{st.license_serial}</b>
+                    {st.machine_bound || st.license.machine_bound
+                      ? <> · <Tag color="green">已绑定本机</Tag></>
+                      : <> · <Tag>未绑定机器</Tag></>}
+                  </div>
+                )}
+                {st.license.not_before && <div>生效日 <b>{fmtExpiry(st.license.not_before)}</b></div>}
+                {st.grace && (
+                  <div className="lic-grace">
+                    已过期，处于宽限期（剩余 {st.grace_left ?? 0} 天 / 共 {st.grace_days ?? 0} 天），请尽快续期
+                  </div>
+                )}
               </div>
             ) : (
               <div className="lic-meta hint">本地运行 · 社区版功能完整可用<br />商业功能需扩展包 + 许可证</div>
             )}
           </div>
+
+          {/* v1.11.15：本机指纹 —— 购买"机器绑定版"时发给发行方，换机需重新绑定 */}
+          {st.machine_id && (
+            <div className="lic-card" style={{ marginTop: 12 }}>
+              <b>🖥️ 本机信息（机器绑定用）</b>
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6 }}>
+                <span className="hint-text" style={{ whiteSpace: 'nowrap' }}>本机指纹</span>
+                <code style={{ flex: 1, wordBreak: 'break-all', userSelect: 'all' }}>{st.machine_id}</code>
+                <button className="lic-btn" onClick={copyMachineId}>复制</button>
+              </div>
+              <p className="hint-text" style={{ margin: '6px 0 0' }}>
+                购买需要绑定机器的许可证时，把这段指纹发给发行方；换机后需要重新绑定（或申请换证）。
+              </p>
+              <p className="hint-text" style={{ margin: '2px 0 0' }}>
+                周期复检：{st.recheck_seconds ? `每 ${Math.round(st.recheck_seconds)} 秒` : '已关闭'}
+                {' · '}宽限期：{st.grace_days ?? 0} 天
+                {' · '}CRL 吊销记录：{st.crl_revoked_count ?? 0} 条
+                {st.clock_ok === false
+                  ? <span style={{ color: '#cf1322' }}> · ⚠️ 检测到系统时钟回拨</span>
+                  : null}
+              </p>
+            </div>
+          )}
+
+          {verMismatch && st && (
+            <div className="lic-verwarn" role="status">
+              <span className="lic-verwarn-ico">⚠️</span>
+              <div className="lic-verwarn-main">
+                <b>商业扩展包版本与主程序不匹配</b>
+                <div className="lic-verwarn-line">{st.version_reason}</div>
+                <div className="lic-verwarn-line">{verAction}</div>
+                <div className="lic-verwarn-line hint-text">
+                  当前主程序 v{st.core_version || '?'} · 已安装扩展包 v{st.package.version || '?'}
+                  {st.package.compatible ? '（协议兼容，可继续激活）' : '（协议不兼容）'}
+                </div>
+              </div>
+            </div>
+          )}
 
           {done ? (
             <div className="lic-done">
@@ -185,7 +287,10 @@ export default function LicenseModal() {
                 <div className="lic-card">
                   <b>② 激活许可证</b>
                   <p className="hint-text">
-                    扩展包已就绪（v{st.package.version}）。{st.reason_text && `状态：${st.reason_text}。`}
+                    扩展包已就绪（v{st.package.version}）。
+                    {st.reason_text && (
+                      <>状态：{st.reason_text}{st.detail ? `（${st.detail}）` : ''}。</>
+                    )}
                     粘贴购买后收到的许可证（一整行，以 AMP 开头）：
                   </p>
                   <Input.TextArea rows={3} value={lic} spellCheck={false} className="lic-input"

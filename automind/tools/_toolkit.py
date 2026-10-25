@@ -32,6 +32,10 @@ from automind.core.edition import (
     has_feature,
     upgrade_hint,
 )
+from automind.core.offline import (
+    BlockedTarget,
+    check_egress,
+)
 from automind.core.types import ToolResult
 
 # ── 可选依赖 ────────────────────────────────────────────────
@@ -64,6 +68,38 @@ class MissingDependency(RuntimeError):
         super().__init__(
             f"缺少「{purpose}」所需的依赖 {pkg}。请先安装：pip install {pkg}"
             f"（或一次装齐办公套件：pip install 'automind-agent[office]'）")
+
+
+# ── 执行治理参数的实时读取（v1.11.16）──────────────────────
+# 背景：工具实例在 Agent 构造时创建，且工具注册表在会话克隆之间**共享**；
+# 若在 __init__ 里把 ExecutionConfig 的字段抄成实例属性，用户在「设置 →
+# 执行治理」里改超时/后台通道/写冲突策略后就永远不生效（保存了但没变化）。
+# 统一从这里读"当前正在跑的任务所绑定 Agent"的**实时**执行配置；
+# 未绑定（CLI / 单测直接调工具）时退回调用方给的默认值（通常是工具实例上
+# 构造时的快照），行为与旧版一致。
+
+
+def live_execution_config(default: Any = None) -> Any:
+    """当前任务的实时 ExecutionConfig（无绑定 Agent 时返回 ``default``）。"""
+    try:
+        from automind.core import session_ctx
+
+        agent = session_ctx.agent()
+        execution = getattr(getattr(agent, "config", None), "execution", None)
+        if execution is not None:
+            return execution
+    except Exception:
+        pass
+    return default
+
+
+def live_config_value(name: str, default: Any) -> Any:
+    """读取执行治理参数 ``name`` 的实时值（无绑定 Agent 时返回 ``default``）。"""
+    execution = live_execution_config()
+    if execution is None:
+        return default
+    value = getattr(execution, name, None)
+    return default if value is None else value
 
 
 # ── 外部可执行文件（pip 装不到的那一半）──────────────────────
@@ -275,17 +311,32 @@ _BLOCKED_SCHEMES = {"file", "ftp", "gopher", "data", "dict", "sftp", "ldap"}
 _METADATA_HOSTS = {"169.254.169.254", "metadata.google.internal", "100.100.100.200"}
 
 
-class BlockedTarget(ValueError):
-    """请求目标落在禁止范围内（私网 / 回环 / 元数据服务 / 危险协议）。"""
+def check_url(url: str, allow_private: bool = False, tool: str = "") -> str:
+    """校验外发 URL；返回规范化后的 URL，越界抛 BlockedTarget / EgressBlocked。
 
+    这里叠的是**两道彼此独立、不能互相替代**的闸（v1.11.14）：
 
-def check_url(url: str, allow_private: bool = False) -> str:
-    """校验外发 URL；返回规范化后的 URL，越界抛 BlockedTarget。
+    1. **SSRF 防护（原有语义）**：默认禁止访问私网 / 回环 / 云元数据地址。
+       模型可被网页内容或用户文档诱导去请求 ``http://127.0.0.1:8765/api/...``
+       （本机的 AutoMind 自己）或 ``http://169.254.169.254/``（云上实例凭据）。
+       显式传 ``allow_private=True`` 才放行内网目标。
+    2. **出网策略（新增，``automind/core/offline.py``）**：offline 模式禁止公网
+       出网、allowlist 模式只放行白名单。它与 `allow_private` **无关**：
+       ``allow_private=True`` 只是"我确实要访问内网"，不能顺手把出网白名单
+       也关掉；反过来，白名单命中也不会让私网防护失效。
 
-    默认**禁止访问私网与回环地址**。这不是多余的谨慎：模型可被网页内容或
-    用户文档诱导去请求 ``http://127.0.0.1:8765/api/...``（本机的 AutoMind
-    自己）或 ``http://169.254.169.254/``（云上实例元数据），从而把内网接口
-    和临时凭据带出来。要访问内网请显式传 allow_private=True。
+    判定顺序刻意把"出网策略"放在 DNS 解析**之前**：离线 / 白名单拒绝必须
+    **立刻返回**，绝不能先做一次 DNS 查询 —— 否则"离线模式不发起任何连接"
+    就成了空话（内网 DNS 不可用时还要白等解析超时）。
+
+    异常层次：:class:`EgressBlocked` 继承 :class:`BlockedTarget`，所以老调用方
+    ``except BlockedTarget`` 依然能兜住策略拒绝；需要区分时看
+    ``getattr(e, "kind") == "egress"``。
+
+    Args:
+        url: 待校验的外发地址。
+        allow_private: 显式允许访问私网（只影响 SSRF 层，不影响出网策略）。
+        tool: 发起调用的工具名，写进出网审计（``egress.log`` 的 ``tool`` 字段）。
     """
     u = urlparse(url)
     if u.scheme not in ("http", "https"):
@@ -298,6 +349,10 @@ def check_url(url: str, allow_private: bool = False) -> str:
         raise BlockedTarget("URL 缺少主机名")
     if host in _METADATA_HOSTS:
         raise BlockedTarget(f"禁止访问云元数据服务 {host}")
+
+    # ── 出网策略层（先判，避免离线时还去做 DNS）──
+    check_egress(url, tool=tool)
+
     if allow_private:
         return url
 

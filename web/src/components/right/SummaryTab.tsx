@@ -193,7 +193,10 @@ export default function SummaryTab() {
   };
 
   const openArtifact = (path: string) => {
-    if (/\.html?$/i.test(path)) {
+    // v1.11.14：Markdown 产物 → 文档视图；HTML 走 iframe 预览；其余交给代码编辑器
+    if (/\.(?:md|markdown|mdx)$/i.test(path)) {
+      useUi.getState().openDoc({ path, label: path });
+    } else if (/\.html?$/i.test(path)) {
       useUi.getState().openPreview({ url: `/api/preview/file?path=${encodeURIComponent(path)}`, label: path });
     } else openInCode(path);
   };

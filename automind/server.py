@@ -445,6 +445,15 @@ def _approval_timeout_action(agent: Any) -> str:
     return "reject"
 
 
+def _release_slot_on_approval_wait(agent: Any) -> bool:
+    """审批等待期间是否释放并发槽（实时读配置，下一次审批生效）。"""
+    try:
+        return bool(getattr(agent.config.execution,
+                            "release_slot_on_approval_wait", True))
+    except Exception:                   # pragma: no cover - 防御性
+        return True
+
+
 def _usage_record_fields(usage: Any) -> dict:
     """把 TokenUsage（或 LLMResponse / None）摊平成任务记录的用量字段。
 
@@ -730,6 +739,43 @@ def _apply_mode_model(agent, interaction: str):
 # ═══════════════════════════════════════════════════════════
 
 
+def _restore_autopilot_into_execution(execution: Any) -> dict:
+    """把已持久化的执行治理参数写回 ExecutionConfig（启动 / 重建 Agent 时）。
+
+    v1.11.16 把这段从 ``_rebuild_agent`` 里抽出来：它是"重启后配置还在不在"
+    的唯一路径，内联在重建函数里就只能靠起真服务来测。返回真正恢复的键值，
+    供测试与 /api/status 诊断使用。旧配置里的非法值只记警告、不拖垮启动。
+    """
+    restored: dict = {}
+    ap = _read_config().get("autopilot", {})
+    if not isinstance(ap, dict):
+        return restored
+    flags = (tuple(_AUTOPILOT_FLAGS) + _AUTOPILOT_BOOL_EXTRAS
+             + tuple(_AUTOPILOT_STRS) + tuple(_AUTOPILOT_NUMS))
+    for key in flags:
+        if key not in ap:
+            continue
+        raw = ap[key]
+        try:
+            if key in _AUTOPILOT_STRS:
+                value = str(raw).lower()
+                if value not in _AUTOPILOT_STRS[key]:
+                    continue
+            elif key in _AUTOPILOT_NUMS:
+                value = float(raw)
+                if key in _AUTOPILOT_INT_NUMS:
+                    value = int(value)
+            else:
+                value = bool(raw)
+            setattr(execution, key, value)
+            restored[key] = value
+        except (TypeError, ValueError):
+            continue
+        except Exception as e:          # 旧配置里的非法值不该拖垮启动
+            logger.warning("autopilot_restore_failed", key=key, error=str(e))
+    return restored
+
+
 def _rebuild_agent(provider: str | None = None, model: str | None = None):
     """完全重建 agent 实例（切换模型 / API Key / 代理时调用）。
 
@@ -809,31 +855,10 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
     # 5) 审批模式
     config.execution.approval_mode = active.get("approval_mode", "auto")
 
-    # 6) 自主闭环开关（默认全开，用户可在设置中关闭）
-    ap = _read_config().get("autopilot", {})
-    for flag in ("auto_review", "auto_verify", "auto_test",
-                 "parallel_execution", "subtask_cache",
-                 # v1.6.4：这些也在界面上可调，重启/重建后必须恢复，
-                 # 否则"我在设置里关了隔离/调大了超时"重启就白设了
-                 "isolate_workspace", "terminal_background_enabled",
-                 "release_slot_on_approval_wait", "trace_enabled"):
-        if flag in ap:
-            setattr(config.execution, flag, bool(ap[flag]))
-    # 与设置面板共用同一份清单（_AUTOPILOT_NUMS）—— 此前两处各列一遍，
-    # 面板上新加的参数重启后不恢复；整数型按整数写回，不再把 8 存成 8.0
-    for num_flag in _AUTOPILOT_NUMS:
-        if num_flag in ap:
-            try:
-                v = float(ap[num_flag])
-                setattr(config.execution, num_flag,
-                        int(v) if num_flag in _AUTOPILOT_INT_NUMS else v)
-            except (TypeError, ValueError):
-                pass
-            except Exception as e:      # 旧配置里的非法值不该拖垮启动
-                logger.warning("autopilot_restore_failed", key=num_flag, error=str(e))
-    for str_flag in ("approval_timeout_action", "write_conflict_policy"):
-        if str_flag in ap and isinstance(ap[str_flag], str):
-            setattr(config.execution, str_flag, ap[str_flag])
+    # 6) 自主闭环开关 + 执行治理参数（默认全开，用户可在设置中关闭）。
+    #    抽成独立函数：重启/重建 Agent 时的"恢复"逻辑要能被测试直接验证
+    #    （此前它内联在这里，只能靠启一个真服务才能覆盖）。
+    _restore_autopilot_into_execution(config.execution)
 
     _agent = AutoMindAgent(config)
     _agent._mode = ExecutionMode(exec_mode)
@@ -841,6 +866,9 @@ def _rebuild_agent(provider: str | None = None, model: str | None = None):
         _agent._interaction = InteractionMode(interaction)
     except ValueError:
         _agent._interaction = InteractionMode.CHAT
+    # v1.11.16：把轨迹记录器的配置读取接到这个 Agent 的实时 config ——
+    # 否则「执行治理」里的 trace_enabled / trace_max_runs 永远不生效。
+    _wire_execution_runtime(_agent)
 
     # 恢复对话历史
     _agent._chat_history = _load_chat_history()
@@ -978,6 +1006,16 @@ async def _lifespan(_app):
         except Exception as e:
             logger.warning("startup_scheduler_failed", error=str(e))
     _janitor = asyncio.create_task(_workspace_janitor())
+    # v1.11.15：商业许可证周期复检（到期 / 被吊销 / 机器不符 / 时钟回拨）会在
+    # 后台线程里把版本降级为社区版 —— 记下主事件循环，让守护线程能把
+    # "版本变了" 安全地投递回事件循环广播给所有标签页（否则界面不会刷新，
+    # 用户会看到一个已经失效的商业版界面）。
+    global _MAIN_LOOP
+    try:
+        _MAIN_LOOP = asyncio.get_running_loop()
+        _wire_license_watchdog()
+    except Exception as e:                       # pragma: no cover - 纯通知旁路
+        logger.warning("license_watchdog_wire_failed", error=str(e))
     # v1.8.0（D5）：上次进程退出时没跑完的工作流运行 → 标成 interrupted，
     # 只在界面上提示可续跑，**不自动续跑**（续跑会真的执行、花钱）
     stale: list[str] = []
@@ -1196,6 +1234,8 @@ def _acquire_run_agent(base_agent, sid: str):
     # 就固化了当时的模式。不同步的话会出现"界面上写着「询问」，实际那个会话
     # 一直在自动放行/一直不弹窗" —— 安全设置与真实行为不一致，且毫无提示。
     _sync_approval_mode(a, base_agent)
+    # v1.11.16：执行治理参数同理（下次任务生效类的参数在任务开始时对齐）
+    _sync_execution_config(a, base_agent)
     return a
 
 
@@ -1292,8 +1332,17 @@ async def api_health():
     ``running_tasks`` 只计**正在执行**的任务数；等待人工审批的任务已按配置
     让出并发槽，单独以 ``approval_waiting`` 暴露 —— 两者相加才是"占用中的
     会话数"，监控据此可区分"在算"和"在等人"。
+
+    v1.11.14：追加 ``network_policy``（当前出网策略摘要）、``network``
+    （本地 / 网关 / 公网三态诊断）与 ``egress_audit``（出网审计计数 / 日志路径）。
+    网络探测走**缓存 + 后台刷新**，不阻塞健康检查（探针每几秒打一次，
+    不能在这里做秒级 TCP 探测）。
     """
+    from automind.core.netresilience import network_state_cached
+    from automind.core.offline import audit_stats as _egress_audit_stats
+    from automind.core.offline import policy_status as _egress_policy_status
     from automind.core.paths import describe as _paths_describe
+
     return {
         "status": "ok", "version": app.version,
         "edition": _edition.get_edition(),
@@ -1304,6 +1353,9 @@ async def api_health():
         "max_concurrent": _MAX_CONCURRENT,
         "uptime_s": round(time.time() - _START_TIME, 1),
         "paths": _paths_describe(),
+        "network_policy": _egress_policy_status(),
+        "network": network_state_cached(),
+        "egress_audit": _egress_audit_stats(),
     }
 
 
@@ -1548,6 +1600,60 @@ async def api_set_mode_models(data: dict):
     return {"status": "ok", "modes": mm}
 
 
+def _available_models_payload(agent=None) -> dict:
+    """输入框模型选择器的数据源（v1.11.15）。
+
+    把持久化配置（默认 / 当前模型、各提供商配置与 Key、各模式模型）与
+    ``model_router`` 特性状态交给纯逻辑模块 ``automind.core.model_choice``
+    统一整理；服务层只负责"去哪儿读"，校验与结构都由 core 决定（便于单测）。
+    """
+    from automind.core import model_choice as _mc
+
+    agent = agent if agent is not None else get_agent()
+    active = _load_active()
+    try:
+        edition = _edition.get_edition()
+        router = _edition.get_feature("model_router")
+        router_cfg = router.config() if router is not None else None
+    except Exception as e:                       # 商业扩展故障不该拖垮选择器
+        logger.warning("available_models_router_failed", error=str(e))
+        edition, router_cfg = "community", None
+    return _mc.build_available({
+        "edition": edition,
+        "router_config": router_cfg,
+        "default": {
+            "provider": active.get("provider") or agent.config.llm.provider,
+            "model": active.get("model") or agent.config.llm.model,
+        },
+        "current": {
+            "provider": agent.config.llm.provider,
+            "model": agent.config.llm.model,
+            # 运行期临时传入的 Key（如 /api/run 的 api_key 字段）也算"能用"，
+            # 否则可用列表会把他刚传进来的那家判成未配置
+            "has_key": bool(agent.config.llm.api_key),
+        },
+        "providers": _load_providers(),
+        "api_keys": _load_api_keys(),
+        "env_api_keys": {p: _env_api_key(p) for p in _mc.KNOWN_PROVIDERS},
+        "mode_models": _load_mode_models(),
+    })
+
+
+@app.get("/api/config/available-models")
+async def api_available_models():
+    """输入框模型选择器：可用模型清单 + 自动路由状态（v1.11.15）。
+
+    社区版同样正常返回 —— ``auto.available=false`` 且带升级原因，前端据此
+    把"自动路由"置灰并显示 🔒，点击引导到升级面板；**不返回 403**（403 会让
+    选择器整个卡在加载态，而手动选模型是所有版本都可用的）。
+    """
+    try:
+        return _available_models_payload()
+    except Exception as e:
+        logger.error("available_models_failed", error=str(e))
+        return JSONResponse({"error": f"读取模型配置失败：{e}"}, status_code=500)
+
+
 @app.post("/api/config/approval")
 async def api_set_approval(data: dict):
     """设置审批模式：ask（询问）| auto（自动）| approve_all（全批准）。
@@ -1597,6 +1703,63 @@ _AUTOPILOT_INT_NUMS = frozenset({
 _AUTOPILOT_STRS = {"approval_timeout_action": ("approve", "reject"),
                    "write_conflict_policy": ("off", "warn", "block")}
 
+# ── v1.11.16：执行治理参数的**生效时机**（单一事实来源）────────────
+# 设置面板与 POST 响应都从这里取，避免"界面写一套、后端另一套"。
+# 真实边界：凡是"下一次任务/下一步/下一次调用"的，对**已经在跑**的那一步不追溯。
+_EFFECTIVE_INFO: dict[str, dict[str, str]] = {
+    # ── 5 个自主闭环开关 ──
+    "auto_review": {"timing": "next_task", "note": "工作模式收尾的审查阶段读取；已进入收尾的任务不追溯"},
+    "auto_verify": {"timing": "next_task", "note": "收尾的验收阶段读取；已进入收尾的任务不追溯"},
+    "auto_test": {"timing": "next_task", "note": "TDD 内环与收尾测试按任务读取"},
+    "parallel_execution": {"timing": "immediate", "note": "即时下发到计划执行器；当前批次不追溯，下一次调度生效"},
+    "subtask_cache": {"timing": "immediate", "note": "即时下发；当前批次已缓存的结果不受影响"},
+    # ── 4 个布尔附加项 ──
+    "isolate_workspace": {"timing": "next_task", "note": "任务开始时准备工作区；进行中任务不追溯"},
+    "terminal_background_enabled": {"timing": "next_call", "note": "下一次终端调用即按新值（工具执行前读实时配置）"},
+    "release_slot_on_approval_wait": {"timing": "next_approval", "note": "下一次审批等待时读取实时配置"},
+    "trace_enabled": {"timing": "next_event", "note": "即时：下一条轨迹事件起按新值；已写文件保留"},
+    # ── 15 个数值参数 ──
+    "tool_timeout_seconds": {"timing": "next_call", "note": "下一次终端调用即按新值"},
+    "tool_timeout_max_seconds": {"timing": "next_call", "note": "下一次终端调用即按新值"},
+    "approval_timeout_seconds": {"timing": "next_approval", "note": "下一次审批等待时读取实时配置"},
+    "tool_output_max_chars": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "auto_verify_max_rounds": {"timing": "next_task", "note": "收尾验收时读取；已进入收尾的任务不追溯"},
+    "trace_max_runs": {"timing": "next_event", "note": "即时：下一次轮转按新上限淘汰旧轨迹"},
+    "goal_timeout_seconds": {"timing": "immediate", "note": "即时下发到计划执行器；当前已开始的步骤不追溯"},
+    "react_tool_timeout_seconds": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "max_task_seconds": {"timing": "next_task", "note": "任务开始时计算整轮墙钟预算"},
+    "react_tool_budget": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "react_repeat_action_threshold": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "react_no_progress_limit": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "task_token_budget": {"timing": "next_task", "note": "任务开始时按新预算重置窗口"},
+    "max_iterations": {"timing": "next_task", "note": "ReAct 执行器按任务构造；当前任务不追溯"},
+    "budget_auto_continue": {"timing": "immediate", "note": "下一个预算窗口即按新值（无需重启）"},
+    # ── 2 个字符串策略 ──
+    "approval_timeout_action": {"timing": "next_approval", "note": "下一次审批超时处置即按新值"},
+    "write_conflict_policy": {"timing": "next_write", "note": "下一次文件写入即按新策略判定"},
+}
+
+#: 生效时机 → 面向用户的中文短标签（设置面板直接展示）
+_EFFECTIVE_LABELS = {
+    "immediate": "即时生效",
+    "next_task": "下次任务生效",
+    "next_approval": "下次审批生效",
+    "next_call": "下次调用生效",
+    "next_write": "下次写入生效",
+    "next_event": "即时生效",
+}
+
+
+def _autopilot_effective() -> dict[str, dict[str, str]]:
+    """全部执行治理参数的生效时机（GET/POST 响应 + 设置面板共用）。"""
+    out: dict[str, dict[str, str]] = {}
+    for key, info in _EFFECTIVE_INFO.items():
+        timing = info["timing"]
+        out[key] = {"timing": timing,
+                    "label": _EFFECTIVE_LABELS.get(timing, timing),
+                    "note": info["note"]}
+    return out
+
 
 def _autopilot_snapshot(agent) -> dict:
     """设置面板要的**完整**当前值。
@@ -1616,6 +1779,9 @@ def _autopilot_snapshot(agent) -> dict:
         v = getattr(ex, k, None)
         if isinstance(v, str):
             out[k] = v
+    # v1.11.16：每个参数的**生效时机**（界面据此显示"下次任务生效 / 重启后生效"
+    # 等提示；后端与前端共用这一份，避免界面承诺与实际行为脱节）。
+    out["effective"] = _autopilot_effective()
     return out
 
 
@@ -1639,24 +1805,127 @@ def _propagate_execution(fields: dict) -> int:
                     pe.use_cache = fields["subtask_cache"]
                 if "goal_timeout_seconds" in fields:
                     pe.goal_timeout = float(fields["goal_timeout_seconds"])
+            if "task_token_budget" in fields:
+                _apply_token_budget(clone)
             n += 1
         except Exception as e:          # pragma: no cover - 单个克隆失败不影响其余
             logger.warning("execution_propagate_failed", error=str(e))
     return n
 
 
+# ── v1.11.16：执行治理参数下发到运行时对象 ──────────────────
+
+
+def _execution_token_budget(config: Any) -> int:
+    """与 ``automind.agent._task_token_budget`` 同口径（0 = 不限；负数回退派生值）。"""
+    try:
+        budget = int(getattr(config.execution, "task_token_budget", 0) or 0)
+    except (TypeError, ValueError):
+        budget = -1
+    if budget >= 0:
+        return budget
+    try:
+        return int(config.llm.max_tokens) * 10
+    except Exception:                   # pragma: no cover - 防御性
+        return 0
+
+
+def _apply_token_budget(target) -> int | None:
+    """把当前配置的 token 预算写进该 Agent 的 ResourceManager（下一任务生效）。"""
+    try:
+        budget = _execution_token_budget(target.config)
+        resources = getattr(target, "resources", None)
+        if resources is not None:
+            resources.tokens.budget = budget
+        return budget
+    except Exception as e:              # pragma: no cover - 防御性
+        logger.warning("execution_budget_apply_failed", error=str(e)[:200])
+        return None
+
+
+def _apply_execution_runtime(fields: dict) -> dict[str, Any]:
+    """v1.11.16：把刚保存的执行治理参数下发到**运行时对象**，返回生效摘要。
+
+    这里只处理"不能靠消费端每次现读"的部分：
+      · 轨迹记录器（trace_enabled / trace_max_runs）是懒构造 + 缓存实例，
+        必须显式更新，否则关掉后下一条事件照样落盘；
+      · token 预算在 Agent/克隆构造时写进 ResourceManager，必须在这里同步，
+        下一次任务开始时才会以新预算运行；
+      · 终端超时 / 后台通道 / 写冲突策略由工具在**每次调用前**读实时配置
+        （见 automind/tools 的 live_execution_config），无需在这里重建实例。
+    """
+    runtime: dict[str, Any] = {}
+    agent = get_agent()
+    if fields.keys() & {"trace_enabled", "trace_max_runs"}:
+        try:
+            from automind.core import trace as _trace
+
+            runtime["trace"] = _trace.apply_execution_config(agent.config.execution)
+        except Exception as e:          # pragma: no cover - 轨迹问题不影响保存
+            logger.warning("execution_trace_apply_failed", error=str(e)[:200])
+    if "task_token_budget" in fields:
+        runtime["task_token_budget"] = _apply_token_budget(agent)
+    return runtime
+
+
+def _wire_execution_runtime(agent) -> None:
+    """Agent 构建后，把"运行时读取点"接到它的 config（v1.11.16）。
+
+    轨迹记录器是进程级单例；不接这一根线的话，它只能新造一份
+    ``ExecutionConfig()``（出厂默认值），设置里改 trace_enabled 永远不生效。
+    """
+    try:
+        from automind.core import trace as _trace
+
+        _trace.set_config_provider(lambda: getattr(agent.config, "execution", None))
+        _trace.apply_execution_config(agent.config.execution)
+    except Exception as e:              # pragma: no cover - 防御性
+        logger.warning("execution_trace_wire_failed", error=str(e)[:200])
+
+
+def _sync_execution_config(clone, base_agent) -> None:
+    """每次取会话执行器时对齐执行治理配置（v1.11.16）。
+
+    ``api_set_autopilot`` 已经会即时同步已存在的克隆；这里是**兜底**：
+    克隆在配置变更之后才创建、或某次同步失败时，下一个任务开始时仍然
+    能拿到最新参数（而不是沿用克隆创建那一刻的快照）。
+    """
+    try:
+        src = base_agent.config.execution
+        dst = clone.config.execution
+        keys = (tuple(_AUTOPILOT_FLAGS) + _AUTOPILOT_BOOL_EXTRAS
+                + _AUTOPILOT_NUMS + tuple(_AUTOPILOT_STRS))
+        for key in keys:
+            setattr(dst, key, getattr(src, key))
+        plan = getattr(clone, "plan_executor", None)
+        if plan is not None:
+            plan.parallel = bool(dst.parallel_execution)
+            plan.use_cache = bool(dst.subtask_cache)
+            try:
+                plan.goal_timeout = max(0.0, float(dst.goal_timeout_seconds or 0))
+            except (TypeError, ValueError):
+                pass
+        _apply_token_budget(clone)
+    except Exception as e:              # pragma: no cover - 防御性
+        logger.warning("execution_sync_failed", error=str(e)[:200])
+
+
 @app.get("/api/config/autopilot")
 async def api_get_autopilot():
-    """自主闭环开关 + 执行治理参数的当前值（设置面板用）。"""
+    """自主闭环开关 + 执行治理参数的当前值 + 每个参数的生效时机（设置面板用）。"""
     return _autopilot_snapshot(get_agent())
 
 
 @app.post("/api/config/autopilot")
 async def api_set_autopilot(data: dict):
-    """更新自主闭环开关 / 执行治理参数（持久化 + 即时生效，无需重建 Agent）。
+    """更新自主闭环开关 / 执行治理参数（持久化 + 能即时生效的即时下发）。
 
-    返回完整快照；另附 ``rejected``：被忽略的键及原因（此前非法值被静默
-    丢弃，界面却提示"已保存"）。
+    v1.11.16：返回值补齐三样东西，让"保存成功 ≠ 已生效"不再含糊：
+      · ``applied``：本次真正写进配置的键值；
+      · ``rejected``：被忽略的键及原因（非法值不再静默丢弃）；
+      · ``effective``：每个键的生效时机（即时 / 下次任务 / 下次审批 / 下次调用 /
+        下次写入）与一句中文说明 —— 设置面板据此显示提示，用户不会误以为
+        "已经对正在跑的任务生效"。
     """
     agent = get_agent()
     cfg = _read_config()
@@ -1683,6 +1952,11 @@ async def api_set_autopilot(data: dict):
             continue
         if num == "max_iterations" and val < 1:
             rejected[num] = "至少为 1"
+            continue
+        # 终端超时是"每次命令等待多久"，0 会让命令立刻被杀 —— 不是"不限"。
+        # 想不限请用足够大的值（或 0 表示不限的 react_tool_timeout_seconds）。
+        if num in ("tool_timeout_seconds", "tool_timeout_max_seconds") and val < 1:
+            rejected[num] = "至少为 1（0 会让命令立即超时）"
             continue
         try:
             setattr(agent.config.execution, num,
@@ -1714,7 +1988,10 @@ async def api_set_autopilot(data: dict):
     agent.plan_executor.parallel = agent.config.execution.parallel_execution
     agent.plan_executor.use_cache = agent.config.execution.subtask_cache
     synced = _propagate_execution(applied) if applied else 0
+    runtime = _apply_execution_runtime(applied) if applied else {}
     out = _autopilot_snapshot(agent)
+    out["applied"] = applied
+    out["runtime"] = runtime
     if rejected:
         out["rejected"] = rejected
     out["sessions_synced"] = synced
@@ -2694,6 +2971,8 @@ def _resolve_overrides(data: dict, *, allow_plan: bool = True) -> tuple[str, boo
           goal?: "<目标 id>",           # v1.11.0 目标交付模式：本条服务于该长期目标
           mcp?: ["<服务器名>"],          # v1.11.0 引用 MCP 连接器：其工具必下发
           skills?: ["<技能名>"],         # v1.11.0 引用技能：注入指令 / 可经 skill_invoke 调用
+          model_mode?: "default"|"manual"|"auto",  # v1.11.15 本条消息的模型选择
+          provider?: str, model?: str,   # model_mode=manual 时的目标模型
         }
 
     返回 ``(本次交互模式, 是否把模式写成默认, 回执)``。回执随 ``task_start``
@@ -2731,6 +3010,17 @@ def _resolve_overrides(data: dict, *, allow_plan: bool = True) -> tuple[str, boo
             interaction, persist = "work", False
             receipt["plan"] = {"applied": True, "note": "计划生成后等待你批准才会执行" + note}
     return interaction, persist, receipt
+
+
+def _keep_model_overrides(data: dict) -> dict:
+    """断点续跑时保留本条消息的模型选择（v1.11.15）。
+
+    续跑会清空 overrides：专家 / 附件 / MCP / 技能等早已注入进任务文本或检查点，
+    再注入一次就会重复。模型选择不是注入内容，而是"这次用哪个模型跑" ——
+    续跑时继续携带才符合直觉，也才能让"选了模型后从断点续跑"真的按该模型跑。
+    """
+    ov = data.get("overrides") if isinstance(data.get("overrides"), dict) else {}
+    return {k: ov[k] for k in ("model_mode", "provider", "model") if k in ov}
 
 
 #: 单条消息最多引用的 MCP 连接器 / 技能数，以及注入的技能指令总量
@@ -3161,8 +3451,17 @@ def _apply_mentions(task: str, data: dict, receipt: dict) -> tuple[str, str]:
             f"不必再用工具重新读取）：\n" + "\n\n".join(blocks)), f"\n[mentions:{digest}]"
 
 
+#: 断点续跑支持的四种任务形态（v1.11.16）。kind 由 checkpoint.py 归一化给出
+_RESUME_KINDS = ("plan", "react", "multi", "loop")
+
+
 def _resume_target(data: dict, chat_sid: str) -> tuple[dict | None, str]:
-    """校验 WS/REST 请求里的 resume_checkpoint：必须属于本会话且确实可续跑。"""
+    """校验 WS/REST 请求里的 resume_checkpoint：必须属于本会话且确实可续跑。
+
+    v1.11.16：四种任务形态（plan / react / multi / loop）都接受；拒绝时给出
+    **可操作**的原因（不属于本会话 / 已完成或已续跑 / 已被新任务取代 /
+    不知道怎么续），前端据此提示，而不是生成一张点了没反应的死卡片。
+    """
     cid = str(data.get("resume_checkpoint") or "")
     if not cid:
         return None, ""
@@ -3174,8 +3473,47 @@ def _resume_target(data: dict, chat_sid: str) -> tuple[dict | None, str]:
     except Exception as e:
         return None, f"读取断点失败：{e}"
     if info is None or info.get("id") != cid:
-        return None, "该断点已失效（任务已完成、已续跑过或已被更新的任务取代）"
+        # 分不清具体是哪种"失效"：把三种常见原因都说出来，用户才知道下一步
+        return None, ("该断点已失效（任务已完成、已续跑过、已被更新的任务取代，"
+                      "或对应的检查点已被清理）")
+    kind = str(info.get("kind") or "")
+    if kind not in _RESUME_KINDS:
+        return None, f"不知道该断点（{kind or '未知类型'}）应如何续跑"
     return info, ""
+
+
+def _resume_budget_reset(agent: Any) -> None:
+    """续跑前把"本次任务"的预算窗口与用量从 0 起算（v1.11.16）。
+
+    续跑是**新的一次任务**：上一轮往往正是把 Token 预算烧光才停下，若接着
+    用同一份已用尽的额度，续跑会在第一次模型调用就再次失败 —— 用户看到
+    "继续"按钮，一按却报预算耗尽。优先用 budget 成员统一提供的
+    ``_begin_task_budget``（它还会重设 deadline 与上下文压缩阈值）；
+    该版本尚未合并时回退到旧的三步（窗口 / 资源计数 / 实时用量）。
+    """
+    begin = getattr(agent, "_begin_task_budget", None)
+    if callable(begin):
+        try:
+            begin()
+            return
+        except TypeError:                       # 旧签名不接受无参调用
+            pass
+        except Exception as e:                  # noqa: BLE001 - 旁路失败不阻断续跑
+            logger.warning("resume_begin_budget_failed", error=str(e))
+    for name in ("_reset_budget_windows", "_reset_usage_total"):
+        fn = getattr(agent, name, None)
+        if callable(fn):
+            try:
+                fn()
+            except Exception as e:              # noqa: BLE001 - 旁路失败不阻断续跑
+                logger.warning("resume_budget_fallback_failed", step=name, error=str(e))
+    tokens = getattr(getattr(agent, "resources", None), "tokens", None)
+    reset = getattr(tokens, "reset", None)
+    if callable(reset):
+        try:
+            reset()
+        except Exception as e:                  # noqa: BLE001 - 旁路失败不阻断续跑
+            logger.warning("resume_budget_tokens_reset_failed", error=str(e))
 
 
 def _apply_conversation_context(task: str, chat_sid: str) -> str:
@@ -3372,6 +3710,92 @@ def _apply_kb(task: str, hist: list | None = None) -> str:
         return task
 
 
+def _switch_agent_model(agent, provider: str, model: str, receipt: dict) -> bool:
+    """把本会话 Agent 的 LLM 切到指定模型；失败回滚并把回执改成 applied=false。
+
+    用户明确选了某个模型：切换失败却留在"半截状态"（config 改了、llm 没初始化），
+    或者悄悄用别的模型继续跑，都比直接说"没切成"更糟。所以保存旧配置、失败切回，
+    本条消息按"继续用默认模型"处理 —— 不因为一次换模型失败就中断整个任务。
+    """
+    prev = agent.config.llm.model_copy(deep=True)
+    ok = False
+    try:
+        ok = bool(agent.switch_llm(_llm_config_for(agent, provider, model)))
+    except Exception as e:
+        logger.warning("model_switch_failed", provider=provider, model=model,
+                       error=str(e))
+    if ok:
+        logger.info("model_override_switched", provider=provider, model=model)
+        return True
+    try:
+        agent.switch_llm(prev)
+    except Exception as e:                              # pragma: no cover - 防御
+        logger.warning("model_switch_rollback_failed", error=str(e))
+    receipt.setdefault("model", {})
+    receipt["model"]["applied"] = False
+    receipt["model"]["reason"] = (
+        f"模型 {provider}/{model} 切换失败：无法初始化该模型的 LLM，"
+        "请检查它的 API Key 与 api_base；本条继续使用默认模型")
+    return False
+
+
+def _resolve_model_override(agent, data: dict, raw_task: str, images: list | None,
+                            receipt: dict) -> tuple[Any, bool]:
+    """解析并应用本条消息的模型选择（v1.11.15 输入框模型选择器）。
+
+    ``overrides.model_mode``：``default`` / ``manual``（+ provider/model）/ ``auto``。
+    社区版 auto 明确回执"需要专业版/企业版"；manual 校验不过时回执 applied=false
+    并继续用默认模型 —— **绝不在用户不知情的时候换成别的模型**。
+
+    Returns:
+        ``(agent, handled)``。``handled=True`` 表示用户显式选了 manual / auto，
+        调用方应跳过 ``_apply_router`` 的默认自动路由：否则用户手选的模型会被
+        路由逻辑再覆盖一次，回执与实际执行的模型就不是同一个了。
+    """
+    ov = data.get("overrides") if isinstance(data.get("overrides"), dict) else {}
+    mode = str(ov.get("model_mode") or "").strip().lower()
+    if mode not in ("default", "manual", "auto"):
+        return agent, False
+    from automind.core import model_choice as _mc
+
+    router = _edition.get_feature("model_router")
+    available = None
+    if mode == "manual":
+        try:
+            available = _available_models_payload(agent)
+        except Exception as e:                          # pragma: no cover - 配置损坏
+            logger.warning("model_override_available_failed", error=str(e))
+
+    auto_select = None
+    if mode == "auto" and router is not None:
+        def auto_select(task, interaction, has_images, _router=router):
+            return _router.select(task, interaction=interaction,
+                                  has_images=bool(has_images))
+
+    result, model_receipt = _mc.resolve_choice(
+        {"mode": mode, "provider": ov.get("provider"), "model": ov.get("model")},
+        auto_select=auto_select, has_feature=router is not None,
+        default_llm={"provider": agent.config.llm.provider,
+                     "model": agent.config.llm.model},
+        available=available, task=raw_task,
+        interaction=agent._interaction.value, has_images=bool(images))
+    if model_receipt:
+        receipt["model"] = model_receipt["model"]
+    if result and result.get("switch"):
+        cur = (agent.config.llm.provider, agent.config.llm.model)
+        if (result["provider"], result["model"]) == cur:
+            # 目标就是当前在用的模型（手动选了与模式模型相同的那个 / 路由命中
+            # 同一档）：不必重建 LLM 客户端，回执仍如实写"本条使用该模型"。
+            logger.info("model_override_unchanged", mode=mode,
+                        provider=result["provider"], model=result["model"])
+        else:
+            _switch_agent_model(agent, result["provider"], result["model"], receipt)
+    m = receipt.get("model") or {}
+    logger.info("model_override", mode=mode, provider=m.get("provider"),
+                model=m.get("model"), applied=m.get("applied"))
+    return agent, mode in ("manual", "auto")
+
+
 def _apply_router(agent, raw_task: str, images: list | None):
     """模型智能路由（专业版特性 model_router）：按复杂度切换本次任务的模型。"""
     router = _edition.get_feature("model_router")
@@ -3464,11 +3888,46 @@ async def api_quota():
 # REST API — 团队协作（任务分配 / 活动通知；共享语义见手册 8.14）
 # ═══════════════════════════════════════════════════════════
 
+# v1.11.15 起任务的领域逻辑收敛到 automind/core/team.py（可单测的纯逻辑），
+# 在线成员在 automind/core/team_presence.py；本区只负责 HTTP 与广播接线。
+from automind.core import team as _team_mod  # noqa: E402
+from automind.core import team_presence as _presence  # noqa: E402
+
 _TEAM_FILE = _legacy_file("team_tasks.json")   # 旧文件（仅迁移用）
+#: 成员昵称持久化文件；None = <数据目录>/team_members.json（测试可指到临时路径）
+_TEAM_MEMBERS_FILE: Path | None = None
 
 
-def _team_load() -> list[dict]:
-    """团队任务（SQLite；旧 JSON 自动一次性迁移）。"""
+def _team_members_path() -> Path | None:
+    """昵称持久化文件路径（None 时由 team.members_file 取数据目录默认值）。"""
+    return _TEAM_MEMBERS_FILE
+
+
+def _team_names_load() -> dict[str, str]:
+    try:
+        return _team_mod.load_member_names(_team_members_path())
+    except Exception:
+        return {}
+
+
+def _team_name_save(sid: str, name: str) -> dict[str, str]:
+    try:
+        return _team_mod.save_member_name(sid, name, _team_members_path())
+    except Exception as e:      # 昵称写不进文件不该让改名接口失败
+        logger.warning("team_member_name_save_failed", error=str(e))
+        return {}
+
+
+# 启动时把持久化昵称灌进在线表：重启后成员一连接就显示自己的名字
+# （在线表本身为空是正常的 —— 重启后还没有人连上来）
+try:
+    _presence.load_names(_team_names_load())
+except Exception:               # pragma: no cover - 昵称文件坏掉不影响启动
+    pass
+
+
+def _team_raw_load() -> list[dict]:
+    """SQLite 原始读取（含旧 JSON 一次性迁移）；出错返回空表。"""
     try:
         db = _db_mod.get_db()
         _db_mod.migrate_json_once(
@@ -3479,9 +3938,29 @@ def _team_load() -> list[dict]:
         return []
 
 
+def _team_raw_save(items: list[dict]) -> None:
+    try:
+        _db_mod.get_db().team_replace(items[-_team_mod.MAX_TASKS:])
+    except Exception:
+        pass
+
+
+def _team_store() -> _team_mod.TeamStore:
+    """任务存储（server 端注入带迁移的 SQLite 读写；测试可 monkeypatch 两侧函数）。"""
+    return _team_mod.TeamStore(loader=_team_raw_load, saver=_team_raw_save)
+
+
+def _team_load() -> list[dict]:
+    """团队任务列表（规范化后；旧数据自动补默认字段）。"""
+    try:
+        return _team_store().load()
+    except Exception:
+        return []
+
+
 def _team_save(items: list[dict]) -> None:
     try:
-        _db_mod.get_db().team_replace(items[-200:])
+        _team_raw_save(items)
     except Exception:
         pass
 
@@ -3496,54 +3975,274 @@ def _team_event(sid: str, task: str, record: dict) -> dict:
             "time": time.strftime("%H:%M:%S")}
 
 
+def _team_actor(data: dict) -> str:
+    """本次变更的操作人：actor/creator/author/member/assignee 取第一个有值的。"""
+    for key in ("actor", "creator", "author", "member", "assignee", "name"):
+        v = str(data.get(key) or "").strip()
+        if v:
+            return v[:40]
+    return ""
+
+
+def _team_activity_event(kind: str, *, task: dict | None = None, sid: str = "",
+                         actor: str = "", detail: str = "", **extra) -> dict:
+    """构造团队活动事件。
+
+    统一带 ``task`` 全量对象（前端据此就地刷新看板），并保留平铺的
+    title/assignee 等字段 —— 早期前端只认 ``task_assigned`` 的 title/assignee，
+    这样升级前后都能"看得懂"这条通知。
+    """
+    ev: dict[str, Any] = {"type": "team_activity", "kind": kind,
+                          "sid": sid or "", "actor": actor or "",
+                          "time": time.strftime("%H:%M:%S")}
+    if task is not None:
+        ev.update({"task": task, "task_id": str(task.get("id") or ""),
+                   "title": str(task.get("title") or ""),
+                   "assignee": str(task.get("assignee") or ""),
+                   "status": str(task.get("status") or "")})
+    if detail:
+        ev["detail"] = detail
+    ev.update(extra)
+    return ev
+
+
+async def _broadcast_team_activity(kind: str, *, task: dict | None = None, sid: str = "",
+                                   actor: str = "", detail: str = "",
+                                   **extra) -> None:
+    """广播一条团队活动；广播失败绝不影响写操作本身。"""
+    try:
+        await _broadcast(_team_activity_event(kind, task=task, sid=sid, actor=actor,
+                                              detail=detail, **extra))
+    except Exception as e:
+        logger.warning("team_activity_broadcast_failed", kind=kind, error=str(e))
+
+
+def _team_member_rows(*, include_offline: bool = False) -> list[dict]:
+    """成员列表 = 在线表 + 任务负载。
+
+    ``include_offline=True`` 时把"有任务但当前不在线"的负责人也补进来（标记
+    ``online=False``）：按人过滤、负载汇总在看板历史数据上也要能用。
+    """
+    try:
+        rows = _presence.list_members()
+    except Exception:
+        rows = []
+    try:
+        summary = _team_mod.summarize(_team_load())
+    except Exception:
+        summary = {"by_assignee": []}
+    load = {r.get("assignee", ""): r for r in summary.get("by_assignee") or []}
+    online_names = set()
+    for m in rows:
+        row = load.get(str(m.get("name") or ""), {})
+        m["total"] = int(row.get("total", 0) or 0)
+        m["done"] = int(row.get("done", 0) or 0)
+        m["doing"] = int(row.get("doing", 0) or 0)
+        m["overdue"] = int(row.get("overdue", 0) or 0)
+        online_names.add(str(m.get("name") or ""))
+    if include_offline:
+        for name, row in load.items():
+            if not name or name in online_names:
+                continue
+            rows.append({"sid": "", "name": name, "online": False, "last_seen": "",
+                         "joined": "", "tabs": 0, "offline_assignee": True,
+                         "total": int(row.get("total", 0) or 0),
+                         "done": int(row.get("done", 0) or 0),
+                         "doing": int(row.get("doing", 0) or 0),
+                         "overdue": int(row.get("overdue", 0) or 0)})
+    rows.sort(key=lambda m: (not bool(m.get("online")),
+                             -int(m.get("total") or 0), str(m.get("name") or "")))
+    return rows
+
+
+def _team_members_payload(*, include_offline: bool = False) -> dict:
+    return {"type": "team_presence",
+            "members": _team_member_rows(include_offline=include_offline),
+            "time": time.strftime("%H:%M:%S")}
+
+
+async def _broadcast_presence(*, exclude: Any = None) -> None:
+    """在线成员变化后广播（"他走了"和"他来了"同样重要）。
+
+    ``exclude`` 用于连接建立的瞬间：不把成员表塞回刚连上的那条连接 ——
+    保持 "connected → 业务回执" 的既有握手顺序（v1.11.11 起前端测试依赖它）。
+    真实前端打开页面后紧接着就发 ``bind``，那条广播会带上完整成员表。
+    """
+    try:
+        payload = _team_members_payload()
+    except Exception as e:      # pragma: no cover - 广播失败不影响连接生命周期
+        logger.warning("team_presence_payload_failed", error=str(e))
+        return
+    if exclude is None:
+        try:
+            await _broadcast(payload)
+        except Exception as e:
+            logger.warning("team_presence_broadcast_failed", error=str(e))
+        return
+    for peer in list(_ws_clients.get("all", [])):
+        if peer is exclude:
+            continue
+        try:
+            await peer.send_json(payload)
+        except Exception:
+            pass
+
+
+def _team_error_response(e: Exception) -> JSONResponse:
+    status = 404 if isinstance(e, _team_mod.TaskNotFound) else 400
+    return JSONResponse({"error": str(e)}, status_code=status)
+
+
+def _team_patch_of(data: dict) -> dict:
+    return {k: data[k] for k in _team_mod.EDITABLE_FIELDS if k in data}
+
+
 @app.get("/api/team/tasks")
-async def api_team_tasks():
-    return {"tasks": _team_load()}
+async def api_team_tasks(status: str = "", assignee: str = "", q: str = "",
+                         priority: str = "", overdue: str = "", sort: str = ""):
+    """团队任务列表（支持过滤）+ 全量摘要。
+
+    v1.11.15 新增 ``status/assignee/q/priority/overdue/sort`` 查询参数与
+    ``summary``；``summary`` 始终按**全部任务**统计（过滤只影响 ``tasks``），
+    这样看板顶部的统计卡不会随筛选跳数字。旧的"只读 tasks"调用方不受影响。
+    """
+    tasks = _team_load()
+    filtered = _team_mod.filter_tasks(
+        tasks, status=status or None, assignee=assignee or None, q=q or None,
+        priority=priority or None,
+        overdue_only=str(overdue).lower() in ("1", "true", "yes"),
+        due_sort=(sort == "due"))
+    return {"tasks": filtered, "summary": _team_mod.summarize(tasks)}
 
 
 @app.post("/api/team/tasks")
 async def api_team_task_add(data: dict):
-    """分配一个团队任务（title 必填；assignee 为成员名/会话名）。"""
-    title = (data.get("title") or "").strip()[:120]
-    if not title:
-        return JSONResponse({"error": "title 必填"}, status_code=400)
-    items = _team_load()
-    task = {"id": uuid.uuid4().hex[:8], "title": title,
-            "assignee": (data.get("assignee") or "").strip()[:40],
-            "desc": (data.get("desc") or "").strip()[:500],
-            "status": "todo", "creator": (data.get("creator") or "").strip()[:40],
-            "created": time.strftime("%Y-%m-%d %H:%M")}
+    """新建团队任务（title 必填；默认 todo）。"""
+    actor = _team_actor(data)
+    sid = str(data.get("session_id") or "")[:128]
+    try:
+        task = _team_mod.create_task(
+            title=data.get("title"), desc=data.get("desc") or "",
+            assignee=data.get("assignee") or "",
+            priority=data.get("priority") or _team_mod.DEFAULT_PRIORITY,
+            due=data.get("due") or "", tags=data.get("tags"),
+            creator=data.get("creator") or "", status=data.get("status") or "todo",
+            actor=actor)
+    except _team_mod.TeamError as e:
+        return _team_error_response(e)
+    store = _team_store()
+    items = store.load()
     items.append(task)
-    _team_save(items)
-    await _broadcast({"type": "team_activity", "kind": "task_assigned",
-                      "title": title, "assignee": task["assignee"],
-                      "sid": data.get("session_id") or ""})
+    store.save(items)
+    await _broadcast_team_activity("task_created", task=task, sid=sid, actor=actor,
+                                   detail=f"新建任务「{task['title']}」")
     return {"status": "ok", "task": task}
 
 
 @app.post("/api/team/tasks/{tid}")
 async def api_team_task_update(tid: str, data: dict):
-    """更新团队任务状态：todo / doing / done。"""
-    status = (data.get("status") or "").strip()
-    if status not in ("todo", "doing", "done"):
-        return JSONResponse({"error": "status 必须是 todo/doing/done"}, status_code=400)
-    items = _team_load()
-    for t in items:
-        if t["id"] == tid:
-            t["status"] = status
-            _team_save(items)
-            return {"status": "ok", "task": t}
-    return JSONResponse({"error": f"任务不存在: {tid}"}, status_code=404)
+    """更新团队任务：状态 / 负责人 / 优先级 / 截止日期 / 标题 / 描述 / 标签。
+
+    旧调用只传 ``{"status": "doing"}`` 依然可用（等价于只改状态）。
+    """
+    actor = _team_actor(data)
+    sid = str(data.get("session_id") or "")[:128]
+    patch = _team_patch_of(data)
+    if not patch:
+        return JSONResponse({"error": "没有可更新的字段"}, status_code=400)
+    store = _team_store()
+    items = store.load()
+    idx = next((i for i, t in enumerate(items) if t.get("id") == tid), -1)
+    if idx < 0:
+        return JSONResponse({"error": f"任务不存在: {tid}"}, status_code=404)
+    old_status = items[idx].get("status")
+    try:
+        updated = _team_mod.update_task(items[idx], patch, actor=actor)
+    except _team_mod.TeamError as e:
+        return _team_error_response(e)
+    items[idx] = updated
+    store.save(items)
+    moved = old_status != updated.get("status")
+    await _broadcast_team_activity(
+        "task_moved" if moved else "task_updated", task=updated, sid=sid, actor=actor,
+        detail=(f"{old_status} → {updated.get('status')}" if moved else "更新了任务"))
+    return {"status": "ok", "task": updated}
 
 
 @app.delete("/api/team/tasks/{tid}")
-async def api_team_task_delete(tid: str):
-    items = _team_load()
-    kept = [t for t in items if t["id"] != tid]
-    if len(kept) == len(items):
-        return JSONResponse({"error": f"任务不存在: {tid}"}, status_code=404)
-    _team_save(kept)
+async def api_team_task_delete(tid: str, session_id: str = "", actor: str = ""):
+    store = _team_store()
+    try:
+        removed = store.delete(tid)
+    except _team_mod.TeamError as e:
+        return _team_error_response(e)
+    await _broadcast_team_activity(
+        "task_deleted", task=removed, sid=str(session_id or "")[:128],
+        actor=str(actor or "")[:40], detail=f"删除任务「{removed.get('title', '')}」")
     return {"status": "ok"}
+
+
+@app.post("/api/team/tasks/{tid}/comments")
+async def api_team_task_comment(tid: str, data: dict):
+    """给任务追加一条评论。"""
+    author = _team_actor(data)
+    sid = str(data.get("session_id") or "")[:128]
+    try:
+        task = _team_store().comment(tid, data.get("text"), author)
+    except _team_mod.TeamError as e:
+        return _team_error_response(e)
+    comment = (task.get("comments") or [{}])[-1]
+    await _broadcast_team_activity(
+        "task_commented", task=task, sid=sid, actor=author,
+        detail=f"评论：{str(comment.get('text') or '')[:60]}", comment=comment)
+    return {"status": "ok", "task": task, "comment": comment}
+
+
+@app.post("/api/team/tasks/{tid}/claim")
+async def api_team_task_claim(tid: str, data: dict):
+    """认领任务：负责人设为 member、状态置为 doing。"""
+    member = str(data.get("member") or data.get("assignee") or "").strip()[:40]
+    sid = str(data.get("session_id") or "")[:128]
+    try:
+        task = _team_store().claim(tid, member)
+    except _team_mod.TeamError as e:
+        return _team_error_response(e)
+    await _broadcast_team_activity(
+        "task_claimed", task=task, sid=sid, actor=member,
+        detail=f"{member} 认领了任务")
+    return {"status": "ok", "task": task}
+
+
+@app.get("/api/team/summary")
+async def api_team_summary():
+    """团队总览：状态/优先级分布、逾期、今日/近 7 天完成、按人负载、最近活动。"""
+    summary = _team_mod.summarize(_team_load())
+    summary["today"] = _team_mod.today_str()
+    return {"summary": summary}
+
+
+@app.get("/api/team/members")
+async def api_team_members():
+    """成员列表（在线表 + 有任务的离线负责人），带各自的任务负载。"""
+    rows = _team_member_rows(include_offline=True)
+    online = [m for m in rows if m.get("online")]
+    return {"members": rows, "online_count": len(online), "count": len(rows)}
+
+
+@app.post("/api/team/members/name")
+async def api_team_member_name(data: dict):
+    """保存"我的昵称"：更新在线表 + 持久化（重启后同一 sid 重新连上仍显示）。"""
+    sid = str(data.get("sid") or "").strip()[:128]
+    name = str(data.get("name") or "").strip()[:40]
+    if not sid:
+        return JSONResponse({"error": "sid 必填"}, status_code=400)
+    if not name:
+        return JSONResponse({"error": "name 不能为空"}, status_code=400)
+    _presence.rename(sid, name)
+    _team_name_save(sid, name)
+    await _broadcast_presence()
+    return {"status": "ok", "sid": sid, "name": name,
+            "members": _presence.list_members()}
 
 
 # ═══════════════════════════════════════════════════════════
@@ -4516,25 +5215,10 @@ async def api_providers():
 @app.get("/api/models")
 async def api_models(provider: str = ""):
     """获取某提供商的推荐模型列表（含用户自定义保存的模型）。"""
-    model_map = {
-        "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4-turbo", "o1", "gpt-3.5-turbo"],
-        "anthropic": ["claude-opus-4-7", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"],
-        "deepseek": ["deepseek-chat", "deepseek-reasoner", "deepseek-v4-pro", "deepseek-v4-flash"],
-        "kimi": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-        "moonshot": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
-        "bailian": ["qwen-max", "qwen-plus", "qwen-turbo"],
-        "dashscope": ["qwen-max", "qwen-plus", "qwen-turbo"],
-        "qwen": ["qwen-max", "qwen-plus", "qwen-turbo"],
-        "zhipu": ["glm-4-plus", "glm-4-flash", "glm-4-air"],
-        "glm": ["glm-4-plus", "glm-4-flash"],
-        "doubao": ["doubao-pro-128k", "doubao-pro-32k"],
-        "google": ["gemini-2.5-flash", "gemini-2.5-pro"],
-        "gemini": ["gemini-2.5-flash", "gemini-2.5-pro"],
-        "grok": ["grok-3", "grok-2"],
-        "ollama": ["llama3.2", "mistral", "codellama", "qwen2.5", "deepseek-coder"],
-        "custom": ["gpt-4o", "gpt-3.5-turbo"],
-    }
-    models = list(model_map.get(provider.lower(), []))
+    # v1.11.15：推荐模型清单与输入框模型选择器共用 automind.core.model_choice，
+    # 加一个新模型只改一处（此前两处各写一份，容易一边加了另一边看不到）
+    from automind.core.model_choice import recommended_models
+    models = recommended_models(provider.lower())
     # 用户自定义添加的模型置顶
     for m in reversed(_custom_models(provider.lower())):
         if m not in models:
@@ -6025,8 +6709,11 @@ async def api_run(data: dict):
         return JSONResponse({"error": f"无法从断点续跑：{resume_err}"}, status_code=409)
     if resume_info is not None:
         task = resume_info.get("task") or task
-        data = {**data, "interaction": resume_info.get("interaction") or interaction,
-                "overrides": {}}
+        # v1.11.16：旧检查点可能没有 interaction，多/循环检查点用 run_mode 兜底
+        data = {**data,
+                "interaction": (resume_info.get("interaction")
+                                or resume_info.get("run_mode") or interaction),
+                "overrides": _keep_model_overrides(data)}
     if not task and not images:
         return JSONResponse({"error": "任务内容为空"}, status_code=400)
     interaction, persist_mode, ov_receipt = _resolve_overrides(data, allow_plan=False)
@@ -6090,8 +6777,14 @@ async def api_run(data: dict):
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
+    # v1.11.15 输入框模型选择：本条显式选了模型（manual / auto）就先按它切换，
+    # 并跳过下面的默认自动路由 —— 否则用户手选的模型又被路由器悄悄换掉
+    agent, model_handled = _resolve_model_override(agent, data, raw_task, images,
+                                                   ov_receipt)
+
     # 模型智能路由（专业版 2 级 / 企业版 N 级）：按复杂度切换本次任务的模型
-    agent = _apply_router(agent, raw_task, images)
+    if not model_handled:
+        agent = _apply_router(agent, raw_task, images)
 
     if agent.llm is None:
         err_detail = getattr(agent, "_llm_init_error", "")
@@ -6176,42 +6869,64 @@ async def api_run(data: dict):
             return record
 
         # ── 多智能体协同 ──
-        if agent._interaction == InteractionMode.MULTI:
+        # v1.11.16：带 resume_checkpoint 时不走这里 —— 交给下面的
+        # agent.resume_from_checkpoint（multi 只跑剩余 role 步骤，不重做）
+        if agent._interaction == InteractionMode.MULTI and resume_info is None:
             t0 = time.perf_counter()
             ma = await agent.run_multi(task)
             usage = ma.get("token_usage")
-            _active_sessions[session_id]["status"] = "success"
+            _active_sessions[session_id]["status"] = (
+                "success" if ma.get("success", True) else "partial")
             record = {
-                "session_id": session_id, "task": task, "success": True,
-                "output": ma["output"][:6000], "steps": len(ma.get("steps", [])),
+                "session_id": session_id, "task": task,
+                # v1.11.16：预算耗尽 / 中断时 run_multi 返回 success=False，
+                # 这里如实透传（此前硬编码 True，把"没跑完"伪装成成功）
+                "success": bool(ma.get("success", True)),
+                "output": (ma.get("output") or "")[:6000],
+                "steps": int(ma.get("steps_executed")
+                             or len(ma.get("steps", []) or [])),
                 "backtracks": 0, "errors_corrected": 0,
                 **_usage_record_fields(usage),
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "plan": None, "interaction": "multi", "multi_steps": ma.get("steps", []),
+                **{k: ma[k] for k in ("stop_reason", "checkpoint_id", "resumable",
+                                      "budget_exhausted", "progress") if k in ma},
             }
             _push_history(record)
             _accumulate_tokens(record)
             return record
 
         # ── 循环工程 ──
-        if agent._interaction == InteractionMode.LOOP:
+        # v1.11.16：续跑同理，loop 从下一迭代继续而不是重跑整轮
+        if agent._interaction == InteractionMode.LOOP and resume_info is None:
             t0 = time.perf_counter()
             lp = await agent.run_loop(task)
             usage = lp.get("token_usage")
             record = {
-                "session_id": session_id, "task": task, "success": lp.get("success", False),
-                "output": (lp.get("output") or "")[:6000], "steps": lp.get("iterations", 0),
+                "session_id": session_id, "task": task,
+                "success": bool(lp.get("success", False)),
+                # v1.11.16：output 可能在预算耗尽时带"已保存断点"说明，
+                # 不再只看 iterations 字段
+                "output": (lp.get("output") or "")[:6000],
+                "steps": int(lp.get("iterations")
+                             or lp.get("steps_executed") or 0),
                 "backtracks": 0, "errors_corrected": 0,
                 **_usage_record_fields(usage),
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
-                "plan": None, "interaction": "loop", "stop_reason": lp.get("stop_reason", ""),
+                "plan": None, "interaction": "loop",
+                "stop_reason": lp.get("stop_reason", ""),
+                **{k: lp[k] for k in ("checkpoint_id", "resumable",
+                                      "budget_exhausted", "progress") if k in lp},
             }
             _push_history(record)
             _accumulate_tokens(record)
             return record
 
-        # ── 工作 / 编程模式：完整 Agent 流程 ──
+        # ── 工作 / 编程（以及 v1.11.16 的 multi/loop）断点续跑：完整 Agent 流程 ──
         if resume_info is not None:
+            # 续跑是"新的一次任务"：预算窗口与用量必须从 0 起算，否则上一轮
+            # 烧光的额度会让续跑第一次调用就再次失败（见 _resume_budget_reset）
+            _resume_budget_reset(agent)
             result = await agent.resume_from_checkpoint(resume_info["id"])
         else:
             result = await agent.run(task)
@@ -6232,6 +6947,13 @@ async def api_run(data: dict):
             "plan": _serialize_plan(result.plan) if result.plan else None,
             "interaction": agent._interaction.value,
         }
+        # v1.11.16：记录里标明"这一轮是续跑"，历史/审计能看出不是从头跑
+        if resume_info is not None:
+            record.update({
+                "resumed_from": resume_info["id"],
+                "resume_kind": str(resume_info.get("kind") or ""),
+                "resume_progress": resume_info.get("progress") or {},
+            })
         _push_history(record)
         _accumulate_tokens(record)
 
@@ -6244,6 +6966,9 @@ async def api_run(data: dict):
                 "tokens": result.token_usage.total,
                 "duration_ms": round(result.duration_ms, 1),
                 "plan": record["plan"],
+                **({"resumed_from": resume_info["id"],
+                    "resume_kind": str(resume_info.get("kind") or "")}
+                   if resume_info is not None else {}),
             })
             await _broadcast(_team_event(chat_sid, task, record))
         return record
@@ -6717,8 +7442,16 @@ async def ws_endpoint(ws: WebSocket):
     _ws_clients.setdefault("all", []).append(ws)
     # 先按默认会话登记：这样"连接刚建立、任务还没发"时也能收到本会话的审批弹窗
     _ws_bind_session(ws, "default")
+    # v1.11.15：在线成员登记。真正的成员 sid（工作区级）在 bind 时补上 ——
+    # 页面一打开前端就会声明，故这里先以 client_id 生成临时昵称占位。
+    try:
+        _presence.register(client_id, "default")
+    except Exception:                  # 在线感知是旁路能力，绝不能挡住任务通道
+        logger.warning("team_presence_register_failed", client=client_id)
     try:
         await ws.send_json({"type": "connected", "client_id": client_id})
+        # v1.11.15：把新成员告诉**其它**连接；自己稍后在 bind 广播里拿到全量列表
+        await _broadcast_presence(exclude=ws)
         while True:
             data = await ws.receive_json()
             action = data.get("action", "")
@@ -6738,6 +7471,16 @@ async def ws_endpoint(ws: WebSocket):
                 # 发起任务时才绑定会话，于是后台运行的工作流（没有发起连接）
                 # 的进度与审批弹窗送不到一个刚刷新过的页面上。
                 _ws_bind_session(ws, str(data.get("session_id") or "default")[:128])
+                # v1.11.15：在线成员按**工作区级 sid**聚合（前端在 bind 里带
+                # member_id；旧前端没有该字段则退回会话 sid）—— 同一浏览器的
+                # 多个标签页因此显示为一个人，而不是 N 个人。
+                try:
+                    member_sid = str(data.get("member_id") or data.get("session_id")
+                                     or "default")[:128]
+                    if _presence.bind(client_id, member_sid):
+                        await _broadcast_presence()
+                except Exception:
+                    logger.warning("team_presence_bind_failed", client=client_id)
             elif action in ("interject", "inject", "supplement"):
                 # 中途插话（v1.7.2）：三个名字都收，前端怎么写都不至于失效。
                 # 它**不碰** _ws_tasks —— 插话不打断、不重启正在跑的任务。
@@ -6792,6 +7535,12 @@ async def ws_endpoint(ws: WebSocket):
         _fail_pending_approvals(client_id,
                                 "发起审批的页面已关闭或连接中断，按拒绝处理")
         _ws_unbind(ws)
+        try:
+            # v1.11.15：注销在线状态并广播 —— 别人要能看到"他走了"
+            _presence.unregister(client_id)
+            await _broadcast_presence()
+        except Exception:
+            logger.warning("team_presence_unregister_failed", client=client_id)
         _ws_identity.pop(client_id, None)
         t = _ws_tasks.pop(client_id, None)
         if t and not t.done():
@@ -7052,9 +7801,12 @@ def make_approval_callback(
     此时只广播弹窗、并把"外部系统回执"（``POST /api/approvals/{id}``）
     当成可用的回答通道。
     """
-    approval_timeout = _approval_timeout_seconds(agent)
-
     async def _approval_cb(tool_name, args, tier, reason):
+        # v1.11.16：审批等待上限/超时处置改为**每次审批时现读**实时配置。
+        # 此前在构造回调时读一次（= 任务开始时），任务中途改设置对本次任务的
+        # 后续审批不生效，而界面还显示"已保存"。
+        approval_timeout = _approval_timeout_seconds(agent)
+        approval_action = _approval_timeout_action(agent)
         approval_id = uuid.uuid4().hex[:10]
         fut: asyncio.Future = asyncio.get_event_loop().create_future()
         _ws_approvals[approval_id] = fut
@@ -7128,7 +7880,7 @@ def make_approval_callback(
                 "tool": tool_name, "tier": tier, "approval_id": approval_id,
                 "reason": reason, "arguments": _jsonable(args or {}),
                 "timeout_s": approval_timeout,
-                "action": _approval_timeout_action(agent)})
+                "action": approval_action})
         except Exception:
             pass
         try:
@@ -7136,7 +7888,7 @@ def make_approval_callback(
         except TimeoutError:
             # 超时此前是**静默**返回 False：弹窗还挂在界面上，用户以为系统仍在
             # 等他点，实际上这一步早已按拒绝处理、任务也已经失败。必须明说。
-            action = _approval_timeout_action(agent)
+            action = approval_action
             approved = action == "approve"
             outcome = "自动批准" if approved else "自动拒绝"
             logger.warning("approval_timeout", tool=tool_name,
@@ -7207,8 +7959,12 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         return
     if resume_info is not None:
         task = resume_info.get("task") or task
-        data = {**data, "interaction": resume_info.get("interaction") or data.get("interaction"),
-                "overrides": {}}
+        # v1.11.16：旧检查点可能没有 interaction，多/循环检查点用 run_mode 兜底
+        data = {**data,
+                "interaction": (resume_info.get("interaction")
+                                or resume_info.get("run_mode")
+                                or data.get("interaction")),
+                "overrides": _keep_model_overrides(data)}
     if not task and not images:
         return
     # v1.7.7 输入框 overrides：本条消息的模式 / 专家 / 附件
@@ -7258,8 +8014,14 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
     # 按交互模式应用对应模型（per-mode 配置）
     agent = _apply_mode_model(agent, agent._interaction.value)
 
+    # v1.11.15 输入框模型选择：本条显式选了模型（manual / auto）就先按它切换，
+    # 并跳过下面的默认自动路由 —— 否则用户手选的模型又被路由器悄悄换掉
+    agent, model_handled = _resolve_model_override(agent, data, raw_task, images,
+                                                   ov_receipt)
+
     # 模型智能路由（专业版）：按任务复杂度切换模型
-    agent = _apply_router(agent, raw_task, images)
+    if not model_handled:
+        agent = _apply_router(agent, raw_task, images)
 
     if agent.llm is None:
         await ws.send_json({"type": "task_error",
@@ -7306,8 +8068,7 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
         完全看不出两者有关。这里在**开始等待**时把槽还回去，用户真的回答了
         （或超时终结）再收回；由 ``slot_state`` 保证只让一次、且不会让成负数。
         """
-        ex = getattr(agent.config, "execution", None)
-        if not getattr(ex, "release_slot_on_approval_wait", True):
+        if not _release_slot_on_approval_wait(agent):
             return False
         if slot_state["released"]:
             return False
@@ -7370,8 +8131,12 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
                  "interaction": agent._interaction.value,
                  # v1.7.7：overrides 回执 + 是否为断点续跑（前端据此给气泡挂 chip）
                  "overrides": ov_receipt, "ref": str(data.get("ref") or ""),
+                 # v1.11.16：resume 摘要带上 kind/run_mode/progress —— 前端横幅
+                 # 与进度条据此显示"计划剩余 N 步 / 已完成 N 个动作 / 第 N 轮"
                  **({"resume": {k: resume_info.get(k) for k in
-                                ("id", "kind", "done", "total", "remaining")}}
+                                ("id", "kind", "run_mode", "interaction", "status",
+                                 "done", "total", "remaining", "artifacts",
+                                 "stop_reason", "progress")}}
                     if resume_info is not None else {}),
                  # task 一并记上：出站事件（webhook）要告诉集成方"开始了什么"，
                  # 否则客户系统收到的只是一条"有个任务开始了"的空通知
@@ -7454,7 +8219,9 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             return
 
         # ── 多智能体协同 ──
-        if agent._interaction == InteractionMode.MULTI:
+        # v1.11.16：带 resume_checkpoint 时不重跑整轮 —— 交给下面的
+        # agent.resume_from_checkpoint（跳过已完成 role 步骤，只做剩余部分）
+        if agent._interaction == InteractionMode.MULTI and resume_info is None:
             async def on_ev(ev):
                 try:
                     await ws.send_json({"session_id": session_id, **ev})
@@ -7463,13 +8230,20 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             ma = await agent.run_multi(task, on_event=on_ev)
             usage = ma.get("token_usage")
             record = {
-                "session_id": session_id, "task": task, "success": True,
-                "output": ma["output"][:6000], "steps": len(ma.get("steps", [])),
+                "session_id": session_id, "task": task,
+                # v1.11.16：预算耗尽/中断时 run_multi 返回 success=False 与可续跑
+                # 信息，这里如实透传（此前硬编码 True 把"没跑完"伪装成成功）
+                "success": bool(ma.get("success", True)),
+                "output": (ma.get("output") or "")[:6000],
+                "steps": int(ma.get("steps_executed")
+                             or len(ma.get("steps", []) or [])),
                 "backtracks": 0, "errors_corrected": 0,
                 **_usage_record_fields(usage),
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "plan": None, "interaction": "multi",
                 "multi_steps": ma.get("steps", []),
+                **{k: ma[k] for k in ("stop_reason", "checkpoint_id", "resumable",
+                                      "budget_exhausted", "progress") if k in ma},
             }
             _push_history(record)
             _accumulate_tokens(record)
@@ -7478,7 +8252,8 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             return
 
         # ── 循环工程：自主"行动-观察-修正"闭环 ──
-        if agent._interaction == InteractionMode.LOOP:
+        # v1.11.16：续跑时从下一迭代继续（而不是从第 1 轮重来）
+        if agent._interaction == InteractionMode.LOOP and resume_info is None:
             async def on_loop(ev):
                 try:
                     await ws.send_json({"session_id": session_id, **ev})
@@ -7487,13 +8262,18 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             lp = await agent.run_loop(task, on_event=on_loop)
             usage = lp.get("token_usage")
             record = {
-                "session_id": session_id, "task": task, "success": lp.get("success", False),
-                "output": (lp.get("output") or "")[:6000], "steps": lp.get("iterations", 0),
+                "session_id": session_id, "task": task,
+                "success": bool(lp.get("success", False)),
+                "output": (lp.get("output") or "")[:6000],
+                "steps": int(lp.get("iterations")
+                             or lp.get("steps_executed") or 0),
                 "backtracks": 0, "errors_corrected": 0,
                 **_usage_record_fields(usage),
                 "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
                 "plan": None, "interaction": "loop",
                 "stop_reason": lp.get("stop_reason", ""),
+                **{k: lp[k] for k in ("checkpoint_id", "resumable",
+                                      "budget_exhausted", "progress") if k in lp},
             }
             _push_history(record)
             _accumulate_tokens(record)
@@ -7501,10 +8281,13 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             await ws.send_json({"type": "task_complete", **record})
             return
 
-        # ── 工作 / 编程模式：完整流程（可中断）──
+        # ── 工作 / 编程（以及 v1.11.16 的 multi/loop）断点续跑：完整流程（可中断）──
         # v1.7.7：断点续跑走真正的 resume（计划只跑剩余目标 / ReAct 带着已完成
         # 进度继续），不再把原任务文本重发一遍
         if resume_info is not None:
+            # 续跑是"新的一次任务"：预算窗口与用量从 0 起算（否则上一轮烧光的
+            # 额度会让续跑第一次调用就再次失败）
+            _resume_budget_reset(agent)
             result = await agent.resume_from_checkpoint(resume_info["id"])
         else:
             result = await agent.run(task)
@@ -7520,6 +8303,13 @@ async def _ws_run(ws: WebSocket, client_id: str, data: dict):
             # 中途插话账目：这轮收了几条、真正并进本轮几条（可观测、可复盘）
             "interjections": agent.interjection_report(),
         }
+        # v1.11.16：标明本轮是续跑（历史/审计/前端据此显示"已续跑"而不是"重跑"）
+        if resume_info is not None:
+            record.update({
+                "resumed_from": resume_info["id"],
+                "resume_kind": str(resume_info.get("kind") or ""),
+                "resume_progress": resume_info.get("progress") or {},
+            })
         _push_history(record)
         _accumulate_tokens(record)
         _record_and_notify(chat_sid, {"type": "task_complete", **record})
@@ -7707,15 +8497,16 @@ def _serialize_plan(plan) -> dict | None:
 #: 追加到末尾的话永远先命中降级路由，用户会看到"已激活却仍提示升级"。
 _LOCKED_ROUTES_AT: dict[str, int] = {"index": -1}
 
-#: 特性按这个顺序 attach（与启动时一致）
-_ATTACHABLE_FEATURES: tuple[str, ...] = (
-    "scheduler", "advanced_stats", "session_pool",
-    "custom_templates", "audit_export",
-    "sso_ldap", "rbac", "model_gateway",
-    "experts_pro", "expert_approval", "observability",
-    "workflow_triggers", "workflow_history", "workflow_governance",
-    "workflow_from_trace", "workflow_templates",
-)
+#: 特性按这个顺序 attach（与启动时一致）。
+#:
+#: 为什么从 ``COMMERCIAL_FEATURES`` **派生**而不是手写一份：这份清单以前是手工维护的，
+#: 于是漏掉了所有"自带 REST 路由"的特性（semantic_cache / model_router /
+#: cost_dashboard / rag_pro / kb_enterprise）—— ``get_feature()`` 有实现、``attach()``
+#: 却从未执行，真实路由没注册，请求只落到下面的 403 降级路由：Pro 许可证下用户看到
+#: "该功能未开通"（v1.11.17 修复）。派生之后，新增商业特性只要进了那张表就自动参与
+#: 挂载，不会再出现"第二份清单忘了改"；没有 ``attach()`` 的纯委派特性
+#: （multi_agent / loop_engine / office_pro 等）由下面的 hasattr 判断跳过。
+_ATTACHABLE_FEATURES: tuple[str, ...] = tuple(_edition.COMMERCIAL_FEATURES)
 
 
 def _hot_attach(added: list[str]) -> dict:
@@ -7817,6 +8608,42 @@ async def _broadcast_edition_change() -> None:
         await _broadcast({"type": "edition_changed", "edition": _edition.get_edition()})
     except Exception as e:                    # pragma: no cover - 纯通知
         logger.warning("edition_broadcast_failed", error=str(e))
+
+
+#: 主事件循环（lifespan 启动时记录）；许可证守护线程在**其它线程**里回调，
+#: 必须经 run_coroutine_threadsafe 投递回主循环，不能直接 await。
+_MAIN_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def _on_license_change(event: dict) -> None:
+    """周期复检线程回调：许可证失效/恢复时广播 edition 变化（v1.11.15）。
+
+    此函数在守护线程里被调用 —— 只做线程安全的投递，不阻塞、不碰存储。
+    """
+    loop = _MAIN_LOOP
+    if loop is None or loop.is_closed():
+        return
+    try:
+        asyncio.run_coroutine_threadsafe(_broadcast_edition_change(), loop)
+    except RuntimeError:                     # pragma: no cover - 解释器退出中
+        pass
+    logger.info("license_change_broadcast",
+                event=(event or {}).get("event"),
+                code=(event or {}).get("code"),
+                reason=(event or {}).get("reason"))
+
+
+def _wire_license_watchdog() -> None:
+    """把许可证守护线程的变更回调接到广播通道上（幂等；未装商业包时静默跳过）。"""
+    try:
+        from automind_pro.licensing.guard import register_license_change_listener
+    except Exception:
+        return                               # 社区版 / 未装扩展包：无需监听
+    try:
+        register_license_change_listener(_on_license_change)
+    except Exception as e:                   # pragma: no cover - 旧版扩展包
+        logger.warning("license_listener_register_failed", error=str(e))
+
 
 
 # ═══════════════════════════════════════════════════════════

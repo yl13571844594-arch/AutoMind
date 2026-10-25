@@ -279,13 +279,22 @@ class TestBudgetDecoupledFromMaxTokens:
 
 class TestWiring:
     def test_agent_resets_budget_at_task_start(self):
-        """源码级接线断言 —— 光有 ``TokenCounter.reset()`` 而没人调用等于没修。"""
+        """源码级接线断言 —— 光有 ``TokenCounter.reset()`` 而没人调用等于没修。
+
+        v1.11.16 起"每个任务一份预算"收敛到统一入口 ``_begin_task_budget``
+        （普通 / 会话克隆 / 子智能体 / multi / loop / 断点续跑共用），因此这里
+        断言两段接线都在：任务开始**调用统一入口**，且该入口**真的重置了**
+        ResourceManager 的已用量。
+        """
         import inspect
 
         from automind import agent as agent_mod
-        src = inspect.getsource(agent_mod.AutoMindAgent._run_impl_bound)
-        assert "self.resources.tokens.reset()" in src, (
+        start_src = inspect.getsource(agent_mod.AutoMindAgent._run_impl_bound)
+        assert "_begin_task_budget()" in start_src, (
             "任务开始时必须重置预算，否则会话第二个任务起会立即失败")
+        budget_src = inspect.getsource(agent_mod.AutoMindAgent._begin_task_budget)
+        assert "resources.tokens.reset()" in budget_src, (
+            "统一预算入口必须真的重置 ResourceManager 的已用量（不能只是调个名字）")
 
     def test_agent_uses_the_decoupled_helper(self):
         import inspect

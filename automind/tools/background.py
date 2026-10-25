@@ -9,6 +9,11 @@
 或先去做别的步骤、稍后回来取。命令对象本身与调用方解耦，因此
 （a）超时不再等于失败，（b）同一会话的多个后台任务互不干扰。
 
+两条启动通道共用同一张任务表（``terminal_background`` 对模型只有一个入口）：
+  · :func:`start` —— shell 语义（``terminal`` 的管道/重定向/&&）；
+  · :func:`start_argv` —— argv 直启（``pwsh``：PowerShell 命令不能经
+    cmd.exe 再解释一遍，详见该函数注释）。
+
 边界与诚实性：
   · 后台任务**不随会话结束而消失**（进程退出才会终止）—— 这是用户想要的
     "装完就好"，但也意味着它占用进程资源；因此有数量上限与最长存活时间。
@@ -49,6 +54,9 @@ class BackgroundTask:
     command: str
     workdir: str
     started_at: float
+    #: 任务类型（回执/列表里如实标注，模型据此知道该用哪种方式重跑）：
+    #: ``shell`` = terminal 的 create_subprocess_shell；``pwsh`` = argv 直启。
+    kind: str = "shell"
     process: Any = None
     task: asyncio.Task | None = None
     status: str = "running"          # running | ok | failed | timeout | error
@@ -74,6 +82,7 @@ class BackgroundTask:
         return {
             "task_id": self.task_id,
             "status": self.status,
+            "kind": self.kind,
             "command": self.command[:200],
             "workdir": self.workdir,
             "pid": self.meta.get("pid"),
@@ -134,15 +143,12 @@ async def _kill_process(proc: Any) -> bool:
         return False
 
 
-async def start(command: str, workdir: str, env: dict[str, str],
-                timeout: float) -> BackgroundTask:
-    """启动一个后台命令并立即返回（不等待它跑完）。
+def _begin(command: str, workdir: str, kind: str) -> BackgroundTask:
+    """建任务对象并校验并发上限（此时还没 spawn 进程）。
 
-    **进程必须在返回之前就创建好**：早期实现在返回后才在后台协程里
-    ``create_subprocess_shell``，于是调用方拿到 task_id 的那一刻
-    ``task.process`` 还是 None —— ``kill`` 因为拿不到进程句柄而**静默什么都不做**
-    （用户以为停掉了，命令其实还在跑），``poll`` 也看不到任何输出。
-    现在先 spawn、再交给协程等待，句柄从第一刻起就可控。
+    抽出来给 ``start`` / ``start_argv`` 共用：两条通道的记账口径必须完全一致
+    （同一个 ``_tasks`` 表、同一个上限），否则 ``terminal_background`` 就会
+    出现"看得到一类任务、看不到另一类"的割裂。
     """
     _prune()
     running = sum(1 for t in _tasks.values() if t.status == "running")
@@ -150,30 +156,102 @@ async def start(command: str, workdir: str, env: dict[str, str],
         raise RuntimeError(
             f"后台任务已达上限（{MAX_TASKS} 个运行中）；请先 poll/kill 已有任务。")
     task_id = f"bg{next(_seq)}"
-    bg = BackgroundTask(task_id=task_id, command=command, workdir=workdir,
-                        started_at=time.time())
+    return BackgroundTask(task_id=task_id, command=command, workdir=workdir,
+                          started_at=time.time(), kind=kind)
+
+
+async def _launch(bg: BackgroundTask, spawn: Any, timeout: float) -> BackgroundTask:
+    """spawn 进程并交给 ``_wait`` —— 两条通道共用的"启动即返回"路径。
+
+    **进程必须在返回之前就创建好**：早期实现在返回后才在后台协程里
+    spawn，于是调用方拿到 task_id 的那一刻 ``task.process`` 还是 None ——
+    ``kill`` 因为拿不到进程句柄而**静默什么都不做**（用户以为停掉了，命令
+    其实还在跑），``poll`` 也看不到任何输出。现在先 spawn、再交给协程等待，
+    句柄从第一刻起就可控。
+    """
     try:
-        bg.process = await asyncio.create_subprocess_shell(
+        bg.process = await spawn()
+    except Exception as e:
+        bg.status = "error"
+        bg.error = f"进程启动失败：{type(e).__name__}: {e}"
+        bg.finished_at = time.time()
+        _tasks[bg.task_id] = bg
+        logger.warning("background_task_spawn_failed", task_id=bg.task_id,
+                       kind=bg.kind, error=bg.error)
+        return bg
+    bg.meta["pid"] = bg.process.pid
+    _tasks[bg.task_id] = bg
+    bg.task = asyncio.create_task(_wait(bg, timeout))
+    logger.info("background_task_started", task_id=bg.task_id, pid=bg.process.pid,
+                kind=bg.kind, command=bg.command[:120], timeout_s=timeout)
+    return bg
+
+
+def _display_argv(argv: list[str]) -> str:
+    """把 argv 拼成给人看的命令行（**只用于回执/列表展示，不参与执行**）。"""
+    return " ".join(f'"{a}"' if (" " in a or "\t" in a) else a for a in argv)
+
+
+async def start(command: str, workdir: str, env: dict[str, str],
+                timeout: float) -> BackgroundTask:
+    """启动一个后台 shell 命令并立即返回（不等待它跑完）。
+
+    ``terminal(background=True)`` 走这条通道：它的语义本来就是 shell
+    （管道 / 重定向 / &&），所以继续用 ``create_subprocess_shell``。
+    """
+    bg = _begin(command, workdir, "shell")
+    return await _launch(
+        bg,
+        lambda: asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=workdir,
             env=env,
-        )
-    except Exception as e:
-        bg.status = "error"
-        bg.error = f"进程启动失败：{type(e).__name__}: {e}"
-        bg.finished_at = time.time()
-        _tasks[task_id] = bg
-        logger.warning("background_task_spawn_failed", task_id=task_id,
-                       error=bg.error)
-        return bg
-    bg.meta["pid"] = bg.process.pid
-    _tasks[task_id] = bg
-    bg.task = asyncio.create_task(_wait(bg, timeout))
-    logger.info("background_task_started", task_id=task_id, pid=bg.process.pid,
-                command=command[:120], timeout_s=timeout)
-    return bg
+        ),
+        timeout,
+    )
+
+
+async def start_argv(argv: list[str], workdir: str,
+                     env: dict[str, str] | None = None,
+                     timeout: float = 300.0, *, kind: str = "pwsh"
+                     ) -> BackgroundTask:
+    """用 argv **直接**启动后台进程（``create_subprocess_exec``，不经 shell）。
+
+    为什么 pwsh 后台任务必须走这里，而不能复用 ``start()`` 的
+    ``create_subprocess_shell``：
+
+      · 工具已经拿到了**完整的 PowerShell 命令文本**，argv 直启保证 PowerShell
+        收到的就是这段原文；一旦经过 ``cmd.exe /c`` 再转发，``$env:X``、``{ }``、
+        ``|``、``>``、``&``、``%VAR%`` 会先被 cmd 按自己的规则解释/替换，
+        命令被改写甚至截断 —— 报错现场与用户写的命令对不上，极难诊断；
+      · shell 拼接本身是命令注入面：命令里的引号/分号在 cmd 层的语义与
+        PowerShell 层完全不同，工具层的危险命令拦截校验的是 PowerShell 语义，
+        经 cmd 再解释一次等于换了一套规则；
+      · 这里要的语义就是"精确执行这条 PowerShell 命令"，不是"再套一层 shell"。
+
+    其余行为与 ``start()`` 完全一致：同一个 ``_tasks`` 表、同一套
+    poll/list/output/kill 入口（``terminal_background``），因此模型不需要
+    区分两类任务怎么取回。
+    """
+    args = [str(a) for a in (argv or [])]
+    if not args:
+        # 空 argv 是调用方实现错误（不是模型参数问题）：如实例话返回，
+        # 会得到一个"成功但什么都没跑"的后台任务，比直接报错更难发现。
+        raise ValueError("start_argv 需要非空的 argv 列表")
+    bg = _begin(_display_argv(args), workdir, kind)
+    return await _launch(
+        bg,
+        lambda: asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=workdir,
+            env=env,
+        ),
+        timeout,
+    )
 
 
 async def _wait(bg: BackgroundTask, timeout: float) -> None:

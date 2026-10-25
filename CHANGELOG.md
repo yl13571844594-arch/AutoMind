@@ -2,6 +2,527 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [1.11.18] - 2026-10-25
+
+**测评报告修复轮：评测执行器改无人值守审批并按任务超时硬性收敛（修复标准工具赛道「终端被拒 → 模型反复
+重试」导致的 smoke_run_command 超时 237.2s / Token 436,698 超限）；file_write 成功后磁盘回读校验让中文写入
+一次完成（修复 smoke_chinese_content 两条赛道 Token 超限）；补齐后台任务 / 子智能体查看 / 团队共享任务三项
+多任务与协作能力；版本号与全部文档同步**
+
+### 一、评测与终端执行：无人值守审批 + 超时硬收敛（对应测评报告 smoke_run_command 失败）
+
+- **现象**：2026-10-24 测评报告的标准工具赛道 `smoke_run_command` 失败 —— 任务超时 **237.2s**（上限 180s）、
+  Token **436,698**（上限 120k）。轨迹里模型一直在重试终端命令，每一步看起来都"合理"，就是永远做不完。
+- **根因**：评测执行器把审批模式配成 `auto`，而 `terminal` 命令的动态风险分达到 60 → `PermissionEngine`
+  返回 ASK_USER；评测进程没有审批通道，`react_executor._gate` 按失败关闭（拒绝），
+  `agent._on_approval_needed` 又回落到 CLI human_loop 读 stdin（评测环境 EOF → 拒绝）。
+  模型看不到"缺审批通道"这一事实，只能反复换写法重试 —— 耗时与 Token 一起爆炸。
+- **修复**：`automind/eval/executors.py` 改为**无人值守审批** —— `AutoMindExecutor.__init__` 与
+  `make_agent_config` 的 `approval_mode` 默认 **`approve_all`**；`automind/eval/runner.py` 新增
+  `--approval-mode`（`approve_all`（默认）/ `auto` / `ask`）可覆盖，并把"评测无人值守审批模式=…"显式写入
+  `report.notes`，报告里能看到本轮口径。执行器同时用 `asyncio.wait_for` 按任务 `timeout_seconds`
+  **硬性收敛**（>0 时生效；超时返回 `EvalOutcome(timed_out=True, error=…)`，且仍走 `_close(agent)`），
+  并把 `cfg.execution.max_task_seconds` 与任务上限对齐（取现有值与上限的较小者），评测不会再挂到 237s
+  才由外层放弃。
+- **回归测试**：新增 `tests/eval/test_eval_approval.py` —— `make_agent_config` 默认 / 可覆盖审批模式、
+  该配置下 `PermissionEngine.check("terminal", SENSITIVE, …)` 决策为 allow、CLI 参数解析、
+  注入假 agent 验证硬超时生效且 `timed_out` / `error` 正确、`close` 被调用、`report.notes` 含审批模式说明。
+- **全量复跑追加修复（同一轮回归中定位）**：
+  - **环境探测把"进程 cwd 所在仓库"误报成任务工作区**：`EnvironmentDetector.detect()` 的
+    pip / git / node / docker 探活此前继承**进程 cwd**。评测 / 隔离工作区把 `project_root` 指到临时目录后，
+    系统提示同时出现「Current Directory: …Temp\\…\\work」与「Git Repository: …\\自动化」——
+    模型据此跑去仓库里翻源码、翻评测断言定义（`smoke_chinese_content` 全量复跑实测 **309,665** token）。
+    现在所有探活统一以 `project_root` 为 cwd（目录不存在时退化为不指定）；临时工作区不是 git 仓库时
+    不再出现误导性的 Git 仓库行，环境上下文与工具实际工作目录一致。
+  - **`tool_called` 断言对 path 参数做工作区路径等价**：模型传**工作区内绝对路径**
+    （`…\\work\\hello.txt`）时，文件确实写对、`file_exists` / 内容断言全过，却因 `args: {path: hello.txt}`
+    精确字符串比较被判"参数不匹配"（`smoke_write_file` 全量复跑的真实假阴性）。现在 path 类参数
+    （path / file / file_path / target / target_path）先精确相等、再按「期望=工作区相对路径 × 实际=解析后路径」
+    等价比较；工作区外绝对路径、`..` 期望值不放宽，非 path 参数仍严格相等。
+  - **回归测试**：`tests/context/test_env_detector_cwd.py`（所有探活带 project_root cwd、工作区非仓库时
+    git_root 为空、目录缺失不崩）与 `tests/eval/test_runner.py` 的路径等价用例（工作区内绝对路径命中、
+    工作区外不命中、非 path 参数仍严格、`root=None` 退回严格）。
+  - **复跑结果（deepseek/deepseek-flash，2026-10-25，标准工具赛道）**：同套件 **7/7 全部通过**，
+    总耗时 **251.0s**、总 Token **186,243**（prompt 147,069 + completion 39,174）。
+    原失败两条 —— `smoke_run_command` **18,626 token / 26.0s**（修复前 436,698 / 237.2s 超时），
+    `smoke_chinese_content` **56,735 token / 36.2s**（修复前 180,170）；均低于 120k 上限且断言全过。
+
+### 二、Token 治理 / 中文写入：写一次即完成（对应 smoke_chinese_content 两条赛道 Token 超限）
+
+- **现象**：`smoke_chinese_content` 在标准工具赛道消耗 **180,170** token、Web 端赛道 **139,053** token
+  （均超 120k 上限）；功能断言全部通过，失败原因只是"模型写完文件后又反复用 `file_read` / 终端验证一遍"，
+  而每一步都要重发全量上下文。
+- **修复**：
+  - `file_write` 成功后**从磁盘回读校验**：回执新增 `size_bytes`（磁盘字节数，不是 `len(content)`）、
+    `chars`、`encoding`、`verified`、`readback_matches`（不一致时给出明确告警字段）、`preview`（前 80 字符），
+    并明确提示模型"写入成功且已回读校验，不需要再 `file_read` / `terminal` 复核"；
+    既有 `path` / `created` / `overwritten` / `content_hash` 字段保持不变，异常路径行为不变。
+  - 工具描述显式声明支持 **Unicode / 中文文件名与中文内容**（默认 UTF-8），遇到编码异常时可直接指定
+    `encoding`，不必先试探编码。
+  - `CODING_SYSTEM_PROMPT` 增加简单任务纪律：写 / 读一个文件、跑一条命令这类任务**验证一次即收尾**；
+    禁止用第二种工具重复确认同一事实（`file_write` 成功回执已含回读校验）；中文文件名 / 内容直接用。
+    每一步都重发全量上下文，反复验证是 token 消耗的最大来源。
+- **回归测试**：新增 `tests/tools/test_file_write_verify.py` —— 中文文件名 + 中文内容写入成功、
+  `verified` / `readback_matches` / `size_bytes` / `encoding` 正确、覆盖写、非 UTF-8 编码（gb18030）回读一致、
+  既有字段不回归、项目根外路径仍按既有规则拒绝。
+
+### 三、多任务与协作能力：后台任务 / 子智能体查看 / 团队共享任务
+
+- **后台任务工具补齐（`pwsh` 原生后台通道）**：`pwsh` 新增 `background` 参数 —— `background=true` 时用
+  `background.start_argv`（`create_subprocess_exec`，不经 shell，避免 PowerShell 把命令再解析一遍）启动，
+  **立即返回** `task_id` / status / pid 与"用 `terminal_background(action='poll', task_id=…)` 取回"的指引；
+  长耗时 PowerShell 命令不再同步等死。`terminal_background` 统一管理 shell 与 pwsh 两类后台任务
+  （poll / output / list / kill），遵守 `terminal_background_enabled` 配置（关闭时明确拒绝并说明），
+  `terminal` 原有后台通道行为不变。
+- **子智能体查看增强**：`subagent_list` 新增可选 `agent_id` —— 带 id 时返回该子智能体的
+  status / steps / tokens / error / elapsed 与**完整输出**（上限 20,000 字符，超出时标注 `truncated` 与原长，
+  并给出 `output_chars`）；不存在时给出可操作错误并列出可用 id。不带参数的旧行为保持不变。
+  记录层 `planning/subagents.py::OUTPUT_KEEP_CHARS` 同步从 **8000 提到 20000** —— 否则记录在
+  写入时就被截到 8000，工具层承诺的"完整输出"名不副实；两处上限必须对齐。
+- **团队共享任务 AI 工具（新增 `team_task`）**：新建 `automind/tools/team_tasks.py`，工具名 `team_task`
+  （敏感级，风险分 40），动作 `list` / `summary` / `create` / `update` / `claim` / `comment`，
+  直接使用 `automind.core.team` 的 `TeamStore`（团队任务看板 SQLite 存储），支持关键词查重、状态过滤、
+  条数上限、认领（缺省用当前会话昵称）、状态流转（todo / doing / blocked / done）与评论留痕；
+  变更成功后 best-effort 广播（`task_created` / `task_updated` / `task_claimed` / `task_commented`，状态流转走 `task_moved`）到 Web 看板，实时刷新。
+  此前团队任务看板只有 Web 与 REST、Agent 完全插不上手 —— 现在模型可以自己查重、认领、更新状态、留痕，
+  和人在同一块看板上协作；广播失败或模块未加载（CLI / 单测）时只是跳过，不会让工具调用失败。
+  同时把旧 `team_tasks.json` → SQLite 的**一次性迁移下沉到默认存储层**：此前迁移只在 server 的 loader 里，
+  若 Agent 先于团队看板第一次 API 调用写入，随后看板加载会拿旧 JSON 整表替换，AI 刚创建/认领的任务凭空消失；
+  现在 Web / REST / AI 工具三条入口看到同一份数据与同一套迁移语义（新增
+  `tests/core/test_team_store_migration.py`，含"迁移只做一次、不覆盖 AI 新写入"）。
+- **回归测试**：新增 `tests/tools/test_background_pwsh.py`（Windows 下验证 `start_argv` 短命令 poll 到
+  ok + stdout、kill 置 killed、list 含任务、`pwsh background=true` 回执含 task_id；其它平台 skip）、
+  `tests/tools/test_subagent_detail.py`（按 id 取详情、超长截断、未知 id 错误、无 agent_id 旧行为不变）、
+  `tests/tools/test_team_task_tool.py`（注入内存 TeamStore 跑 create→list→claim→update done→comment→summary
+  全链路；参数校验错误可操作；无 session_ctx 时 actor 回退；广播模块不存在时不抛异常）。
+
+### 四、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.18** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML：`automind/static/manual.html` / `使用手册.html`）
+  同步更新：新增 v1.11.18 速览；工具表补充 `team_task` / `file_write` 回读校验 / `pwsh` 后台参数；
+  8.13 补「Agent 参与共享任务」小节；8.15.2 补 `subagent_list` 的 `agent_id`；更新日志置顶本版条目。
+- `python -m pytest tests/test_version_consistency.py -q` 通过；全量回归 `pytest` **3019 条用例通过（exit 0）**，
+  `ruff check .` 通过；商业包同步重建 `pro/dist/automind_pro-1.11.18-py3-none-any.whl`
+  （119,601 B，sha256 `f8b4fe284cf27ad37c6e806f545101e6c17f487b98e8377e5406997bc43fb04b`），
+  并重建两份同号 `.ampkg` 升级包（内含 1.11.18 wheel）：
+  `dist/upgrades/AutoMind-PRO-acme-20271231.ampkg`（118,303 B）与
+  `dist/upgrades/AutoMind-ENT-bigcorp-00000000.ampkg`（118,313 B）；
+  `issue_license.py doctor` **12/12 全绿**、`pro/tests` 全量通过。
+- ⚠️ 本版为**源码级补丁发版**：前端无源码变更（沿用 v1.11.17 构建产物）；社区 wheel / sdist / PyPI /
+  三平台安装包按 `RELEASE.md` 流程发布。
+- 评测复跑（标准工具赛道，deepseek/deepseek-flash）：**7/7 通过**，总耗时 **251.0s**、总 Token **186,243**；
+  `smoke_run_command` **18,626 tok / 26.0s**（修复前 436,698 / 237.2s 超时）、
+  `smoke_chinese_content` **56,735 tok / 36.2s**（修复前 180,170），两条原失败用例均通过且低于 120k 上限。
+  另外单独复跑该两条用例：2/2 通过、合计 62,820 token。
+
+## [1.11.17] - 2026-10-23
+
+**修复已激活专业版 / 企业版仍提示「该功能未开通或被版本门控（feature=semantic_cache）」—— 语义缓存、
+模型智能路由、成本仪表盘与知识库进阶的真实 REST 路由从未挂载；工作区会话管理新增分组方式 / 排序方式 /
+筛选与搜索；版本号与全部文档同步**
+
+### 一、修复「部分电脑」上语义缓存加载失败（已付费却报未开通 / 版本门控）
+
+- **现象**：部分机器（已安装同版本扩展包、许可证也已激活）打开侧栏「🧭 路由与成本」时，语义缓存卡片报
+  「该功能未开通或被版本门控（feature=semantic_cache），本卡片已降级」，模型智能路由与成本盘点同样不可用；
+  但 `/api/status` 明确显示这些特性已授权，输入框的自动路由 / 缓存链路其实也在跑 —— 只有管理界面被 403。
+- **根因**：`automind/server.py` 的 `_ATTACHABLE_FEATURES` 是**第二份手工维护**的特性清单，漏掉了所有
+  "自带 REST 路由"的商业特性：`semantic_cache`、`model_router`、`cost_dashboard`、`rag_pro`、`kb_enterprise`。
+  `edition.get_feature()` 明明拿到了实现，但启动时 `attach(ctx)` 从未执行 → 真实路由（`/api/cache`、`/api/router`、
+  `/api/costs`、`/api/kb/kbs` 等）从未注册，请求只能命中 `_locked(feature)` 的 403 降级路由。
+  由于是否暴露取决于机器上装的是哪一版扩展包 / 哪一个启动路径，表现为"部分电脑有问题"。
+- **修复**：挂载清单改为从 `edition.COMMERCIAL_FEATURES` **派生**（`tuple(_edition.COMMERCIAL_FEATURES)`），
+  保留 `hasattr(feature, "attach")` 过滤；以后再新增"带路由的商业特性"会自动被挂载，不会再因为忘改第二份清单
+  而"买了却 403"。启动路径与应用内升级 / 粘贴许可证的**热激活路径**（`_hot_attach`，新路由仍插在 403 降级路由之前）
+  一并生效，不需要重启。
+- **误导文案**：`upgrade_hint()` 以前在"当前已是专业版"时仍输出"请安装 automind-pro 并配置有效许可证"。
+  现在区分两种语境：版本不够 → 保留升级引导；**版本已够但实现未加载** → 明确说明"扩展包未注入该特性
+  （扩展包版本过旧 / 热激活未完成），请更新到与主程序同版本的扩展包后重启服务"。
+  前端 `RouterView` 在 `/api/status` 显示已授权、接口却返回 403 时，同样给出"服务端未挂载 → 重启 / 换扩展包"的
+  可操作提示（错误面板 + 重试，不白屏）。
+- **回归测试**：新增 `tests/server/test_pro_feature_routes.py`（社区版可跑：挂载清单必须与
+  `COMMERCIAL_FEATURES` 同源同序、五个带路由特性一个不落、降级路由仍在）与
+  `pro/tests/test_feature_route_attach.py`（PRO / ENT 激活后"每个带 `attach()` 的实现都必须在挂载清单"
+  + 启动路径与热激活路径的"真实路由优先于 403 降级路由"，PRO 下 `/api/cache`、`/api/router` 与 ENT 下
+  `/api/costs`、`POST /api/kb/kbs` 实际返回 200）；用旧手工清单跑新测试可复现 5 处失败，修复后全绿。
+
+### 二、工作区会话管理：分组方式 / 排序方式 / 筛选会话 / 搜索会话
+
+- **会话管理面板（💬）**：侧栏「会话」标题右侧的 ⚙️、折叠侧栏的 💬、设置菜单「💬 会话管理」与命令面板
+  `/sessions` 均可打开；范围支持「当前工作区 / 全部工作区」（跨工作区合并时标出所属工作区，单个工作区读取失败
+  只降级为该行提示，不影响其它结果）。
+- **搜索**：实时搜索标题 / 归档要点摘要 / 会话 ID，空格分词、多关键词**全部命中**（允许分别命中不同字段），
+  大小写不敏感，一键清除；侧栏也新增 🔍 快速搜索（命中已归档会话时自动展开归档组）。
+- **筛选**：全部 / 📌 置顶 / 🟢 运行中 / 🗄 已归档；已归档的置顶残留按"已归档"处理，不会混进置顶筛选。
+- **分组方式**：不分组 / 按时间（今天 · 昨天 · 近 7 天 · 更早，按本地日历日分桶，未来时间戳归"今天"）/
+  按状态（运行中 · 置顶 · 普通会话 · 已归档）/ 按工作区（当前工作区排最前）。
+- **排序方式**：最近活动 ↓ / 创建时间 ↓ / 标题 A→Z / 轮数 ↓；**置顶始终优先**，同值依次按最近活动、
+  创建时间、sid 兜底，列表顺序稳定不跳动。
+- **操作与持久化**：打开（跨工作区时先切换工作区、再切换会话，服务端目录 / 记忆 / 索引同步切换）、
+  双击标题重命名、置顶 / 取消、归档 / 恢复、删除（二次确认）；任务执行中沿用既有的保护语义
+  （执行中不允许切换 / 归档 / 删除）。范围、筛选、分组、排序自动记住（`localStorage`），刷新后保留；
+  面板与侧栏共用同一套纯函数（`web/src/lib/sessionView.ts`），同一个关键词两边结果一致。
+- **空态与失败**：区分"还没有会话"与"筛选/搜索后没有匹配（一并给清除入口）"；读取失败显示错误条 + 重试。
+
+### 三、版本与文档
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.17**（`tests/test_version_consistency.py` 覆盖）；
+  前端 `automind/static/dist/` 用本版源码重新构建，手册（`.md` / `.html`）与商业运营手册 Word 同步更新。
+- 使用手册：8.7.1「会话管理」补充分组 / 排序 / 筛选 / 搜索说明；8.18「智能路由与成本」补充本次路由挂载修复与
+  排障口径；更新日志新增本版条目。
+
+### 四、验证
+
+- 新增测试：`tests/server/test_pro_feature_routes.py` **7 passed**、`pro/tests/test_feature_route_attach.py`
+  **5 passed**、`tests/core/test_edition.py` 新增 upgrade_hint **3 passed**；`tests/server` **482 passed**；
+  屏蔽 `automind_pro` 的社区版场景 **47 passed**（核心测试不依赖商业包）。
+- 真机验收（Playwright + 系统 Edge，真实服务 + 真实 API）：PRO / ENT 两套环境 **50/50 检查通过** ——
+  PRO 下 `/api/cache`、`/api/router`、`POST /api/kb/kbs` **200**，ENT 下 `/api/costs` **200**；
+  「路由与成本」页语义缓存 / 智能路由 / 成本仪表盘卡片正常渲染、无降级错误条、页面无未捕获异常；
+  会话管理面板的搜索 / 筛选 / 三种分组 / 四种排序 / 全部工作区合并 / 跨工作区打开 / 设置持久化均实测通过。
+
+## [1.11.16] - 2026-10-23
+
+**任务执行连续性（Token 预算自动续窗 / 协同·循环·子智能体耗尽后可续跑）；断点续跑四种模式
+真正可用（计划 / ReAct / 协同 / 循环，重启后可发现并接续）；工作流自动化强化（步骤条件、
+失败降级、整轮超时、Token 统计、触发器补偿与重放保护）；执行治理 26 个参数逐项生效；
+修复「路由与成本」页偶发 `toFixed` 崩溃并增强旧版 API 数据兼容**
+
+### 一、任务预算连续性与多模式续跑（不再"Token 耗尽任务就停住"）
+
+- **统一每任务预算引导**：新增 `AutoMindAgent._begin_task_budget()`，普通 ReAct / 计划 /
+  协同 / 循环 / 子智能体 / 断点续跑六个入口全部走同一套重置（LLM 计数、ResourceManager、
+  `budget_auto_continue` 窗口、预警与压缩阈值、墙钟 deadline、usage 累计）——
+  修复协同/循环模式**没有重置预算**导致"上一任务用光窗口、切模式就撞预算停住"的问题。
+- **预算耗尽不再被吞**：多智能体编排器（协调/角色/综合三处）遇 `BudgetExhaustedError`
+  不再降级成"(执行失败: …)"或空输出，而是携带已完成进度上抛；循环引擎识别 ReAct 的
+  `stop_reason=task_budget` 立即带进度退出（不再继续下一轮/误判完成）；`_loop_verify`
+  不再把预算异常伪装成"验收不可用"。
+- **耗尽即落可续跑检查点**：`run_multi` / `run_loop` 在预算耗尽（或异常中断）时写入带
+  `run_mode / stop_reason / budget_exhausted / progress` 的检查点（协同：已完成的 role 步骤、
+  白板、计划；循环：已跑轮次、上一轮输出与反馈），返回 `success=false` + `resumable=true`，
+  Web 端断点横幅随即出现，点「继续协同 / 继续循环」即可从断点续跑（剩余 role 步骤 /
+  下一迭代），**已完成的工作不重做**。
+- **子智能体独立预算**：子任务改用自己克隆的 ResourceManager（`max_tokens` 作为子预算），
+  不再临时改写父任务预算；耗尽时返回 `stop_reason=budget_exhausted` + `resumable` 并记录
+  `status=budget_exhausted`（保留部分输出），父 Agent 可重新派发，不再静默当成功；子任务
+  同样享受自动续窗。
+- 前端 `ws.ts` 新增 `budget_exhausted` 事件处理，预算用尽文案统一指向「从断点续跑」；
+  右栏子智能体状态补「预算用尽（可续跑）」标签。
+
+### 二、断点续跑真正可用（计划 / ReAct / 协同 / 循环四种模式）
+
+- **检查点可发现性**：`CheckpointManager.resumable_for_session` 与 `list_resumable` 不再只认
+  计划模式 —— 新增统一归一化摘要（`kind=plan|react|multi|loop` + `run_mode/stop_reason/
+  progress`），ReAct 的 partial 检查点即使没有动作记录也能续跑；每会话只保留最新一条、
+  过滤 completed/dismissed/resumed、按时间倒序、损坏文件跳过；旧格式检查点保持兼容。
+- **服务端续跑路由**：`_resume_target` 校验四种 kind 并给出可操作原因；WS/REST 在
+  协同/循环模式带 `resume_checkpoint` 时不再走"从头直接跑"分支，统一调用
+  `agent.resume_from_checkpoint`（续跑前重置预算窗口，续跑可再跑满一个任务额度）；
+  `task_start / task_complete` 携带 `resumed_from / resume_kind / resume_progress`。
+- **续跑语义**：计划只执行剩余目标（已完成步骤跳过）；ReAct 把已完成动作、产物、失败项
+  作为事实交给模型并明确"不要重做"；协同跳过已完成 role 只补剩余步骤再综合；循环从
+  下一轮继续并恢复上一轮输出/反馈。旧检查点标记 `resumed`，不会被重复续跑。
+- **前端入口**：断点横幅按 kind 显示不同图标/文案/按钮（继续计划 / 从断点续跑 / 继续协同 /
+  继续循环），预算耗尽或任务异常后自动刷新出现；续跑前自动切换到断点所属模式；
+  `task_resumed` / `plan_resumed` 实时更新进度，dismiss 后不再提示。
+- **检查点 id 冲突修复**：同一系统时钟刻度内连续保存两次检查点会生成相同 id 并静默覆盖
+  前一份（Windows 粗粒度时钟下会真实发生，尤其"预算耗尽立即写断点再马上续跑"）——
+  保存 id 末段改为「6 位微秒 + 4 位进程内自增序号」，加锁与文件存在性双重兜底，
+  旧检查点/`session_of` 解析完全兼容。
+
+### 三、工作流自动化强化（R-401 ~ R-405）
+
+- **步骤级条件执行** `if` / `unless`：所有步骤通用（含 foreach/parallel 子步骤），条件不成立
+  标记 `skipped`、输出为 `null`（后续引用会明确报错）；条件无法判定按失败处理；dry-run
+  只预览不跳过。与既有 `branch` 跳转互补，`branch` 步骤禁用条件避免语义冲突。
+- **失败降级分支** `on_failure: fallback(<步骤id>)`：步骤失败后跳到指定恢复步骤继续执行，
+  失败与恢复步骤之间的步骤标记 `skipped` 并写明原因；失败步骤仍如实记为 failed（整轮
+  至少 partial）；恢复步骤可用 `{{ steps.x.error }}`；加载期校验目标存在、向后、非自身。
+- **整轮硬超时** 顶层 `timeout_seconds`：到点中止当前步骤（aborted）、剩余步骤 skipped、
+  整轮标记 aborted 并写明上限，避免重试叠加把无人值守工作流无限拖长；与步骤级超时分工明确。
+- **Token 统计进入报告与看板**：修复 `runs.summarize()` 一直读不到 token（看板 token 恒为 0）
+  的链路 bug —— 现在每步/整轮都记录 `tokens{prompt,completion,total}`（取 LLM 响应 usage
+  或 agent 步骤的 tokens，拿不到记 0、不估算）；专业版失败通知补「耗时 / Token / 最慢步骤」。
+- **触发器可靠性（专业版，沿用 `workflow_triggers` 门控）**：cron 触发器支持
+  `catch_up: once|skip`（默认 once，等价旧行为）与 `max_delay_seconds`（迟到多久内才补跑），
+  错过补偿状态写入触发器视图与 API；webhook 触发器支持 `dedupe_window`（秒，默认关闭），
+  窗口内相同 `Idempotency-Key`（或请求体哈希）重复到达返回 `duplicate=true` 且不重复执行。
+- 文档：`docs/WORKFLOWS.md` 新增语法示例与最佳实践，`docs/WORKFLOW_ROADMAP.md` 更新状态与
+  剩余项说明；全部新字段可选、默认值等于旧行为，旧工作流无需修改。
+
+### 四、执行治理参数真正生效（26 项逐项审计）
+
+- **逐项审计并修复 7 类"设了不生效 / 延迟生效却无提示"**：
+  - 轨迹 `trace_enabled` / `trace_max_runs`：记录器改为可实时下发（此前永远读出厂默认值、关不掉），
+    界面补齐缺失的「每会话保留轨迹数」输入框；
+  - 终端 `tool_timeout_seconds` / `tool_timeout_max_seconds` / `terminal_background_enabled`：
+    每次调用前读取实时配置（此前只在 Agent 构造时捕获一次）；
+  - 写冲突 `write_conflict_policy`：写冲突守卫改读当前任务配置（此前每次新造默认配置，
+    `block` 实际按 `warn` 放行）；
+  - 审批 `approval_timeout_seconds` / `approval_timeout_action`：每次审批触发时现读（此前任务开始读一次）；
+  - `task_token_budget`：保存时同步全局 Agent 与全部会话克隆的 ResourceManager（此前旧实例一直用旧预算）；
+  - 会话克隆传递链兜底 `_sync_execution_config`（每次取执行器时对齐 26 参数与执行器字段），
+    重启恢复逻辑抽成可测函数；非法值（如终端超时 0）改为 rejected。
+- **界面生效时机**：POST 返回 `applied / rejected / effective（timing + 中文说明）/ runtime /
+  sessions_synced`，设置面板逐项标注「即时生效 / 下次任务生效 / 下次审批生效 / 下次调用生效 /
+  下次写入生效」，底部文案改为诚实口径（对进行中的任务不追溯）。
+- 新增 `docs/GOVERNANCE.md`：26 个参数的默认值、读取点、生效时机、调参建议与诚实边界。
+
+### 五、修复「路由与成本」页偶发崩溃 + 旧版本数据兼容
+
+- **根因**：`CacheCard` 用 `useState(cache.threshold)` 初始化阈值；当 `/api/cache` 返回数据缺少
+  `threshold`（旧版商业扩展包 / 字段裁剪 / 响应不完整）时 `thr=undefined`，随后
+  `thr.toFixed(2)` 抛 `TypeError: Cannot read properties of undefined (reading 'toFixed')`，
+  页面无局部错误边界 → 整页白屏。
+- **修复**：阈值统一经 `safeThreshold()`（非法值回退 `0.93`，仅在服务端上报合法值时显示滑杆，
+  否则静态展示并说明）；新增 `web/src/lib/num.ts` 数值工具，`/cache` `/router` `/costs`
+  三个响应先 `sanitize` 归一（缺字段/null/字符串数字/坏档位/坏 providers/坏 preview 全部兜底），
+  所有数字格式化只在 `Number.isFinite` 后调用；403 功能门控与 `{error}` 回包显式走错误面板
+  而不是静默显示 0；`Ring/Spark/CostChart` 内部再防 NaN。
+- **页面级容错**：复用 `ui/ErrorBoundary` 在页面最外层 + KPI/缓存/路由/预演/成本五个区块
+  各包一层 —— 单卡渲染异常只降级该卡并可重试，其它卡片与导航仍可用，不再白屏。
+- 兼容性回归：Playwright + 系统 Edge headless 驱动真实组件 mock 六种数据形态
+  （旧版缺字段 / 恶意坏数据 / 部分接口 500 / 403 门控 / 全 null / 正常数据）**60 passed**，
+  无白屏、无未捕获异常、无 NaN 文本、正常视觉不回归。
+
+### 六、测试与验证
+
+- Token 预算 / 断点续跑：新增 `tests/core/test_budget_continuation.py`（12）、
+  `pro/tests/test_multi_loop_budget_resume.py`（12）、`tests/test_checkpoint_resume_e2e.py`
+  （19，含四模式续跑、扫描/API/WS/REST 路由、同 tick 检查点 id 唯一化）；
+  指定组合 **51 passed**；`tests/planning` + 续跑 e2e **231 passed**；
+  `tests/planning tests/core` 全绿。
+- 执行治理：新增 `tests/test_execution_governance.py` **47 passed**（26 参数矩阵 + 行为级断言）；
+  `tests/server` 477、`tests/tools` 386 passed。
+- 工作流：新增 `tests/workflow/test_automation_v1116.py` **57 passed**；
+  `tests/workflow` 全量 **457 passed**；server 工作流 API 45、pro 治理 24 passed。
+- 前端：`tsc --noEmit` 通过；`vite build` 重建 `automind/static/dist/`；Playwright 兼容性回归 60 passed。
+- 版本纪律：核心 / 商业扩展包 / Web / 安装器 / 手册统一 **1.11.16**；重新构建
+  `automind_pro-1.11.16` wheel 与 `.ampkg`（协同/循环续跑依赖同版本 Pro 扩展，旧 1.11.15
+  扩展包不接受续跑参数，必须一起升级）；`issue_license.py doctor` 12 项全绿。
+- 已知边界：协同/循环只在预算耗尽或异常中断时落检查点（进程被强杀无中途断点，普通 ReAct
+  仍按步落盘）；ReAct 续跑的真实性依赖模型遵循"不要重做"清单；执行治理中标注"下次任务生效"
+  的参数对进行中的任务不追溯；触发器补偿/去重默认关闭或等价旧行为，需显式配置才启用。
+
+## [1.11.15] - 2026-10-22
+
+**商业运营体系补齐（许可证 v3 / 批量发证与台账 / 离线 CRL 吊销 / 机器绑定 / 周期复检 /
+宽限期 / 公钥轮换 / 试用期）；输入框模型选择器 + 专业·企业版自动路由；团队协作工作台；
+「智能路由与成本」界面重做；图文版《商业运营升级与发证操作手册》**
+
+### 一、商业运营闭环补齐（从"能激活"到"能运营"）
+
+- **许可证协议 v3（向后兼容 v2）**：`AMP2-<KID>-<PAYLOAD>-<SIG>` 格式不变，payload 可选新增
+  `id`（序列号 8~16 位）、`m`（客户机指纹 sha256 前 16 位）、`n`（生效起始日 not-before）；
+  三个字段都不给时仍编码为 v2 —— 给仍在使用旧扩展包的客户发证不会被破坏。
+  `parse_license` 契约不变（无效/过期/未生效/机器不符/被吊销均返回 None），新增
+  `parse_license_detail()` 返回 `expired / not_yet_active / machine_mismatch / revoked /
+  clock_rollback / grace_expired / key_id_unknown / signature_invalid` 等具体原因码及中文文案。
+- **批量发证与台账**：`issue_license.py issue-batch --csv customers.csv --out dist/licenses
+  [--bundles] [--ledger ...] [--strict]` 一次签发整批客户（CSV 列：
+  customer,tier,expiry,seats,machine,serial,start,notes[,days]），逐行输出结果、可选同时生成
+  每个客户的 `.ampkg`，并写 12 列台账（customer/tier/expiry/issued/serial/machine/seats/
+  license/wheel/sha256/notes/created_at）。`--strict` 时任一行失败即非零退出。
+- **试用期**：`issue PRO acme --days 30` 按"今天 + N 天"自动算到期，替代手工推算日期；
+  `--start YYYYMMDD` 可设生效起始日（客户拿到后在生效日之前不能激活，状态显示"尚未生效"）。
+- **机器绑定**：`issue ... --machine <16hex|auto>` 把许可证绑定到客户机指纹；客户可在
+  「⭐ 升级 / 激活」面板复制本机指纹后发给发行方，换机时按新指纹重签；容器/克隆机可用
+  `AUTOMIND_MACHINE_ID` 固定指纹。未绑定的许可证（`m` 缺省）仍是不限机器的浮动授权。
+- **离线吊销 CRL**：`revoke <license|serial> --reason ...` 追加到 `dist/crl/license_crl.json`；
+  `bundle` 会把存在的 CRL 打进 `.ampkg`（`license_crl.json` + manifest 摘要）并随升级包送达客户；
+  客户端也可用 `AUTOMIND_LICENSE_CRL` 指定 CRL 文件。`crl list / crl show` 查看。
+- **周期复检 + 宽限期 + 时钟回拨检测**（`pro/automind_pro/licensing/guard.py`）：
+  `AUTOMIND_LICENSE_RECHECK`（默认 3600 秒）周期复检，到期 / 被吊销 / 机器不符 / 时钟回拨时
+  自动降级社区版并通过 WebSocket 通知所有标签页；许可证续期或换绑后自动恢复。
+  `AUTOMIND_LICENSE_GRACE_DAYS`（默认 0）可给过期许可证配置宽限期（状态标 `grace`，
+  界面显示剩余天数）。`~/.automind/license_state.json` 记录上次检查时间，系统时钟回拨超过
+  1 天判定为 `clock_rollback`（离线授权的固有边界：向前调时间无法检测，文档已注明）。
+- **公钥平滑轮换**：`keys.py` 支持主钥 `PUBLIC_KEY_HEX` + 旧钥列表
+  `LEGACY_PUBLIC_KEYS_HEX`（含 `LEGACY_KEYS_RETIRE_AFTER` 过渡期截止日），按许可证 KID 选钥验签；
+  `issue_license.py keygen --rotate [--retire-after YYYYMMDD]` 生成新主钥并把旧主钥移入旧钥列表。
+- **发行自检 doctor 扩充到 12 项**：公钥/私钥/密钥配对/版本一致/wheel 内置公钥/签验闭环/
+  升级包可激活，新增 `key_rotation_state`、`crl_readable`、`license_recheck_config`、
+  `machine_binding_ready`；`doctor` 失败仍非零退出，可直接接 CI。
+- **客户侧升级面板**：`LicenseModal` 显示本机指纹（一键复制）、序列号、机器绑定状态、
+  生效日/宽限期/复检间隔/CRL 数量/时钟状态；激活失败直接给出可操作原因（已过期 / 尚未生效 /
+  机器不匹配 / 已被吊销 / 时钟异常 / 签名不符），不再只有一句"许可证无效"。
+- **文档**：`docs/COMMERCIAL_ACTIVATION.md` 新增 §12-20 商业运营章节（批量发证与台账、续期与
+  宽限、机器绑定与换机、CRL 吊销与分发、周期复检与时钟、换钥仪式、命令速查、v2 兼容）；
+  新增 `docs/LICENSE_OPERATIONS.md` 运营 SOP（月度巡检、台账字段、客服话术、应急）。
+
+### 二、输入框模型选择器 + 自动路由（专业版 / 企业版）
+
+- **输入框旁新增 🧠 模型选择器**（`ModelPicker`）：默认模型 / 按 provider 分组的已配置模型
+  （只列出拿得到 Key 的提供商与 Ollama 本地模型、自定义收藏置顶）；选择后对后续消息常驻生效，
+  本地持久化（`automind_model_choice`），发送时以 `overrides.model_mode=manual` +
+  provider/model 随消息下发；断点续跑/重试也会沿用当前选择。
+- **自动路由模式**：专业版/企业版在模型选择器中可选择「自动路由」——服务端按任务复杂度
+  （0~100 启发式打分）命中路由档位并切换本次运行的模型，`task_start` 回执带档位、复杂度、
+  目标 provider/model；社区版该项显示 🔒 并引导打开升级面板（服务端即使收到 auto 也只回执
+  "需要专业版/企业版"，不会静默换成用户没选的模型）。
+- **服务端**：新增 `GET /api/config/available-models`（社区版也 200，`auto.available=false` 带
+  升级原因）；新增 `automind/core/model_choice.py` 纯逻辑模块（可用列表构建、manual/auto 校验与
+  回执）；REST `/api/run` 与 WS `run` 均在按模式选模型之后、默认自动路由之前应用本条覆盖，
+  有显式覆盖时跳过默认路由；手动选择的模型初始化失败会回滚并回执 `applied=false`，不中断任务。
+  `/api/models` 与选择器共用同一份 `MODEL_MAP`，避免两处模型清单漂移。
+
+### 三、团队协作强化（从三列看板到团队工作台）
+
+- **在线成员感知**：新增 `automind/core/team_presence.py`，WS 连接/断开/改昵称实时广播
+  `team_presence`；在线成员条显示头像首字、在线点、任务数，多标签页按同一人聚合；
+  昵称存 `localStorage` 并持久化到 `<数据目录>/team_members.json`，重启后重连可恢复。
+- **任务模型扩展**：任务新增 `priority`（low/normal/high/urgent）、`due`（截止日期）、`tags`、
+  `comments`（评论）、`activity`（活动时间线）、`status=blocked`；旧任务读取时自动补默认值，
+  零迁移、id/created 保留。
+- **新 API**：`GET /api/team/tasks` 支持 status/assignee/q/priority/overdue 过滤并返回全量
+  `summary`；创建/更新白名单字段、`POST /{tid}/comments`、`POST /{tid}/claim`（认领即开始）、
+  `GET /api/team/summary`（按人负载、逾期、今日/近 7 天完成、完成率、最近活动）、
+  `GET /api/team/members`、`POST /api/team/members/name`；所有变更实时广播 `team_activity`，
+  旧 `task_done` 事件字段保持不变。
+- **前端重写 `TeamView`**：Hero（昵称 + 在线成员）、5 张统计卡（完成率进度条）、搜索 +
+  按人/优先级/状态过滤 + 截止排序、四列看板（待办/进行中/阻塞/完成）、卡片优先级色条与
+  逾期红色徽标/负责人/评论数/标签、新建与详情 Drawer（编辑字段、状态移动、认领、评论、
+  活动时间线、删除确认）、实时活动流；深/浅色与窄屏自适应。
+
+### 四、「智能路由与成本」界面重做
+
+- `RouterView` 全新视觉：渐变 Hero（版本/许可徽标 + 刷新）、5 张 KPI 卡（累计成本 / 总 Token /
+  缓存命中率 / 路由命中次数 / 近 30 天日均成本，成本与 Token 用真实 30 天序列画 mini 柱状图，
+  缓存/路由无按日数据时用命中率条与档位分布条，不画假曲线）、语义缓存 SVG 环形命中率仪表 +
+  容量条 + 估算节省金额、模型路由 0~100 复杂度阶梯可视化 + 可编辑档位、路由预演复杂度圆环 +
+  档位高亮、企业版成本仪表盘（金额/Token 双视角 30 天 SVG 柱状图、按模型成本占比条、缓存节省、
+  口径说明、空状态）；社区/专业/企业三种权限状态统一为渐变能力卡（CTA 打开升级面板），
+  未解锁不伪装 0 数据。深色/浅色与窄屏（<720px 两列 / <480px 单列）适配。
+- `GET /api/costs` 在保留全部旧字段的前提下新增 `total_tokens`、`total_tasks`、
+  `by_day[*].prompt/completion`、`by_model[*].share`（成本占比）、`top_model`、`range_days`、
+  `generated_at`、`currency`、`cache.saved_cost`（口径注明）；单价表补充 DeepSeek V3/GPT-4.1/
+  o3-mini/Claude 4/Gemini 2.5/Kimi K2/GLM-4.6/Qwen2.5/Doubao/Ernie 等常见新模型，
+  并保证具体型号优先于泛化前缀匹配（未知模型仍按 0 成本计）。
+
+### 五、图文版《商业运营升级与发证操作手册》（Word）
+
+- 新增 `docs/商业运营升级与发证操作手册_v1.11.15.docx`：12 章 + 附录，覆盖商业激活总览、
+  发行方密钥仪式与 doctor 自检、单发/批量签发与台账、`.ampkg` 制作与分发、客户侧三种激活方式、
+  版本升级与回滚、续期/升档/换机/CRL 吊销、运营台账与续费提醒、排障原因码表、安全合规、
+  CLI 速查/检查清单/CSV 模板；配 10 张程序化生成的中文流程图/示意图（激活总览、生命周期
+  时间轴、升级决策树、客户激活界面示意、`.ampkg` 结构解剖、批量发证流程、机器绑定换机流程、
+  v1.11.15 新功能一览等），图注明确标注"示意图"。
+- 提供可重复生成的 `scripts/build_commercial_manual.py`（python-docx + Pillow），
+  后续版本号/命令变更可一键重出手册。
+
+### 六、测试与验证
+
+- 商业运营：`pro/tests/test_license_v3.py` 57 项 + 既有许可证/伪造/一键升级包/热激活测试，
+  定向套件 **144 passed**（含 edition/观测等附加套件共 **179 passed**）；
+  `doctor` 12 项全绿，`issue/bundle/issue-batch/revoke/crl/verify/machine` 均实际跑通，
+  旧 `.ampkg` 仍可激活。
+- 模型选择：`tests/test_model_choice.py` **19 passed**、`pro/tests/test_model_route_override.py`
+  **7 passed**，`tests/server` 全部通过（含路由清单快照）。
+- 团队协作：`tests/test_team_collab.py` **31 passed**（含 TestClient 全链路与双 WS 在线广播 e2e），
+  相关回归 **139 passed**。
+- 路由与成本：`pro/tests/test_cost_dashboard.py` **15 passed**、
+  `pro/tests/test_v08_features.py` **19 passed**；前端 Playwright 组件/视觉冒烟 **38 passed**
+  （企业/专业/社区三态、暗亮主题、430px 窄屏、Token 视角、预演、保存档位、清空确认）。
+- 全量回归、`ruff check .`、`git diff --check`、前端 `tsc --noEmit` 与 `vite build` 见发布验证记录。
+- 版本纪律：核心 / 商业扩展包 / Web / 安装器 / 手册统一 **1.11.15**；v1.11.15 重新构建了
+  `automind_pro-1.11.15` wheel 并重新出 `.ampkg`（内含支持 v3 许可证 / 机器绑定 / CRL /
+  周期复检的新扩展包）；旧客户升级到 v1.11.15 需换发新版 `.ampkg`（公钥未轮换，旧许可证仍有效）。
+
+## [1.11.14] - 2026-10-21
+
+**商业激活链路真正闭环（真实 Ed25519 验签公钥 + 同版本扩展包 + 一键升级包 + 发行自检）；
+Agent 对话与 Markdown 文档展示美化（新增 📄 文档视图）；飞书 / 钉钉 / 企业微信机器人按平台适配排版；
+内网离线三件套落地（离线总闸 / 出网白名单 / 探测三态 + 安装备份回滚脚本 + 运维手册）**
+
+### 一、商业激活闭环（不再"验签公钥占位 → 永远激活不了"）
+
+- **验签公钥已置备**：`pro/automind_pro/licensing/keys.py` 的 `PUBLIC_KEY_HEX` 从 64 个 0 改为真实
+  Ed25519 公钥（指纹 `e9fffafc0f6f19d4`），`is_provisioned()=True`；签发私钥只落
+  `pro/.license-private/private_key.hex`（gitignored、ACL 已收紧到当前用户 + SYSTEM，不随包分发）。
+  fail-closed 语义保持不变：环境变量 `AUTOMIND_LICENSE_PUBLIC_KEY` 仍优先，占位公钥仍一律验不过。
+- **Pro 扩展包与主程序同版本**：`pro/dist/automind_pro-1.11.14-py3-none-any.whl` 重建（旧 1.11.4
+  wheel 已移出），`tests/test_version_consistency.py` 的"商业包与核心同版本"约束继续成立。
+- **一键升级包（.ampkg）端到端可用**：`.ampkg` = 扩展包 wheel + 许可证 + 清单，拖进界面
+  「⭐ 升级 / 激活」面板即完成装包 + 激活（离线校验、免 pip、免重启）。本版实际出包并验证：
+  `AutoMind-PRO-acme-20271231.ampkg`、`AutoMind-ENT-bigcorp-00000000.ampkg` → PRO 19 项 / ENT 27 项
+  商业特性全部开启。
+- **升级便捷性增强**：
+  - `pro/tools/issue_license.py` 新增 `keygen --write-public-key`（生成密钥后直接写回公钥，避免遗漏）
+    与 `doctor`（公钥已置备 / 私钥可用 / 密钥配对 / 版本匹配 / wheel 内置公钥一致 / 签验闭环 /
+    升级包可激活，失败非零退出）。
+  - `automind/core/edition.py` 的升级状态增加 `core_version` / `version_match` / `version_reason` /
+    `version_step`；Web「升级 / 激活」面板在扩展包与主程序版本不一致时显示醒目警示与处理指引
+    （不破坏旧字段，旧服务端返回时界面保持原样）。
+  - 新增 `scripts/build_pro_upgrade.py` / `.ps1`：一条命令完成"构建 wheel → 三处版本校验 → doctor →
+    签发许可证 → 打 .ampkg → 打印 sha256 与客户升级步骤"。
+- **文档**：新增 `docs/COMMERCIAL_ACTIVATION.md`（激活闭环全流程、密钥纪律、排障速查）；
+  `docs/EDITIONS.md` / `docs/UPGRADE_GUIDE.md` / `RELEASE.md` 中"占位公钥 / 离线 HMAC / wheel 不同步"
+  等过时描述已更新。
+
+### 二、Markdown 文档在 Agent 里的展示（对话 + 文档视图）
+
+- **对话区渲染器增强**：标题 h1–h6（标题内行内格式生效）、嵌套/混合列表、任务列表（☑ 样式）、
+  多行与嵌套引用、表格对齐（`:---`/`:--:`/`---:`）与 `\|` 转义、无表头表格不强渲染、
+  段落/换行语义修复、` ``` ` / `~~~` 代码块（语言标签美化、复制、未闭合围栏容错、四反引号嵌套）、
+  行内代码/粗/斜/删除线/`==高亮==`/`[[kbd]]`、裸 URL 自动识别、图片懒加载与宽度约束。
+  XSS 防线保持"先抽代码块 → 全文转义 → 只拼自家标签 → 代码再转义还原"；流式增量渲染改为
+  单次线性扫描块边界，增量与整段渲染等价，不引入 O(n²)。
+- **新增 📄 Markdown 文档视图**：agent 交付/产出的 `.md` 文件不再以原始文本显示，而是以文档排版
+  打开 —— 居中 880px、行高 1.75、标题层级与目录侧栏、代码块语言栏 + 复制、表格滚动、
+  文档/源码切换、复制 Markdown/路径、新标签打开、刷新、错误态与 >1.2MB 截断提示。
+  接入 4 处：对话区 📦 交付卡片、右栏摘要「对话产物」、右栏「文件改动」最近文件、代码标签 `👁 预览`。
+- 新增 `web/src/components/modals/MarkdownDocModal.tsx`、`apiGetText()`；`.md` 作用域排版样式
+  与文档视图样式（暗/亮主题自适应），对话/执行过程/历史输出统一套用。
+
+### 三、IM 机器人（飞书 / 钉钉 / 企业微信 / 公众号）排版
+
+- **新增平台 Markdown 适配层** `automind/bots/md_format.py`：按平台能力把通用 Markdown 转换/降级 ——
+  飞书卡片 header + 字段列表替代表格；钉钉标题 ≤30 字；企微自建应用正文 `## 标题`、代码块转引用行；
+  企微智能机器人保留围栏代码块；公众号输出纯文本（去标记、保留结构）；Webhook 保留原始 Markdown。
+- **安全分片**：`split_message()` 按各平台字节上限在块边界切分，优选空行/段落/列表/整张表，
+  **绝不切在代码围栏内**；被迫切断时自动补开/闭围栏；续片标记"标题（续 N/M）"，续片标题不再整段重复。
+- **进度与结果排版**：任务过程、计划步骤、失败项、耗时/tokens/产物提示改为 Markdown 列表，
+  飞书/钉钉/企微里更易读；发送失败告警日志保持。
+- 文档：`docs/IM_BOTS.md` 新增「各平台 Markdown 渲染规则与差异」、`docs/FEISHU.md` 新增回复排版说明。
+
+### 四、内网离线三件套（从"只有设计文档"到"可验证实现"）
+
+- **离线总闸**：新增 `automind/core/offline.py`，三种策略 `open`（默认）/`allowlist`/`offline`：
+  `AUTOMIND_OFFLINE=1`（等价 offline）或 `AUTOMIND_NETWORK_POLICY=open|allowlist|offline`。
+- **出网白名单**：`AUTOMIND_EGRESS_ALLOW`（逗号/分号分隔，支持 `host`、`host:port`、`*.example.com`、IP）
+  + `AUTOMIND_EGRESS_ALLOW_FILE`（每行一条，# 注释）+ 可选 `AUTOMIND_EGRESS_DENY`；
+  `http_request` / `web_fetch` / `web_search` / `browser` 全部接入（含重定向逐跳校验），
+  未命中白名单/离线模式**当场返回可解释的失败结果**，不再先超时 30 秒；出网审计写入
+  `<数据目录>/logs/egress.log`（JSONL，已脱敏 query/userinfo，可用 `AUTOMIND_EGRESS_AUDIT=0` 关闭）。
+- **探测三态**：`net_check` 改为「本地服务 / 网关 / 公网」三段诊断，新增 `policy` 字段；
+  离线模式下公网段结论为"预期离线"，不再诱导模型重试。`AUTOMIND_PROBE_HOSTS` 可覆盖探测目标、
+  `AUTOMIND_GATEWAY_PROBE` 指定网关探测；`network_up()` 返回 online / expected_offline / degraded，
+  离线/白名单模式下 `ResilientDispatch` 不再"等待网络恢复 60s × 3 次"空转。
+- **运行期出网收敛**：更新检查在 offline/allowlist 下短路并说明"离线模式已跳过更新检查"；
+  `/api/health` 增加网络策略与三态摘要，运维一条命令看清断在哪。
+- **安装 / 备份 / 回滚 / 验收脚本**：新增 `scripts/offline/{install,backup,rollback,verify}.ps1`
+  （Windows PowerShell 5.1 兼容、幂等、支持 -WhatIf、失败回滚、备份带 SHA-256 清单）；
+  新增 `docs/OFFLINE_OPS.md` 运维手册（部署前检查、白名单维护、备份策略、升级、回滚、故障排查、
+  验收清单、常见问题）；`docs/OFFLINE_DEPLOYMENT.md` 的 6 条缺口逐条标注"已实现（v1.11.14）"。
+
+### 五、测试与验证
+
+- 商业激活：`pro/tests` 激活相关 **56 passed**（含伪造/占位公钥/一键升级包/热激活）；全 pro（去既存
+  flaky 的 `test_workflow_pro.py`）**133 passed**；新增根测试 `tests/test_commercial_activation.py` 与
+  `pro/tests/test_commercial_activation_pro.py` 守住"公钥已置备 / wheel 版本一致 / 私钥不随包"三条底线。
+- 离线：`tests/core/test_offline_policy.py`、`tests/tools/test_egress_offline.py`、
+  `tests/core/test_net_resilience.py`、`tests/core/test_offline_scripts.py` **133 passed**；
+  既有默认 open 行为不变。
+- IM 机器人：`tests/bots/` 新增 51 项 + 既有 26 项 = **77 passed**（连跑 3 次绿）。
+- 前端：`tsc --noEmit` 与 `vite build` 通过，`automind/static/dist` 已重建（旧 assets 清理）；
+  Node 渲染断言 128 条、Playwright 视觉 20 条、真实组件集成 24 条、LicenseModal 7 条全部通过。
+- `ruff check .` 全绿；`tests/test_version_consistency.py` 全绿（版本号四处 + 商业包 + 手册同步）。
+- 私钥纪律：全仓 git-tracked 文件与新交付文件扫描签发私钥 hex **0 命中**；私钥仅存于 gitignored
+  的 `pro/.license-private/`，不会出现在任何报告/文档/日志中。
+
 ## [1.11.13] - 2026-10-18
 
 **系统性提升工具调用成功率：参数同义名/类型归一、相对路径统一锚到会话工作副本、文件读取编码回退、终端链式命令自动换壳；修复隔离工作区里写文件被插件误判失败、产物写错目录（Web/IM 机器人工作区混淆）等高频问题；办公套件依赖确认齐备**

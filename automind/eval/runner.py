@@ -57,6 +57,21 @@ EXIT_ABORTED = 3
 _OUTPUT_PREVIEW = 2000
 
 
+def _approval_note(mode: str) -> str:
+    """报告里要显式写出的审批模式说明。
+
+    为什么必须进报告：评测是**无人值守**场景，没有人工审批通道。同样的套件、
+    同样的模型，审批模式不同会得到完全不同的耗时与 token（``auto`` 下需要确认的
+    调用会被 fail-closed 拒绝，模型反复重试，实测可把几秒的命令拖成分钟级、
+    token 翻数倍）—— 不写清模式，两份历史报告根本没法对比。
+    """
+    if mode == "approve_all":
+        return ("评测无人值守审批模式=approve_all（敏感工具自动放行；"
+                "否则审批通道缺失会按拒绝处理）")
+    return (f"评测无人值守审批模式={mode}（无人工审批通道：需要审批的调用会被"
+            "按拒绝处理，可能表现为反复重试、超时与 Token 超限）")
+
+
 # ═══════════════════════════════════════════════════════════════
 # 环境隔离
 # ═══════════════════════════════════════════════════════════════
@@ -244,14 +259,23 @@ async def run_suite(suite: EvalSuite, executor: Executor, model: str = "",
                     limit: int = 0, default_timeout: float = 0.0,
                     keep_workspace: bool = False,
                     check_credentials: bool = True,
-                    target: LLMTarget | None = None) -> EvalReport:
+                    target: LLMTarget | None = None,
+                    approval_mode: str = "") -> EvalReport:
     """跑完一个套件并返回报告。
 
     ``check_credentials=False`` 用于测试注入的假执行器（离线不应该被 Key 挡住）；
     真实执行器**必须**走检查，否则 CI 上"没 Key"会伪装成"模型退化"。
+
+    ``approval_mode`` 只用于报告备注；为空时取执行器自己的 ``approval_mode``
+    属性（有就记，没有就不记 —— 假执行器可以没有这个属性）。
     """
     report = EvalReport(suite=suite.name, path=suite.path, model=model,
                         provider=provider)
+    # 审批模式是评测结果的一部分（原因见 _approval_note），先记下来，
+    # 即使随后因缺少凭据中止，报告里也能看出这次"打算用什么审批模式"。
+    mode = approval_mode or getattr(executor, "approval_mode", "")
+    if mode:
+        report.notes.append(_approval_note(mode))
     if check_credentials:
         tgt = target or detect_llm_target(provider, model)
         if not tgt.available:
@@ -317,6 +341,11 @@ def _build_parser() -> argparse.ArgumentParser:
     run.add_argument("--limit", type=int, default=0, help="只跑前 N 个任务")
     run.add_argument("--timeout", type=float, default=0.0,
                      help="任务级默认超时（秒），任务里写了的以任务为准")
+    run.add_argument("--approval-mode", choices=["approve_all", "auto", "ask"],
+                     default="approve_all",
+                     help="无人值守审批模式（默认 approve_all：敏感工具自动放行；"
+                          "auto/ask 在没有审批通道时会被按拒绝处理，"
+                          "导致反复重试/超时）")
     run.add_argument("--keep-workspace", action="store_true",
                      help="保留任务工作目录（排障用）")
     run.add_argument("--verbose", action="store_true", help="打印全部断言明细")
@@ -374,14 +403,16 @@ def run_command(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
 
     executor = AutoMindExecutor(provider=args.provider, model=args.model,
-                                keep_workspace=args.keep_workspace)
+                                keep_workspace=args.keep_workspace,
+                                approval_mode=args.approval_mode)
     import asyncio
 
     report = asyncio.run(run_suite(
         suite, executor, model=target.model, provider=target.provider,
         include=[x for x in (args.include or "").split(",") if x],
         limit=args.limit, default_timeout=args.timeout,
-        keep_workspace=args.keep_workspace, target=target))
+        keep_workspace=args.keep_workspace, target=target,
+        approval_mode=args.approval_mode))
 
     if report.aborted:
         print(f"评测中止：{report.abort_reason}", file=sys.stderr)

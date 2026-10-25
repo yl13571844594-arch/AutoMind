@@ -39,6 +39,7 @@ GET /api/chat/history
 GET /api/checkpoints/resumable
 GET /api/config/apikeys
 GET /api/config/autopilot
+GET /api/config/available-models
 GET /api/config/full
 GET /api/config/mode-models
 GET /api/conversations
@@ -94,6 +95,8 @@ GET /api/stats/context
 GET /api/stats/detail
 GET /api/stats/history
 GET /api/status
+GET /api/team/members
+GET /api/team/summary
 GET /api/team/tasks
 GET /api/templates/custom
 GET /api/todo
@@ -186,8 +189,11 @@ POST /api/session-workspaces/{sid}/apply
 POST /api/session-workspaces/{sid}/export
 POST /api/skills/import
 POST /api/skills/load
+POST /api/team/members/name
 POST /api/team/tasks
 POST /api/team/tasks/{tid}
+POST /api/team/tasks/{tid}/claim
+POST /api/team/tasks/{tid}/comments
 POST /api/templates/custom
 POST /api/tools/reload
 POST /api/tools/toggle

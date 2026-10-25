@@ -4,8 +4,11 @@ import { useEffect, useRef, useState } from 'react';
 import { apiGet, apiPost } from '../../api/client';
 import { useApp } from '../../store/app';
 import { usePanel } from '../../store/panel';
+import { useUi } from '../../store/ui';
 
 const MONACO_CDN = 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min';
+/** v1.11.14：Markdown 文件在编辑器里也能一键切到文档视图（编辑器功能不受影响） */
+const MD_FILE_RE = /\.(?:md|markdown|mdx)$/i;
 const LANG_BY_EXT: Record<string, string> = {
   py: 'python', js: 'javascript', ts: 'typescript', jsx: 'javascript', tsx: 'typescript',
   json: 'json', html: 'html', htm: 'html', css: 'css', md: 'markdown', yml: 'yaml',
@@ -203,6 +206,11 @@ export default function CodeTab() {
           title={openedPath}>{openedPath || '未打开文件'}</span>
         {openedPath && (
           <>
+            {MD_FILE_RE.test(openedPath) && !diffMode && (
+              <a style={{ cursor: 'pointer', color: 'var(--accent)' }}
+                onClick={() => useUi.getState().openDoc({ path: openedPath, label: openedPath })}
+                title="用文档视图渲染这个 Markdown 文件（排版阅读，不影响编辑器内容）">👁 预览</a>
+            )}
             <a style={{ cursor: 'pointer', color: diffMode ? 'var(--accent)' : undefined }} onClick={toggleDiff}
               title="查看该文件的改动 Diff">± Diff</a>
             {!diffMode && <a style={{ cursor: 'pointer', color: 'var(--accent)' }} onClick={save} title="保存 (Ctrl+S)">💾 保存</a>}

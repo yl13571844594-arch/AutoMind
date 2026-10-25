@@ -7,6 +7,7 @@ import ConnectionBanner from './components/ConnectionBanner';
 import Header from './components/Header';
 import ChatPanel from './components/chat/ChatPanel';
 import ApprovalModal from './components/modals/ApprovalModal';
+import MarkdownDocModal from './components/modals/MarkdownDocModal';
 import PreviewModal from './components/modals/PreviewModal';
 import SettingsModals from './components/modals/SettingsModals';
 import TemplatesModal from './components/modals/TemplatesModal';
@@ -31,6 +32,7 @@ import RunWorkflowModal from './components/workflow/RunWorkflowModal';
 import GoalsModal from './components/modals/GoalsModal';
 import LicenseModal from './components/modals/LicenseModal';
 import ScheduleQuickModal from './components/modals/ScheduleQuickModal';
+import SessionsModal from './components/modals/SessionsModal';
 import ShortcutsModal from './components/modals/ShortcutsModal';
 import UserQuestionModal from './components/modals/UserQuestionModal';
 import { ErrorBoundary } from './components/ui/ErrorBoundary';
@@ -163,8 +165,12 @@ export default function App() {
         el?.focus();
       },
       stop: () => {
-        // Esc 双职责：有弹窗先关弹窗，否则停任务 —— 符合直觉的"退一步"
-        if (ui().modal || ui().preview) { ui().closeModal(); ui().closePreview(); return; }
+        // Esc 双职责：有弹窗先关弹窗，否则停任务 —— 符合直觉的"退一步"。
+        // v1.11.14：📄 文档视图也是一个弹窗（ui().doc），不关它的话按 Esc 会把
+        // 正在跑的任务中断掉、而文档还留在屏幕上。
+        if (ui().modal || ui().preview || ui().doc) {
+          ui().closeModal(); ui().closePreview(); ui().closeDoc(); return;
+        }
         // 中断走 WebSocket（后端没有 /api/stop 这个路由，走 HTTP 会静默 404）
         if (app().running) sendStop();
       },
@@ -177,7 +183,7 @@ export default function App() {
       viewHistory: () => app().setView('history'),
     }, {
       // Esc 之外的快捷键在弹窗打开时让位，避免叠加触发
-      modalOpen: () => !!(useUi.getState().modal || useUi.getState().preview),
+      modalOpen: () => !!(useUi.getState().modal || useUi.getState().preview || useUi.getState().doc),
     });
   }, []);
 
@@ -244,6 +250,9 @@ export default function App() {
         </div>
         <SettingsModals />
         <WorkspacesModal />
+        {/* v1.11.17：💬 会话管理（分组 / 排序 / 筛选 / 搜索）。与工作区并列挂在根上，
+            因为侧栏入口 / 设置菜单 / 命令面板都可能在任何视图下打开它。 */}
+        <SessionsModal />
         <TemplatesModal />
         <TourModal />
         <UpdateModal />
@@ -257,6 +266,9 @@ export default function App() {
         <LicenseModal />
         <ScheduleQuickModal />
         <PreviewModal />
+        {/* v1.11.14：📄 Markdown 文档视图。与 HTML 预览并列挂在根上：
+            对话交付卡片 / 摘要产物 / 代码标签都可能把 .md 交给它渲染。 */}
+        <MarkdownDocModal />
       </AntApp>
     </ConfigProvider>
     </StyleProvider>

@@ -39,6 +39,9 @@ const ACTIONS: [string, string, string, string, string][] = [
   ['keys', '🔑', 'API Keys', 'key apikey 密钥', 'apikeys'],
   ['settings', '⚙', '通用设置', 'shezhi settings config 设置', 'general'],
   ['workspace', '🗂', '工作区管理', 'gongzuoqu workspace project 工作区', 'workspaces'],
+  // v1.11.17：会话管理（分组 / 排序 / 筛选 / 搜索）—— 会话一多，侧栏翻列表找不到人
+  ['sessions', '💬', '会话管理（分组 / 排序 / 筛选 / 搜索）',
+    'huihua sessions conversation 会话 管理 搜索 筛选', 'sessions'],
   ['theme', '🌓', '切换深色 / 浅色主题', 'zhuti theme dark light 主题', 'theme'],
   ['upgrade', '⭐', '升级专业版 / 企业版、许可证', 'shengji license upgrade 升级 许可证', 'license'],
   ['help', '⌨', '键盘快捷键与指令说明', 'bangzhu help shortcuts 帮助', 'shortcuts'],
