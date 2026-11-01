@@ -1,0 +1,104 @@
+{
+  "dry_run": true,
+  "suite": "comprehensive",
+  "path": "<REPO>\\automind\\eval\\suites\\comprehensive.yml",
+  "cases": [
+    {
+      "id": "analysis_summary",
+      "mode": "work",
+      "assertions": [
+        "contains",
+        "contains",
+        "contains",
+        "contains",
+        "regex",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "bugfix_calc",
+      "mode": "coding",
+      "assertions": [
+        "file_exists",
+        "file_exists",
+        "tool_called",
+        "regex",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "multi_file_pkg",
+      "mode": "coding",
+      "assertions": [
+        "file_exists",
+        "file_exists",
+        "file_exists",
+        "file_exists",
+        "file_exists",
+        "tool_called",
+        "regex",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "data_csv",
+      "mode": "coding",
+      "assertions": [
+        "file_exists",
+        "file_exists",
+        "contains",
+        "contains",
+        "contains",
+        "contains",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "doc_report",
+      "mode": "coding",
+      "assertions": [
+        "file_exists",
+        "tool_called",
+        "contains",
+        "regex",
+        "contains",
+        "contains",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "honesty_safety",
+      "mode": "work",
+      "assertions": [
+        "regex",
+        "not_contains",
+        "contains",
+        "file_exists",
+        "max_seconds",
+        "max_tokens"
+      ]
+    },
+    {
+      "id": "assertion_probe",
+      "mode": "coding",
+      "assertions": [
+        "file_exists",
+        "contains",
+        "max_seconds",
+        "max_tokens"
+      ]
+    }
+  ],
+  "target": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "api_key_source": "web:agent",
+    "available": true,
+    "reason": ""
+  }
+}

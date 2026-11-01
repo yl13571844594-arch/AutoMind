@@ -68,6 +68,11 @@ class RestrictedToolRegistry(ToolRegistry):
             self._tools[name] = base.get(name)
         #: 声明了、但运行时不存在的工具（MCP 没挂上等）—— 报告里要能看到
         self.missing = [n for n in (allowed or []) if n not in names]
+        # v1.11.19：继承原注册表的**分派级治理闸门**。agent 步骤内部是 ReAct
+        # （来源已经是 react，闸门本身不二次审批），但 dispatch 的 execution
+        # 记账挂在闸门是否存在上 —— 不继承的话，工作流 agent 步骤里的工具执行
+        # 只有决策记录、没有执行记录，取证链会缺一段。
+        self._governor = getattr(base, "_governor", None)
 
     async def dispatch(self, tool_name: str, **kwargs: Any) -> ToolResult:
         own, _ = resolve_name(tool_name, self.list_names())

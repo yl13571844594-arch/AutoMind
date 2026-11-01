@@ -12,6 +12,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+from automind.core import governance as _governance
 from automind.core.logging import get_logger
 from automind.core.types import PermissionTier, ToolResult, ToolSource
 
@@ -23,6 +24,16 @@ _MISSING_ARG = re.compile(r"missing \d+ required (?:positional|keyword-only) arg
 
 #: 建议条数上限 —— 给多了模型反而挑花眼，也让观察变长（见 unknown_tool_error）
 _SUGGEST_LIMIT = 3
+
+
+def _governance_session_id() -> str:
+    """当前会话标识（治理账本的 session 字段；未绑定会话时为空串）。"""
+    try:
+        from automind.core import session_ctx
+
+        return str(session_ctx.session_id() or "")
+    except Exception:                                     # pragma: no cover - 防御性
+        return ""
 
 
 def _norm(name: Any) -> str:
@@ -614,8 +625,22 @@ class ToolRegistry:
         #: 插件提供的分派中间件（v1.11.6）：``async mw(tool_name, kwargs, call_next) -> ToolResult``，
         #: 按登记顺序由外向内包住真正的 ``tool.execute``（参数校验之后、计时之内）。
         self._middlewares: list[Any] = []
+        #: 分派级治理闸门（v1.11.19）：``async (tool, kwargs) -> (allowed, reason)``。
+        #: 只对**未经** ReAct/Plan 人工审批门控的通道生效（来源不是 react/plan）；
+        #: 由 Agent 安装（``governance.make_unattended_governor``）。None = 不启用，
+        #: 裸 Registry（单测/库调用）因此保持既有行为、也不会写账本。
+        self._governor: Any = None
         #: 由插件注册的工具名（插件卸载时据此注销，不误删内置工具）
         self._plugin_tools: set[str] = set()
+
+    def set_governor(self, governor: Any) -> None:
+        """安装 / 替换分派级治理闸门（``governor=None`` 表示卸载）。
+
+        为什么装在注册表而不是工具实例上：注册表是会话克隆之间**共享**的，
+        每个会话一份工具实例的做法会让并发会话互相覆盖；闸门内部通过
+        ContextVar 读取来源、通过 getter 读取实时审批模式，天然按任务隔离。
+        """
+        self._governor = governor if callable(governor) else None
 
     def set_middlewares(self, middlewares: list[Any]) -> None:
         """整体替换插件中间件（插件启停后由 Agent 重新同步）。"""
@@ -775,6 +800,43 @@ class ToolRegistry:
                 metadata={"missing_params": missing, "param_typos": wrong},
             )
 
+        # ── 分派级治理闸门（v1.11.19）──────────────────────────
+        # 为什么在这里：上面三道校验把"注定失败"的调用都挡掉了，到这里才是
+        # 一次**真正会执行**的工具调用。ReAct / Plan 已经在执行器里逐次审批过，
+        # 它们的调用会把来源绑定成 react/plan —— 这里不再二次审批；其余来源
+        # （direct / workflow / skill）没有经过人工审批门控，统一问闸门。
+        # 闸门自身异常按 fail-open 处理：治理故障不能变成新的可用性单点
+        # （风险评估在闸门内部已有回退，正常不会走到这条分支）。
+        source = ""
+        if self._governor is not None:
+            source = _governance.current_source()
+            if source not in ("react", "plan"):
+                allowed, deny_reason = True, ""
+                try:
+                    decision = self._governor(tool, kwargs)
+                    if inspect.isawaitable(decision):
+                        decision = await decision
+                    if isinstance(decision, bool):
+                        allowed, deny_reason = decision, ""
+                    elif isinstance(decision, tuple):
+                        allowed = bool(decision[0]) if decision else True
+                        deny_reason = str(decision[1]) if len(decision) > 1 else ""
+                except Exception as e:
+                    _logger.warning("tool_governor_failed", tool=real,
+                                    error=f"{type(e).__name__}: {e}")
+                if not allowed:
+                    _logger.warning("governance_denied", tool=real, source=source,
+                                    reason=str(deny_reason)[:200])
+                    return ToolResult(
+                        tool_name=real, success=False,
+                        error=("运行底座治理拦截：" + (deny_reason or
+                               "该通道未经人工审批，且当前策略不允许自动执行")
+                               + f"（来源：{source}；本次未执行。如需执行，请经 "
+                                 "ReAct/Plan 审批，或在设置中把审批模式改为「全批准」。）"),
+                        metadata={"governance_denied": True,
+                                  "governance_source": source},
+                    )
+
         start = time.perf_counter()
         try:
             result = await self._execute_with_middlewares(real, tool, kwargs)
@@ -782,17 +844,46 @@ class ToolRegistry:
             duration = (time.perf_counter() - start) * 1000
             _logger.error("tool_dispatch_error", tool=real,
                           error=f"{type(e).__name__}: {e}", duration_ms=round(duration, 1))
-            return ToolResult(
+            failure = ToolResult(
                 tool_name=real,
                 success=False,
                 error=describe_tool_error(tool, e),
                 duration_ms=duration,
             )
+            self._record_governance_execution(real, tool, failure, source)
+            return failure
         result.duration_ms = (time.perf_counter() - start) * 1000
         result.tool_name = real
         _logger.info("tool_dispatch", tool=real, success=result.success,
                      duration_ms=round(result.duration_ms, 1))
+        self._record_governance_execution(real, tool, result, source)
         return result
+
+    def _record_governance_execution(self, name: str, tool: AbstractTool,
+                                     result: ToolResult, source: str) -> None:
+        """执行完成后落一条 execution 记录（仅当注册表装了闸门）。
+
+        裸 Registry（单测 / 库调用）不装闸门 → 完全不碰账本，既有行为零变化；
+        装了闸门说明这是 Agent 的真实执行链路，每一次执行都该有痕迹。
+        记账失败由 governance 内部 fail-open 兜住，这里再包一层防御。
+        """
+        if self._governor is None:
+            return
+        try:
+            tier = getattr(tool, "permission_tier", None)
+            _governance.record_execution(
+                tool=name,
+                tier=getattr(tier, "value", tier or "sensitive"),
+                success=bool(result.success),
+                duration_ms=float(getattr(result, "duration_ms", 0.0) or 0.0),
+                source=source or _governance.current_source(),
+                session_id=_governance_session_id(),
+                error=str(result.error or ""),
+                governed=True,
+            )
+        except Exception as e:                            # pragma: no cover - 防御性
+            _logger.warning("governance_execution_record_failed", tool=name,
+                            error=f"{type(e).__name__}: {e}")
 
     async def _execute_with_middlewares(self, name: str, tool: AbstractTool,
                                         kwargs: dict[str, Any]) -> ToolResult:

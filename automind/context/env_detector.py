@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from automind.core.proc import silent_process_kwargs
+
 
 @dataclass
 class EnvironmentInfo:
@@ -150,6 +152,9 @@ class EnvironmentDetector:
         # ``cwd`` 与 ``_run_command`` 同义：探活也要在任务工作区里进行，
         # 否则"这个项目里 git 可用吗"会被进程 cwd 的仓库悄悄回答成"可用"。
         kwargs: dict[str, Any] = {"capture_output": True, "timeout": 5, "check": False}
+        # v1.11.20：探活是"闪窗大户"—— 一次环境检测要起 pip/git/node/docker
+        # 四五个子进程，桌面版上每个都闪一个黑框。静默化后一次也不闪。
+        kwargs.update(silent_process_kwargs())
         if cwd:
             kwargs["cwd"] = cwd
         try:
@@ -166,6 +171,7 @@ class EnvironmentDetector:
     def _run_command(cmd: list[str], cwd: str | None = None) -> str:
         kwargs: dict[str, Any] = {"capture_output": True, "text": True, "timeout": 5,
                                   "encoding": "utf-8", "errors": "replace"}
+        kwargs.update(silent_process_kwargs())
         if cwd:
             kwargs["cwd"] = cwd
         try:

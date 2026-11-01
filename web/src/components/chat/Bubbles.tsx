@@ -5,7 +5,7 @@ import { apiDelete, apiGet, apiPost } from '../../api/client';
 import { copyText } from '../../lib/clipboard';
 import { esc, isSafeUrl, renderMarkdown, splitStream } from '../../lib/markdown';
 import { MODE_LABELS, useApp, type Mode } from '../../store/app';
-import { useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem } from '../../store/chat';
+import { stopReasonZh, useChat, type ChatItem, type LoopIter, type MaMetrics, type MaReview, type MaStep, type MaVerification, type PlanRow, type TraceItem } from '../../store/chat';
 import { TEMPLATES } from '../../lib/templates';
 import { useUi } from '../../store/ui';
 import { usePanel } from '../../store/panel';
@@ -269,26 +269,150 @@ const MA_ROLES: Record<string, string> = {
   planner: '🧭 规划', researcher: '🔎 研究', coder: '💻 编程', writer: '✍️ 写作', reviewer: '🧐 审阅',
 };
 
+// v1.11.22 工程协同：步骤状态图标。skip（依赖失败被跳过）与 fail（跑了但失败）
+// 必须分开 —— 前者不是"这个角色做错了"，用户据此判断要不要单独补跑。
+const MA_STATE: Record<MaStep['state'], { icon: string; color: string }> = {
+  pending: { icon: '○', color: 'var(--text3)' },
+  run: { icon: '◐', color: 'var(--yellow)' },
+  ok: { icon: '✓', color: 'var(--green)' },
+  fail: { icon: '✗', color: 'var(--red)' },
+  skip: { icon: '⊘', color: 'var(--text3)' },
+};
+
+/** token 数的人话写法（12345 → 1.2 万）。 */
+function fmtTokShort(v: number): string {
+  return v >= 10000 ? `${(v / 10000).toFixed(1)} 万` : String(Math.round(v));
+}
+
+/** 审查结论一句话；没有可展示的结论返回空串（审查不可用 ≠ 审查通过）。 */
+function reviewText(r?: MaReview | null): string {
+  if (!r) return '';
+  if (r.available === false) return '审查不可用';
+  if (r.approved === true) return '审查通过';
+  if (r.approved === false) return '审查有意见';
+  return '';
+}
+
+/**
+ * 一步的"依赖 / 写范围 / 角色预算 / 回炉 / 审查"行。
+ * 旧文本流水线的步骤一个字段都没有 → 返回 null，布局与改动前完全一致。
+ */
+function stepMetaRow(s: MaStep) {
+  const dep = (s.dependsOn || []).map(String).filter(Boolean);
+  const wp = s.writePaths || [];
+  const budget = [
+    typeof s.llmCalls === 'number' ? `${s.llmCalls} 次调用` : '',
+    typeof s.steps === 'number' ? `${s.steps} 步` : '',
+    typeof s.tokens === 'number' ? `${fmtTokShort(s.tokens)} tk` : '',
+  ].filter(Boolean).join(' · ');
+  const review = reviewText(s.review);
+  const rework = typeof s.rework === 'number' && s.rework > 0 ? `↻ 回炉 ${s.rework} 次` : '';
+  if (!dep.length && !wp.length && !budget && !review && !rework) return null;
+  const reviewTitle = s.review
+    ? [s.review.issues, s.review.reason, s.review.error].filter(Boolean).join('\n')
+    : '';
+  return (
+    <div className="hint-text" style={{ display: 'flex', gap: 10, flexWrap: 'wrap', marginTop: 2, fontSize: '.78em' }}>
+      {dep.length > 0 && <span>依赖 {dep.join(', ')}</span>}
+      {wp.length > 0 && (
+        <span title={wp.join('\n')}>
+          写：{wp.slice(0, 3).join(', ')}{wp.length > 3 ? ` +${wp.length - 3}` : ''}
+        </span>
+      )}
+      {budget && <span>{budget}</span>}
+      {rework && <span style={{ color: 'var(--yellow)' }}>{rework}</span>}
+      {review && <span title={reviewTitle}>{review}</span>}
+    </div>
+  );
+}
+
+/**
+ * 收尾验证摘要：只认真实证据（tests / llm）。
+ * 设施不可用时如实写"不可用"—— 既不能写成通过，也不能写成未通过。
+ */
+function verificationParts(v?: MaVerification | null): string[] {
+  if (!v) return [];
+  const out: string[] = [];
+  if (v.tests) {
+    if (v.tests.unavailable) out.push('测试不可用');
+    else if (v.tests.passed === true) out.push('测试通过');
+    else if (v.tests.passed === false) out.push('测试未通过');
+  }
+  if (v.llm) {
+    if (v.llm.available === false) out.push('验收不可用');
+    else if (v.llm.done === true) out.push('验收通过');
+    else if (v.llm.done === false) out.push('验收未通过');
+  }
+  // 只有聚合结论、没有分段证据时，如实说"已执行/未通过"，不假装有明细
+  if (!out.length && typeof v.done === 'boolean') out.push(v.done ? '已完成' : '未通过');
+  return out;
+}
+
+/** 聚合指标里跟"团队成本/并行度"有关的那几项（其余指标不展示）。 */
+function metricsParts(m?: MaMetrics | null): string[] {
+  if (!m) return [];
+  const out: string[] = [];
+  if (typeof m.parallel_batches === 'number' && m.parallel_batches > 0) {
+    out.push(`并行 ${m.parallel_batches} 批`);
+  }
+  if (typeof m.llm_calls === 'number') out.push(`合计 ${m.llm_calls} 次调用`);
+  if (typeof m.rework_count === 'number' && m.rework_count > 0) {
+    out.push(`回炉 ${m.rework_count} 次`);
+  }
+  return out;
+}
+
 export const MultiBubble = memo(function MultiBubble({ item }: { item: Extract<ChatItem, { kind: 'multi' }> }) {
+  const vparts = verificationParts(item.verification);
+  const mparts = metricsParts(item.metrics);
+  const verifyTitle = [
+    item.verification?.tests?.detail,
+    item.verification?.llm?.reason,
+    item.verification?.reason,
+  ].filter(Boolean).join('\n');
   return (
     <div className="msg agent">
       <div className="avatar">🤝</div>
       <div className="col" style={{ maxWidth: '88%' }}>
         <div className="bubble">
           <b>🤝 多智能体协同</b>
+          {/* 新编排器才会带 engineering 标记；旧文本流水线的卡片不显示这一枚 */}
+          {item.engineering && (
+            <span className="hint-text" style={{ marginLeft: 8, fontSize: '.78em' }}>🧩 工程协同 · DAG</span>
+          )}
           {item.steps.length === 0 && !item.done && (
             <div className="typing-dots" style={{ marginTop: 8 }}><span /><span /><span /></div>
           )}
-          {item.steps.map((s: MaStep, i) => (
-            <div key={i} className="ma-step">
-              <span style={{ color: s.state === 'ok' ? 'var(--green)' : s.state === 'run' ? 'var(--yellow)' : 'var(--text3)' }}>
-                {s.state === 'ok' ? '✓' : s.state === 'run' ? '◐' : '○'}
-              </span>{' '}
-              <b>{MA_ROLES[s.role] || s.role}</b>{' '}
-              <span style={{ color: 'var(--text2)' }}>{s.subtask}</span>
-              {s.output && <div className="ma-out md" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.output + (s.output.length >= 600 ? ' …' : '')) }} />}
+          {item.steps.map((s: MaStep, i) => {
+            const st = MA_STATE[s.state] || MA_STATE.pending;
+            const stepTitle = [s.error, s.stopReason ? `停止原因：${stopReasonZh(s.stopReason)}` : '']
+              .filter(Boolean).join('\n') || undefined;
+            return (
+              <div key={s.id || i} className="ma-step" title={stepTitle}>
+                <span style={{ color: st.color }}>{st.icon}</span>{' '}
+                <b>{MA_ROLES[s.role] || s.label || s.role}</b>{' '}
+                {s.id && (
+                  <span className="hint-text mono" style={{ fontSize: '.76em', marginRight: 4 }}>#{s.id}</span>
+                )}
+                <span style={{ color: 'var(--text2)' }}>{s.subtask}</span>
+                {stepMetaRow(s)}
+                {s.output && <div className="ma-out md" dangerouslySetInnerHTML={{ __html: renderMarkdown(s.output + (s.output.length >= 600 ? ' …' : '')) }} />}
+              </div>
+            );
+          })}
+          {/* 卡片底部的收尾验证摘要：有 verification 才显示；字段缺失时整行不渲染 */}
+          {(vparts.length > 0 || mparts.length > 0) && (
+            <div className="hint-text" title={verifyTitle || undefined}
+              style={{
+                marginTop: 8,
+                color: item.verification?.done === true ? 'var(--green)'
+                  : item.verification?.done === false ? 'var(--red)' : undefined,
+              }}>
+              {vparts.length > 0 && <>验证：{vparts.join(' · ')}</>}
+              {vparts.length > 0 && mparts.length > 0 && ' · '}
+              {mparts.join(' · ')}
             </div>
-          ))}
+          )}
         </div>
       </div>
     </div>
@@ -607,6 +731,11 @@ export const ErrorBubble = memo(function ErrorBubble({ item, onResume, onRetry }
   const hint = diagnose(item.error || '');
   const long = (item.error || '').length > 160;
   const shown = long && !open ? item.error.slice(0, 160) + ' …' : item.error;
+  // v1.11.21：结构化停因行 —— "为什么停 / 还有没有断点 / 这一轮多少次模型调用"。
+  // 三个字段全部可选：旧版本落盘的消息没有它们，此时整行不渲染，布局与旧版一致。
+  const stopZh = stopReasonZh(item.stopReason);
+  const calls = typeof item.llmCalls === 'number' ? item.llmCalls : null;
+  const hasStatus = !!stopZh || !!item.resumable || !!item.budgetExhausted || calls !== null;
 
   return (
     <div className="msg agent">
@@ -617,6 +746,20 @@ export const ErrorBubble = memo(function ErrorBubble({ item, onResume, onRetry }
             {item.why === '中断' ? '⏹ 任务已中断' : '❌ 任务失败'}
             {item.at && <span className="err-at">{item.at}</span>}
           </div>
+          {/* 结论放在报错正文上方（与气泡其它徽标同一阅读顺序）：先看到"停在哪一步、
+              还能不能接着做"，再决定要不要读那一大段原始报错。 */}
+          {hasStatus && (
+            <div className="err-hint" style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 4 }}>
+              {stopZh && <span>停止原因：{stopZh}</span>}
+              {item.budgetExhausted && <span>🪙 Token 预算已耗尽</span>}
+              {item.resumable && (
+                <span title="可在对话区上方点「从断点续跑」精确续跑；下方按钮只是重发原任务并要求先检查现状">
+                  ⏸ 已保存可续跑断点
+                </span>
+              )}
+              {calls !== null && <span>{calls} 次 LLM 调用</span>}
+            </div>
+          )}
           {item.error && <div className="err-body">{shown}</div>}
           {long && (
             <button className="err-more" onClick={() => setOpen(!open)}>
@@ -630,8 +773,10 @@ export const ErrorBubble = memo(function ErrorBubble({ item, onResume, onRetry }
                 {/* 措辞刻意不写"从断点继续"：后端并没有把执行进度传回来，这里能做的
                     只是重发原任务、并额外要求模型先查看现状。说成"断点续传"会让用户
                     以为已完成的步骤一定不会重做 —— 那是做不到的承诺。 */}
+                {/* 有断点时把主按钮圈出来：此时"接着做"比"从头重跑"更该被先看到 */}
                 <button
                   className="err-btn primary"
+                  style={item.resumable ? { boxShadow: '0 0 0 3px var(--accent-glow)' } : undefined}
                   title="重发原任务，并要求先检查当前进度、尽量跳过已完成的部分。这是给模型的附加提示，不是断点续传。"
                   onClick={() => onResume(item)}
                 >▶ 检查现状后接着做</button>

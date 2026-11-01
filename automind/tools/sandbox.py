@@ -48,6 +48,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+from automind.core.proc import silent_process_kwargs
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools.base import AbstractTool
 
@@ -396,8 +397,10 @@ class PythonSandboxTool(AbstractTool):
         argv = [sys.executable, "-I", "-S", "-c", _CHILD]
         kw: dict[str, Any] = {}
         if os.name == "nt":
-            # Windows：新建进程组，超时时能连同其子孙一起结束
-            kw["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+            # Windows：新建进程组（超时时能连同其子孙一起结束）+ 静默
+            # （CREATE_NO_WINDOW，否则桌面版每次执行代码都闪一个黑框）
+            kw.update(silent_process_kwargs(
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)))
         else:
             # POSIX：另起会话，kill 时不会波及父进程所在的进程组。
             # 资源限额由子进程自己设（见 _CHILD），不用 preexec_fn —— 那在

@@ -15,7 +15,7 @@ import { ErrorPanel } from '../ui/AsyncBoundary';
 import { copyText } from '../../lib/clipboard';
 import { renderMarkdown } from '../../lib/markdown';
 import { MODE_LABELS, useApp, type Mode } from '../../store/app';
-import { useChat } from '../../store/chat';
+import { stopReasonZh, useChat } from '../../store/chat';
 import { Badge, EmptyState, EntityCard, Tile, ViewHead } from '../ui/Panel';
 
 const { Text } = Typography;
@@ -176,9 +176,25 @@ export default function HistoryView() {
               )}
               {h.scheduled && <Badge tone="muted">⏰ 定时</Badge>}
               {h.cached && <Badge tone="muted">⚡ 缓存</Badge>}
+              {/* v1.11.21：结构化停因 —— 失败/部分交付记录直接标出"为什么停"。
+                  旧记录没有 stop_reason，缺失时一个徽标都不加（不能凭空报"预算耗尽"）。 */}
+              {!h.success && stopReasonZh(h.stop_reason) && (
+                <Badge tone={h.stop_reason === 'llm_unavailable' ? 'dangerous' : 'custom'}>
+                  ⏹ {stopReasonZh(h.stop_reason)}
+                </Badge>
+              )}
+              {h.resumable && <Badge tone="muted">⏸ 可续跑</Badge>}
+              {/* 预算耗尽单独标注，但停因已写"预算耗尽"时不重复 */}
+              {h.budget_exhausted && stopReasonZh(h.stop_reason) !== '预算耗尽' && (
+                <Badge tone="custom">🪙 预算耗尽</Badge>
+              )}
             </>}
             desc={mark((h.output || '').slice(0, 200))}
-            meta={<>{h.time ? `${h.time} · ` : ''}{h.steps} 步 · {(h.tokens || 0).toLocaleString()} tk · {h.duration_ms} ms</>}
+            meta={<>{h.time ? `${h.time} · ` : ''}{h.steps} 步 · {(h.tokens || 0).toLocaleString()} tk · {h.duration_ms} ms
+              {/* v1.11.21：本任务实际 LLM 调用次数。旧记录没有该字段 → 不显示，
+                  不能把"未知"写成"0 次调用" */}
+              {typeof h.llm_calls === 'number' && <> · {h.llm_calls} 次调用</>}
+            </>}
             actions={
               <Space direction="vertical" size={4}>
                 <Button size="small" onClick={async () => {
@@ -225,9 +241,30 @@ export default function HistoryView() {
               {MODE_ICON[detail.interaction]}{MODE_LABELS[detail.interaction as Mode]}{detail.time ? ` · ${detail.time}` : ''}
               · {detail.steps || 0}步 · {detail.tokens || 0}tk · {detail.duration_ms || 0}ms
               · {detail.success ? <span style={{ color: 'var(--green)' }}>成功</span> : <span style={{ color: 'var(--red)' }}>未完成</span>}
+              {/* v1.11.21：结构化停因三件套。字段缺失（旧记录）时逐项不显示 */}
+              {stopReasonZh(detail.stop_reason) && <> · 停止原因：{stopReasonZh(detail.stop_reason)}</>}
+              {typeof detail.resumable === 'boolean' && <> · 可续跑：{detail.resumable ? '是' : '否'}</>}
+              {typeof detail.llm_calls === 'number' && <> · LLM 调用：{detail.llm_calls} 次</>}
             </div>
             <Text strong style={{ display: 'block', marginTop: 10 }}>任务</Text>
             <Card size="small" style={{ maxHeight: 120, overflowY: 'auto', whiteSpace: 'pre-wrap', fontSize: '.88em' }}>{detail.task || ''}</Card>
+            {/* 错误/停止说明放在任务与产出之间：先知道为什么停，再看它交出了什么。
+                带复制按钮 —— 这段文字通常就是要贴给同事或反馈给模型的那段。 */}
+            {detail.error && (
+              <>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10 }}>
+                  <Text strong>⚠ 停止原因 / 错误详情</Text>
+                  <Button size="small" type="text" onClick={async () => {
+                    const ok = await copyText(String(detail.error || ''));
+                    ok ? message.success('已复制错误详情') : message.error('复制失败');
+                  }}>⧉ 复制</Button>
+                </div>
+                <Card size="small" style={{
+                  maxHeight: 140, overflowY: 'auto', whiteSpace: 'pre-wrap',
+                  fontSize: '.86em', borderColor: 'var(--red)',
+                }}>{detail.error}</Card>
+              </>
+            )}
             <Text strong style={{ display: 'block', marginTop: 10 }}>完整产出（可复制回收好代码）</Text>
             <Card size="small" style={{ maxHeight: 340, overflowY: 'auto', fontSize: '.86em' }}>
               <div id="hist-output" className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(detail.output || '（无输出）') }} />

@@ -412,3 +412,17 @@ class AgentResult(BaseModel):
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     duration_ms: float = 0.0
     checkpoints: list[str] = Field(default_factory=list)
+    # ── 可诊断状态（v1.11.21）──
+    # 此前"任务为什么没成功"只能靠猜输出文本：历史/失败卡片拿不到结构化原因，
+    # 前端只能显示一句笼统的失败。以下字段由 _run_impl 填充，server 落库前脱敏。
+    #: 停止原因：completed / max_iterations / task_budget / budget_exhausted /
+    #: no_progress / llm_unavailable / partial / plan_rejected / ...
+    stop_reason: str = ""
+    #: 失败 / 部分交付的可读原因（server 落库前再做一次脱敏与截断）
+    error: str = ""
+    #: 是否有可续跑检查点（断点已保存）
+    resumable: bool = False
+    #: 是否因预算耗尽而停下（token / 墙钟）
+    budget_exhausted: bool = False
+    #: 本任务实际 LLM 调用次数（优先取 self.llm.usage.calls）
+    llm_calls: int = 0

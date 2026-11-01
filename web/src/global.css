@@ -2190,3 +2190,61 @@ html.light body .ssm-row.active , body.light .ssm-row.active {
   .ssm-acts { margin-left: auto; }
   .ssm-body { max-height: 54vh; }
 }
+
+/* ══════════════════════════════════════════════════════════════
+   v1.11.20 · ✨ 优化问题（输入卡片按钮 + 预览弹窗）
+   按钮观感与 .composer-sticky 一致；模糊时只做轻微高亮，不抢输入、不自动改写。
+   ══════════════════════════════════════════════════════════════ */
+.composer-opt {
+  display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 9px;
+  border-radius: 999px; font-size: .74em; font-family: var(--font); cursor: pointer;
+  color: var(--text3); background: transparent; border: 1px dashed var(--border);
+  white-space: nowrap;
+  transition: color .15s ease, border-color .15s ease, opacity .15s ease;
+}
+.composer-opt:hover:not(:disabled) { color: var(--text2); border-color: var(--text3); }
+.composer-opt:disabled { opacity: .42; cursor: default; }
+/* 模糊输入：轻微高亮 + 缓慢呼吸，提示"可以点一下"；不自动改写、不打断输入 */
+.composer-opt.hint {
+  color: var(--accent); border: 1px solid var(--accent); background: transparent;
+  animation: optPulse 2.6s ease-in-out infinite;
+}
+@keyframes optPulse {
+  0%, 100% { box-shadow: 0 0 0 0 var(--accent-glow); }
+  50% { box-shadow: 0 0 0 3px transparent; }
+}
+
+/* ── 优化预览弹窗 ── */
+.opt-wrap { display: flex; flex-direction: column; gap: 10px; }
+.opt-sec { display: flex; flex-direction: column; gap: 6px; }
+.opt-label {
+  display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap;
+  font-size: .8em; font-weight: 600; color: var(--text2);
+}
+.opt-orig {
+  max-height: 140px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg2); color: var(--text2); font-size: .86em; line-height: 1.6;
+}
+.opt-edit { font-size: .9em; line-height: 1.7; }
+.opt-list { max-height: 120px; overflow-y: auto; margin: 0; padding-left: 18px; }
+.opt-list li { margin: 2px 0; line-height: 1.6; overflow-wrap: anywhere; }
+.opt-good {
+  padding: 7px 10px; border-radius: 8px; font-size: .84em; line-height: 1.6;
+  color: var(--green); background: var(--green-bg);
+}
+.opt-rule {
+  padding: 7px 10px; border-radius: 8px; font-size: .82em; line-height: 1.6;
+  color: var(--text); background: var(--yellow-bg);
+}
+.opt-foot { display: flex; align-items: center; gap: 8px; }
+@media (max-width: 720px) {
+  /* 小屏只留 ✨，把有限的工具栏宽度让给模式/目标等常驻入口 */
+  .composer-opt { padding: 0 7px; }
+  .composer-opt .opt-full { display: none; }
+  .opt-list { max-height: 90px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .composer-opt { transition: none; }
+  .composer-opt.hint { animation: none; }
+}

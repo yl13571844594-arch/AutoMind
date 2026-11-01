@@ -2,8 +2,8 @@
 
 ## 修的是什么
 
-「设置 → 执行治理」里的 26 个参数（5 个自主闭环开关 + 4 个布尔附加项 +
-15 个数值 + 2 个策略）此前有一部分是"保存了但不生效"或"只对新实例生效"：
+「设置 → 执行治理」里的 27 个参数（5 个自主闭环开关 + 4 个布尔附加项 +
+16 个数值 + 2 个策略）此前有一部分是"保存了但不生效"或"只对新实例生效"：
 
   · ``trace_enabled`` / ``trace_max_runs``：轨迹记录器懒构造 + 读的是
     ``ExecutionConfig()`` 出厂默认值，设置里改了永远到不了记录器；
@@ -21,7 +21,7 @@
     但此前界面没有任何提示，用户以为改完立刻生效。
 
 本文件守住三件事：
-  1. **26 个参数全部**通过 API 可改、可持久化、同步到已存在会话克隆，
+  1. **27 个参数全部**通过 API 可改、可持久化、同步到已存在会话克隆，
      并在响应里带 ``effective``（生效时机 + 中文说明）；
   2. 关键参数有**行为级**断言（改完 → 下一次调用/写入/审批/任务真的变了）；
   3. 诚实边界：标注"下次任务生效"的参数对进行中的任务不追溯；
@@ -61,14 +61,15 @@ ALL_BOOL_EXTRAS = ("isolate_workspace", "terminal_background_enabled",
                    "release_slot_on_approval_wait", "trace_enabled")
 ALL_NUMS = ("tool_timeout_seconds", "tool_timeout_max_seconds",
             "approval_timeout_seconds", "tool_output_max_chars",
-            "auto_verify_max_rounds", "trace_max_runs",
+            "auto_verify_max_rounds", "auto_verify_fix_max_iterations",
+            "trace_max_runs",
             "goal_timeout_seconds", "react_tool_timeout_seconds",
             "max_task_seconds", "react_tool_budget",
             "react_repeat_action_threshold", "react_no_progress_limit",
             "task_token_budget", "max_iterations", "budget_auto_continue")
 ALL_STRS = ("approval_timeout_action", "write_conflict_policy")
 ALL_KEYS = ALL_FLAGS + ALL_BOOL_EXTRAS + ALL_NUMS + ALL_STRS
-assert len(ALL_KEYS) == 26, "执行治理参数清单必须是 26 个（与设置面板一致）"
+assert len(ALL_KEYS) == 27, "执行治理参数清单必须是 27 个（与设置面板一致）"
 
 #: 每个参数一个"改了之后能观察到"的代表值（参数字典见 server._AUTOPILOT_NUMS）
 SAMPLE_VALUES: dict[str, object] = {
@@ -86,6 +87,8 @@ SAMPLE_VALUES: dict[str, object] = {
     "approval_timeout_seconds": 0.25,
     "tool_output_max_chars": 500,
     "auto_verify_max_rounds": 1,
+    # v1.11.21：修复轮独立步数预算（0 = 不自动修复）
+    "auto_verify_fix_max_iterations": 2,
     "trace_max_runs": 2,
     "goal_timeout_seconds": 30,
     "react_tool_timeout_seconds": 45,
@@ -164,12 +167,12 @@ def _get(gov) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════
-# 1. 26 个参数：可改 / 可持久化 / 同步克隆 / 带生效时机
+# 1. 27 个参数：可改 / 可持久化 / 同步克隆 / 带生效时机
 # ═══════════════════════════════════════════════════════════
 
 
 class TestGovernanceMatrix:
-    def test_all_26_params_have_effective_timing(self, gov):
+    def test_all_27_params_have_effective_timing(self, gov):
         snap = _get(gov)
         for key in ALL_KEYS:
             assert key in snap, f"设置面板读不到参数 {key}"

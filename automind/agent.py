@@ -223,6 +223,10 @@ class AutoMindAgent:
             project_root=self.config.project_root,
             approval_mode=getattr(self.config.execution, "approval_mode", "auto"),
         )
+        # 分派级治理闸门（v1.11.19）：堵住 workflow / skill / direct 三条
+        # 不经过 ReAct/Plan 人工审批的通道。装在**共享的**工具注册表上，
+        # 内部用 ContextVar + 实时 getter 保证并发会话互不串味。
+        self._install_tool_governor()
         # 审批回调（由 Web 层注入，用于 ask 模式的人工确认）
         self.approval_callback = None
         # v1.11.0 本次运行的引用与闸门（Web 层按消息注入，每次运行前都会重新赋值）：
@@ -328,6 +332,46 @@ class AutoMindAgent:
         # 内置插件开箱即用：默认全部加载（用户插件仍需在界面手动启用）
         self._load_builtin_plugins()
         self.apply_plugin_hooks()
+
+    def _install_tool_governor(self) -> None:
+        """给（会话克隆共享的）工具注册表装分派级治理闸门（v1.11.19）。
+
+        闸门解决的是"审批旁路"：ReAct / Plan 在执行器内部逐次审批，但
+        workflow / skill / direct 三条通道不经过执行器，高危工具在 ``ask``
+        模式下也能被静默执行。装在这里（注册表）而不是每个工具实例上，是因为
+        注册表是会话克隆之间共享的、工具实例也是共享的 —— 挂到实例上会被
+        并发会话互相覆盖。
+
+        两个关键设计：
+          · ``approval_mode`` 通过 **getter 实时读取**（可被任务中途修改，且
+            会话克隆各持一份 PermissionEngine，但共享同一个注册表）；
+          · 风险评估用 ``self.permissions``（策略/项目根一致），审批模式则
+            优先取"当前正在跑的那个 Agent"的 —— 子智能体/并发会话场景下
+            永远以真正在执行的那个会话为准，而不是最后一次安装闸门的那个。
+        """
+        try:
+            from automind.core import governance
+
+            def _approval_mode() -> str:
+                current = self
+                try:
+                    from automind.core import session_ctx as _sctx
+
+                    current = _sctx.agent() or self
+                except Exception:                      # pragma: no cover - 防御性
+                    current = self
+                permissions = getattr(current, "permissions", None) or self.permissions
+                return str(getattr(permissions, "approval_mode", "auto") or "auto")
+
+            self.tool_registry.set_governor(
+                governance.make_unattended_governor(self.permissions, _approval_mode))
+            logger.info("tool_governor_installed",
+                        approval_mode=getattr(self.permissions, "approval_mode", "auto"))
+        except Exception as e:                         # pragma: no cover - 防御性
+            # 装不上闸门不能阻断 Agent 启动（治理是增强能力，不是启动前提）；
+            # 但要留下明确记录，否则"以为有闸门其实没有"是最危险的静默降级。
+            logger.warning("tool_governor_install_failed",
+                           error=f"{type(e).__name__}: {e}")
 
     # 各交互模式的系统提示词（精炼、可执行，提升命中率并节省 token）
     CHAT_SYSTEM_PROMPT = (
@@ -525,6 +569,11 @@ class AutoMindAgent:
         # 这里写了一遍，multi / loop / 子智能体 / 续跑各自漏了不同项，表现为
         # "上一个任务用掉窗口后，换个模式跑第一个模型调用就撞预算"。
         self._begin_task_budget()
+        # v1.11.21：闭环证据按任务清空。会话克隆跨任务复用，上一轮的
+        # `_verify_state`（例如一次「验收通过」）若不清，本轮即使跳过了闭环，
+        # 质量评估也会把**上一轮的结论**当成这一轮的来复用 —— 那会让一个
+        # 部分交付的任务被判成成功。
+        self._verify_state = {}
 
         if self.llm is None:
             raise RuntimeError(
@@ -553,7 +602,11 @@ class AutoMindAgent:
         step_results = []
         result_text = ""
         plan = None
-        budget_exhausted = ""
+        # v1.11.25：主任务预算和收尾阶段预算必须分开记账 —— 主任务已交付后，
+        # 收尾（质量评估/反思/闭环）耗尽预算不代表任务没完成；混用一个变量会把
+        # "已完成交付"标成 partial 并提示续跑（v1.11.24 实测误判）。
+        main_budget_exhausted = ""
+        post_budget_exhausted = ""
         try:
             if self._mode == ExecutionMode.REACT:
                 result_text = await self._run_react(user_input, context,
@@ -581,10 +634,34 @@ class AutoMindAgent:
             # v1.7.5：预算耗尽不再让整个任务崩掉。
             # ReAct 路径已在循环内自行优雅收尾（见 react_executor），
             # 这里兜的是 Plan 路径与"计划后补跑"两步 —— 它们同样要调模型。
-            budget_exhausted = str(e)
+            main_budget_exhausted = str(e)
             plan = getattr(self, "_current_plan", None)
-            logger.warning("task_budget_exhausted", error=budget_exhausted,
+            logger.warning("task_budget_exhausted", error=main_budget_exhausted,
                            mode=getattr(self._mode, "value", str(self._mode)))
+
+        # ── 主任务结局判定（v1.11.21）──
+        # 收尾阶段（审查 / 验收 / 修复轮）本身也要花 token，因此必须先知道
+        # 主任务是「正常完成」还是「部分交付」：后者手里的成果是半成品，
+        # 再拿去做 LLM 审查/修复等于花钱重跑同一份半成品。
+        main_stop_reason = ""
+        if main_budget_exhausted:
+            main_stop_reason = "budget_exhausted"
+        elif self._mode == ExecutionMode.REACT:
+            main_stop_reason = str(getattr(
+                getattr(self, "react_executor", None), "stop_reason", "") or "")
+            if main_stop_reason in ("", "no_more_tools"):
+                main_stop_reason = "completed"
+        elif plan is not None:
+            pstat = getattr(getattr(plan, "status", None), "value", "")
+            main_stop_reason = "completed" if (
+                pstat == "completed"
+                and not any(not s.success for s in step_results)
+            ) else "partial"
+        main_partial = main_stop_reason in {
+            "max_iterations", "task_budget", "budget_exhausted",
+            "no_progress", "llm_unavailable",
+        }
+        simple = self._is_simple_task(step_results)
 
         # 3.5 / 4 / 5 —— 这三步**本身也要花 token**（TDD 闭环 / 质量评估 / 反思）。
         # 预算已经没了就降级跳过，而不是把手里已有的结果一起丢掉 —— 修复前最
@@ -594,18 +671,44 @@ class AutoMindAgent:
                 # 计划被驳回：什么都没执行，没有可验收 / 可反思的东西 —— 也别再花钱
                 raise _PlanRejected()
             if self._interaction in (InteractionMode.WORK, InteractionMode.CODING):
-                result_text = await self._autonomy_closure(user_input, result_text, context)
+                # v1.11.21：把主任务结局传进闭环 —— 部分交付 / 简单任务在
+                # 闭环内部直接跳过（不产生任何 LLM 调用）
+                result_text = await self._autonomy_closure(
+                    user_input, result_text, context,
+                    main_partial=main_partial,
+                    main_stop_reason=main_stop_reason,
+                    simple=simple)
 
-            # 4. 质量评估
-            quality = await self.quality_assessor.evaluate(user_input, result_text, context)
+            # 4. 质量评估 —— v1.11.21：优先复用闭环里已经花过钱的审查/验收结论，
+            #    否则简单/部分交付任务直接走本地规则评估；只有"要额外判一次"
+            #    的普通任务才真的再调一次模型。
+            reused = self._quality_from_closure()
+            if reused is not None:
+                # 闭环刚让模型判过"完成没有"，再让另一个模型判一次是纯重复计费
+                quality = reused
+                reflection = None
+            elif simple or main_partial:
+                # 简单任务 / 部分交付：本地规则评估即可，反思也省掉
+                quality = QualityAssessor._simple_evaluate(
+                    user_input, result_text, context)
+                if main_partial:
+                    # 部分交付不能因为"输出非空"就被本地规则判成通过
+                    quality.overall_pass = False
+                reflection = None
+            else:
+                quality = await self.quality_assessor.evaluate(
+                    user_input, result_text, context)
 
-            # 5. 反思
-            reflection = await self.reflexion.reflect(
-                user_input,
-                "success" if quality.overall_pass else "partial",
-                result_text[:2000],
-                quality,
-            )
+                # 5. 反思 —— 干净成功不反思（没有教训可提取，纯 token 浪费）
+                if quality.overall_pass and not quality.issues:
+                    reflection = None
+                else:
+                    reflection = await self.reflexion.reflect(
+                        user_input,
+                        "success" if quality.overall_pass else "partial",
+                        result_text[:2000],
+                        quality,
+                    )
         except _PlanRejected:
             quality = QualityReport(
                 completeness=0.0, correctness=0.0, consistency=0.0,
@@ -613,7 +716,9 @@ class AutoMindAgent:
                 suggestions=[], overall_pass=False)
             reflection = None
         except BudgetExhaustedError as e:
-            budget_exhausted = budget_exhausted or str(e)
+            # v1.11.25：收尾阶段预算耗尽 ≠ 主任务没完成。单独记账，不碰
+            # `main_budget_exhausted` —— 否则已完成交付会被标成 partial/可续跑。
+            post_budget_exhausted = post_budget_exhausted or str(e)
             quality = QualityReport(
                 completeness=0.0, correctness=0.0, consistency=0.0,
                 hallucination_score=0.0,
@@ -634,13 +739,32 @@ class AutoMindAgent:
                 suggestions=[], overall_pass=False)
             reflection = None
             logger.warning("post_processing_llm_unavailable", error=str(e)[:200])
+        # v1.11.21：`reflection is None` 是刻意取舍 —— 复用验收结论 / 简单任务 /
+        # 干净成功都不再写反思与长期记忆（省一次 LLM 调用）。代价是这几类任务
+        # 不留"经验教训"条目；对短任务/一次过的任务，这个取舍是划算的。
 
-        if budget_exhausted:
+        if main_budget_exhausted:
             result_text += (
                 "\n\n——— 本轮预算已用尽 ———\n"
-                f"{budget_exhausted}\n"
+                f"{main_budget_exhausted}\n"
                 "上面是本轮**已经真实完成**的部分。可直接说「继续」，"
                 "或在界面上点「从断点续跑」精确续跑（收尾时会保存断点）。")
+        elif post_budget_exhausted:
+            # v1.11.25：主任务没耗尽预算，只是收尾环节（质量评估/反思/闭环）
+            # 没钱了。按**主任务真实结局**区分措辞：主任务正常完成 → 明确
+            # "无需续跑"；主任务本身没完成（如计划失败）→ 仍提示断点可用于继续。
+            if main_stop_reason == "completed":
+                result_text += (
+                    "\n\n——— 收尾阶段预算已用尽 ———\n"
+                    "任务主体**已经完成并交付**（上面的结果有效）；"
+                    "质量评估 / 反思等收尾环节因 Token 预算不足被跳过。"
+                    "这不影响已交付内容，无需从断点续跑。")
+            else:
+                result_text += (
+                    "\n\n——— 收尾阶段预算已用尽 ———\n"
+                    "质量评估 / 反思等收尾环节因 Token 预算不足被跳过；"
+                    "主任务尚未完全交付，已完成的进度已保存在断点里，"
+                    "可继续推进剩余部分。")
 
         # 6. 存储交互
         assistant_msg = Message(role=Role.ASSISTANT, content=result_text)
@@ -652,6 +776,9 @@ class AutoMindAgent:
 
         # 7. 保存检查点
         checkpoint_id = ""
+        #: 收尾落盘时写入的状态（completed / partial / dismissed）——
+        #: resumable 判定要用它，不能只看"有没有 checkpoint_id"
+        checkpoint_status = ""
         if self.config.execution.checkpoint_enabled:
             self._agent_state.plan = self._current_plan
             self._agent_state.messages = self.context_mgr.get_context()
@@ -661,21 +788,28 @@ class AutoMindAgent:
             react = self._react_progress_snapshot() if plan is None else None
             if react is not None:
                 md["react"] = react
+            if post_budget_exhausted:
+                # 收尾阶段（质量评估/反思）预算耗尽：任务已交付，仅作诊断记录，
+                # 不改变 completed 状态、不触发续跑。
+                md["post_budget_exhausted"] = True
             if self._current_plan is not None and getattr(self, "_plan_rejected", ""):
                 # 驳回的计划不可"续跑"—— 续跑会绕过审批直接执行它
                 md["status"] = "dismissed"
             elif self._current_plan is not None:
                 pstat = getattr(getattr(self._current_plan, "status", None), "value", "")
-                md["status"] = "completed" if pstat == "completed" and not budget_exhausted \
-                    else "partial"
+                md["status"] = "completed" if pstat == "completed" \
+                    and not main_budget_exhausted else "partial"
             elif self._mode == ExecutionMode.REACT:
                 reason = getattr(getattr(self, "react_executor", None), "stop_reason", "")
                 md["stop_reason"] = reason
                 md["status"] = "completed" if reason in ("", "no_more_tools") \
-                    and not budget_exhausted else "partial"
+                    and not main_budget_exhausted else "partial"
             else:
-                md["status"] = "completed"
+                # v1.11.25：计划模式但主任务未成计划（规划/执行前即预算耗尽）——
+                # 主预算耗尽时也必须是 partial（此前一律 completed，续跑入口消失）
+                md["status"] = "completed" if not main_budget_exhausted else "partial"
             md["finished_at"] = time.time()
+            checkpoint_status = str(md.get("status") or "")
             try:
                 checkpoint_id = await self.checkpoint_mgr.save(self._agent_state)
             except Exception as e:                     # 收尾落盘失败不该让任务失败
@@ -719,12 +853,57 @@ class AutoMindAgent:
                 ev["workspace"] = wp.as_dict()
             if self._verify_state:
                 ev["verify"] = self._verify_state
+            if post_budget_exhausted:
+                # 收尾预算耗尽要可见（区别于"主任务预算耗尽"），否则排障时
+                # 只能看到质量结论缺失却不知道为什么。
+                ev["post_budget_exhausted"] = post_budget_exhausted[:300]
             rs = getattr(self, "react_executor", None)
             if rs is not None:
                 ev["react"] = rs.token_report()
             await self._emit(ev)
         except Exception as e:                        # pragma: no cover - 纯观测
             logger.warning("run_summary_emit_failed", error=str(e))
+
+        # ── 交付状态字段（v1.11.21）──
+        # 此前"为什么没成功"只存在于自然语言输出里，历史/失败卡片拿不到结构化
+        # 原因。这里把三件事补齐：停止原因、可读错误、是否可续跑/预算耗尽。
+        if getattr(self, "_plan_rejected", ""):
+            # 计划被驳回：一步都没执行，与"部分交付"是两回事
+            stop_reason = "plan_rejected"
+        else:
+            stop_reason = main_stop_reason or (
+                "completed" if success else "partial")
+        if main_budget_exhausted:
+            # v1.11.25：只有**主任务**预算耗尽才改停止原因/报预算耗尽；
+            # 收尾阶段耗尽（质量评估没钱做）不影响已交付的结论。
+            stop_reason = "budget_exhausted"
+        error = ""
+        if main_budget_exhausted:
+            error = str(main_budget_exhausted)
+        elif self._mode == ExecutionMode.REACT:
+            # ReAct 的中断原因（断线 / 无进展 / 被拦）由执行器给出
+            error = str(getattr(getattr(self, "react_executor", None),
+                                "interrupted_reason", "") or "")
+        elif plan is not None:
+            failed = [s for s in step_results
+                      if not getattr(s, "success", False)]
+            if failed:
+                error = "；".join(
+                    f"{getattr(s, 'goal_description', '') or '步骤'}："
+                    f"{getattr(s, 'error', '') or '执行失败'}"
+                    for s in failed)[:500]
+        # task_budget 也是"预算耗尽"：token 窗口用尽且不再续开；
+        # budget_exhausted 是主任务 BudgetExhaustedError 那条路径。
+        # v1.11.25：收尾阶段的预算耗尽不计入该标志（主任务已交付，不是"没跑完"）。
+        budget_flag = bool(
+            main_budget_exhausted or stop_reason in ("task_budget", "budget_exhausted"))
+        llm_usage = getattr(self.llm, "usage", None)
+        try:
+            llm_calls = int(getattr(llm_usage, "calls", 0) or 0)
+        except (TypeError, ValueError):               # pragma: no cover - 防御
+            llm_calls = 0
+        resumable = bool(checkpoint_id) and checkpoint_status in (
+            "partial", "interrupted")
 
         out_text = result_text
         if self._workspace_plan is not None and self._workspace_plan.isolated:
@@ -741,6 +920,11 @@ class AutoMindAgent:
             token_usage=self.llm.usage,
             duration_ms=duration,
             checkpoints=[checkpoint_id] if checkpoint_id else [],
+            stop_reason=stop_reason,
+            error=error,
+            resumable=resumable,
+            budget_exhausted=budget_flag,
+            llm_calls=llm_calls,
         )
 
     async def run_repl(self) -> None:
@@ -1052,6 +1236,11 @@ class AutoMindAgent:
 
         ``resume`` 是上次检查点里的 progress（内部用：续跑时跳过已完成的
         role 步骤）。未授权时抛 FeatureNotAvailable。
+
+        v1.11.22（工程协同）：创建编排器时把**父 Agent** 一起传入（工程协同
+        编排器要靠它 clone 角色会话 / 取工具注册表 / 调审查验收方法）；旧
+        Feature 只接受 llm 时回退。返回值的 ``token_usage`` 优先用编排器聚合的
+        "父调用 + 各角色"用量，并保留 ``verification`` / ``metrics`` 证据字段。
         """
         from automind.core.edition import require_feature
 
@@ -1062,7 +1251,19 @@ class AutoMindAgent:
         self._begin_checkpoint_record(task)
         self._agent_state.session_id = getattr(self, "session_id", "") or "default"
         if self.orchestrator is None:
-            self.orchestrator = feature.create(self.llm)
+            # v1.11.22：工程协同编排器需要**父 Agent** 才能让角色真正动手：
+            #   · clone_for_session() —— 每个角色一份独立子会话（独立的 LLM 用量、
+            #     工具注册表视图与工作区写锁身份），共享同一个 project_root；
+            #   · tool_registry / permissions / approval_callback —— 按角色下发
+            #     可写/可执行的工具，而不是只让模型"描述"怎么做；
+            #   · _review_result / _loop_verify / _run_project_tests —— 写角色
+            #     的审查回炉与收尾验证闭环。
+            # 旧 Feature 与测试替身只接受 llm，构造签名不匹配时回退（不降级失败）。
+            try:
+                self.orchestrator = feature.create(self.llm, agent=self)
+            except TypeError:
+                # 兼容仍只接受 llm 的旧 Feature / 测试替身
+                self.orchestrator = feature.create(self.llm)
         try:
             result = await self.orchestrator.run(
                 task, context="", on_event=on_event, resume=resume)
@@ -1219,6 +1420,11 @@ class AutoMindAgent:
         **绝不再把预算耗尽伪装成成功**：``success`` 只在 ``status ==
         "completed"`` 时为 True；预算耗尽 / 中断一律 False + ``resumable``，
         并把"已完成部分 + 续跑入口"写进 output。
+
+        v1.11.22：编排器在**没有抛异常**的情况下显式返回 ``success=False``
+        （工程协同的 ``verification_failed`` / ``verify_unavailable`` 闭环判定）
+        同样不能改写成成功 —— "跑完了"与"做成了"是两件事。这类结果记为
+        ``status="partial"``（有部分交付、可续跑），``stop_reason`` 原样保留。
         """
         data = dict(result or {})
         progress = dict(progress or {})
@@ -1249,8 +1455,12 @@ class AutoMindAgent:
                       + f"\n\n——— 本轮执行中断（{type(error).__name__}）———\n"
                       "已保存断点，可在界面点「从断点续跑」接着做。")
         else:
-            status = status or "completed"
-            stop_reason = str(data.get("stop_reason") or "completed")
+            # v1.11.22：编排器显式声明失败（工程协同验证闭环）时，不能因为
+            # "没有抛异常"就按完成收尾 —— 那是把"没做成"伪装成"做成了"。
+            explicit_failed = data.get("success") is False
+            status = status or ("partial" if explicit_failed else "completed")
+            stop_reason = str(data.get("stop_reason")
+                              or ("failed" if explicit_failed else "completed"))
         checkpoint_id = await self._save_run_checkpoint(
             task=task, run_mode=run_mode, status=status, output=output,
             progress=progress, stop_reason=stop_reason,
@@ -1291,8 +1501,15 @@ class AutoMindAgent:
             "budget_exhausted": bool(budget_exhausted),
             "output": output,
             "steps_executed": steps,
-            "token_usage": getattr(self.llm, "usage", None),
+            # v1.11.22：工程协同编排器会聚合"父调用 + 各角色子 Agent"的用量并
+            # 放进 token_usage。优先用编排器的聚合值 —— 否则历史记录只显示父
+            # 会话的调用次数，多智能体烧掉的 token 全部对不上账。旧编排器没有
+            # 这个字段时才回退到本 Agent 的 llm.usage。
+            "token_usage": data.get("token_usage") or getattr(self.llm, "usage", None),
         })
+        # data 里不属于上面统一收尾字段的额外键（v1.11.22 工程协同的
+        # verification / metrics、以及编排器自带的 plan/steps 信息）随 dict
+        # 原样保留 —— 这里绝不重建返回形状，否则收尾会把证据字段吞掉。
         if run_mode == "multi":
             data.setdefault("plan", list(progress.get("plan") or []))
             data.setdefault("steps", list(progress.get("steps") or []))
@@ -1387,6 +1604,14 @@ class AutoMindAgent:
     _MIN_ARTIFACT_BYTES = 1
     #: 单次验收最多核验的路径数（防止刷屏与长耗时）
     _MAX_ARTIFACT_CLAIMS = 12
+    #: 任务里"读取/参考/条件存在"类上下文 —— 这些路径是**输入或可选**，
+    #: 不能当成"要求交付"的硬失败。典型：诚实任务要求"尝试读取一个不存在的
+    #: 文件并如实说明"，把该文件当必交付会让**正确行为被判失败**（v1.11.25）。
+    _NON_DELIVERABLE_MARKERS = (
+        "读取", "读一下", "读它", "尝试读", "查看", "参考", "如果", "假如", "若",
+        "不存在", "找不到", "不要修改", "不要删除", "不要动", "勿动", "无关",
+        "不要引用", "read", "if ", "missing", "not exist", "don't", "do not",
+    )
 
     @classmethod
     def _claimed_paths(cls, *texts: str) -> list[str]:
@@ -1424,6 +1649,36 @@ class AutoMindAgent:
                     return list(seen)
         return list(seen)
 
+    @classmethod
+    def _required_artifact_paths(cls, task: str) -> list[str]:
+        """任务里**明确要求交付**的路径（硬失败判定范围，v1.11.25）。
+
+        此前把任务里出现的所有路径都当"要求"，连"尝试读取一个不存在的文件并
+        如实说明"这类**输入/可选**引用也被当成必交付 —— 正确行为反而被判失败。
+        这里按路径出现位置的**前置上下文**过滤：附近出现「读取 / 参考 / 如果 /
+        不存在 / 不要修改」等标记的，视为输入或可选引用，不算交付要求。
+
+        只做"排除"不做"正向动词匹配"：多文件任务常以列表形式给出路径
+        （``- pkg/core.py：...``），正向匹配会漏掉它们；排除法在漏判与误判
+        之间更安全 —— 最坏情况是少一条硬断言，而不是把做对的任务判死。
+        """
+        text = task or ""
+        lowered = text.lower()
+        out: list[str] = []
+        for p in cls._claimed_paths(task):
+            needle = p.lower()
+            start = lowered.find(needle)
+            required = False
+            while start >= 0:
+                window = lowered[max(0, start - 40):start]
+                if not any(marker in window for marker in cls._NON_DELIVERABLE_MARKERS):
+                    required = True
+                    break
+                start = lowered.find(needle, start + 1)
+            if required and p not in out:
+                out.append(p)
+        return out
+
     def _resolve_artifact(self, raw: str) -> Path:
         """把声称的路径解析到真实位置（绝对路径 / 项目根 / 会话工作区）。"""
         p = Path(raw)
@@ -1454,19 +1709,29 @@ class AutoMindAgent:
           · 是否**非空**（写了 0 字节不能算交付）；
           · 任务里点名的关键词（``X 里要包含 Y`` 之类）是否**真的出现在内容里**。
 
-        判定口径（保守，避免误报失败）：
-          · **只有任务本身在要文件**时才把"文件不存在"当硬失败 ——
-            纯问答/分析类任务提到一个路径名不该因此判败；
-          · 任务里直接出现的具体路径（``生成 report.md``）比结果里顺带提及的
-            路径要求更严：前者必查，后者仅在任务指向文件时才算。
+        判定口径（保守，避免误报失败 —— v1.11.25 收紧）：
+
+          · **硬失败只覆盖"任务明确要求交付的路径"**（:meth:`_required_artifact_paths`）：
+            缺失 / 空文件 / 缺要求关键词都算未完成；
+          · **任务里作为输入/可选引用的路径**（"读取 X" / "如果 X 不存在" /
+            "不要修改 X"）不算交付要求；
+          · **结果里顺带声称、但任务没要求的路径**（例如模型顺手写出的
+            ``requirements.txt`` / ``pytest.ini`` / ``../xxx``）缺失时只记
+            warning/claims，**不计入 failures** —— 否则模型越是补充说明，
+            越容易被验收器误判成任务失败（v1.11.24 multi codegen/bugfix 的
+            误判根因）。
+
+        Returns:
+            ``{"checked", "passed", "failures", "warnings", "claims",
+            "required", "task_wants_file"}``。``passed`` 只看 ``failures``。
         """
         import re
 
         task_lower = (task or "").lower()
         task_wants_file = any(h in task_lower for h in self._FILE_TASK_HINTS)
-        # 任务里显式点名的路径：这些是"要求"，缺失即失败
-        required = self._claimed_paths(task)
-        # 结果里声称产出的路径：任务指向文件时才算数
+        # 任务里**明确要求交付**的路径：这些才是硬失败范围
+        required = self._required_artifact_paths(task)
+        # 结果里声称产出的路径：任务未要求时只作为 claims/warnings
         claimed = self._claimed_paths(output)
         targets: list[tuple[str, bool]] = []
         seen: set[str] = set()
@@ -1476,7 +1741,9 @@ class AutoMindAgent:
                 seen.add(p)
         for p in claimed:
             if p not in seen:
-                targets.append((p, task_wants_file))
+                # v1.11.25：结果里顺带提到的路径**永远不是硬失败**（任务没点名
+                # 要求交付它）；只用于如实回显"模型声称过什么"。
+                targets.append((p, False))
                 seen.add(p)
 
         # 任务中点名的、要求出现在产物里的关键词（"包含 X" / "must contain X"）
@@ -1495,6 +1762,7 @@ class AutoMindAgent:
 
         claims: list[str] = []
         failures: list[str] = []
+        warnings: list[str] = []
         checked = 0
         for raw, mandatory in targets:
             path = self._resolve_artifact(raw)
@@ -1505,6 +1773,7 @@ class AutoMindAgent:
                     failures.append(note)
                     claims.append(f"✗ {note}")
                 else:
+                    warnings.append(note)
                     claims.append(f"· {note}（任务未明确要求该文件，不计为失败）")
                 continue
             try:
@@ -1513,11 +1782,18 @@ class AutoMindAgent:
                 claims.append(f"· 无法读取 {raw} 的大小：{e}")
                 continue
             if size <= self._MIN_ARTIFACT_BYTES:
-                failures.append(f"文件为空（{size} 字节），不算交付：{raw}")
-                claims.append(f"✗ 文件为空：{raw}")
+                note = f"文件为空（{size} 字节），不算交付：{raw}"
+                if mandatory:
+                    failures.append(note)
+                    claims.append(f"✗ 文件为空：{raw}")
+                else:
+                    warnings.append(note)
+                    claims.append(f"· {note}（任务未明确要求该文件，不计为失败）")
                 continue
             note = f"✓ 文件存在且非空：{raw}（{size} 字节）"
-            if wanted and path.suffix.lower() in (
+            # 关键词是"任务对交付物的要求"：只在任务明确要求的文件上判定，
+            # 顺带提及的文件缺关键词不构成失败（否则模型多写几句反而被判死）。
+            if mandatory and wanted and path.suffix.lower() in (
                     ".md", ".txt", ".py", ".json", ".csv", ".html", ".yml", ".yaml"):
                 try:
                     body = path.read_text(encoding="utf-8", errors="replace")
@@ -1537,6 +1813,7 @@ class AutoMindAgent:
             "checked": checked,
             "passed": not failures,
             "failures": failures,
+            "warnings": warnings,
             "claims": claims,
             "required": required,
             "task_wants_file": task_wants_file,
@@ -1667,7 +1944,12 @@ class AutoMindAgent:
             if rm is None:
                 return
             frac = rm.tokens.usage_fraction()
-            if frac >= 1.0 and await self._roll_budget_window():
+            if (frac >= 1.0
+                    # v1.11.21：收尾修复轮不许开新预算窗口 —— 它只能用手上
+                    # 这份窗口的剩余额度，用尽就收尾（否则一次"小修"又能
+                    # 续出一整份 50 万 token 的预算）。
+                    and not getattr(self, "_closure_no_new_window", False)
+                    and await self._roll_budget_window()):
                 # v1.11.0：开了新窗口 —— 用量已归零，本次调用照常放行
                 frac = rm.tokens.usage_fraction()
             if frac >= 1.0:
@@ -1883,6 +2165,10 @@ class AutoMindAgent:
         """
         rm = getattr(self, "resources", None)
         cap = self._budget_auto_continue()
+        if getattr(self, "_closure_no_new_window", False):
+            # v1.11.21：收尾修复轮期间禁止续窗（唯一入口守卫，调用方漏判也拦得住）
+            logger.info("budget_window_blocked_in_closure")
+            return False
         if rm is None or cap <= 0 or getattr(self, "_budget_windows_used", 0) >= cap:
             return False
         if not hasattr(self, "_budget_windows_used"):    # 轻量替身 / 老快照
@@ -2116,7 +2402,12 @@ class AutoMindAgent:
         return cid
 
     def _react_callbacks(self, tag: int | None = None):
-        """构造 ReAct 的思考/行动回调，转发到 event_sink。"""
+        """构造 ReAct 的思考/行动回调，转发到 event_sink。
+
+        返回 2 个回调（thought / action）是既有契约，保持不变 ——
+        v1.11.20 新增的"工具开始 / 执行心跳"两个回调放在
+        :meth:`_react_tool_callbacks` 里，由 ``_run_react`` 一并接线。
+        """
         step = {"n": 0}
         async def on_thought(text: str) -> None:
             step["n"] += 1
@@ -2165,6 +2456,65 @@ class AutoMindAgent:
                 })
 
         return on_thought, on_action
+
+    def _react_tool_callbacks(self, tag: int | None = None):
+        """构造 ReAct 的「工具开始 / 执行心跳」回调（v1.11.20）。
+
+        与 :meth:`_react_callbacks` 分开是为了不改变既有 2 元组的公开形状
+        （多处测试/调用按 2 个解包）。两者由 ``_run_react`` 一并接进 executor。
+        """
+        async def on_action_start(event: dict) -> None:
+            """工具开始执行 → step_action_start（参数做截断/base64 摘要）。"""
+            ev = dict(event or {})
+            await self._emit({
+                "type": "step_action_start",
+                "iter": tag,
+                "goal_id": getattr(self, "_active_goal_id", None),
+                "tool": str(ev.get("tool") or ""),
+                "args": self._summarize_args(ev.get("args") or {}),
+                "timeout_s": ev.get("timeout_s", 0),
+            })
+
+        async def on_action_progress(event: dict) -> None:
+            """工具执行心跳 → tool_progress（每 5 秒一条，纯观测）。"""
+            ev = dict(event or {})
+            await self._emit({
+                "type": "tool_progress",
+                "iter": tag,
+                "goal_id": getattr(self, "_active_goal_id", None),
+                "tool": str(ev.get("tool") or ""),
+                "elapsed_s": ev.get("elapsed_s", 0),
+            })
+
+        return on_action_start, on_action_progress
+
+    @staticmethod
+    def _summarize_args(arguments: Any) -> dict[str, str]:
+        """start 事件的参数摘要：截断 200 字，大段 base64 用 ``<base64>`` 代替。
+
+        step_action_start 只是"开始了"的信标，参数全文在工具结果事件里；
+        截图/文件内容这类 base64 参数截 200 字只会是一屏乱码，占位更有信息量。
+        注：执行器侧已按 200 字截断过一遍，因此这里对"正好 200 字且全是
+        base64 字母表"的值同样判定为 base64。
+        """
+        out: dict[str, str] = {}
+        try:
+            items = dict(arguments or {}).items()
+        except (TypeError, ValueError):
+            return out
+        for key, value in items:
+            text = str(value)
+            head = text[:400]
+            # base64 的字母表是 ASCII、且不含空格/中文/引号/路径分隔符（换行除外）；
+            # 长度 ≥200 且整段都像 base64 → 基本可以确定是截图/二进制内容。
+            looks_base64 = len(text) >= 200 and all(
+                (ch.isascii() and ch.isalnum()) or ch in "+/=_\r\n-"
+                for ch in head)
+            if looks_base64:
+                out[str(key)] = "<base64>"
+            else:
+                out[str(key)] = text[:200]
+        return out
 
     @staticmethod
     def _extract_screenshot(result: Any) -> str | None:
@@ -2222,21 +2572,28 @@ class AutoMindAgent:
         return report
 
     async def _run_react(self, task: str, context: str, *,
-                         memory_note: str = "") -> str:
+                         memory_note: str = "",
+                         max_iterations: int | None = None) -> str:
         """ReAct 模式执行。
 
         ``memory_note`` 是每个任务都可能变化的记忆片段（v1.11.10）。它与
         环境信息分成两条 system 消息：环境在前、记忆在后 —— 这样"系统提示 +
         工具目录 + 环境"这段前缀在多个任务之间保持不变，DeepSeek / GLM 的
         自动前缀缓存才能跨任务命中。
+
+        ``max_iterations``（v1.11.21）：显式覆盖本次 ReAct 的步数上限，供
+        收尾修复轮使用 —— 修复轮只该"小修小补"，不能复用主任务的 50 步预算。
+        不传时行为与之前完全一致（读 ``execution.max_iterations``）。
         """
         from automind.tools.output_budget import limits_from_config
 
         ex = self.config.execution
+        # 显式覆盖 = 硬上限；None = 沿用任务级配置
+        iter_limit = ex.max_iterations if max_iterations is None else max(1, int(max_iterations))
         # 每次重建以注入最新的权限/审批回调
         self.react_executor = ReActExecutor(
             self.llm, self.tool_registry,
-            max_iterations=ex.max_iterations,
+            max_iterations=iter_limit,
             permissions=self.permissions,
             approval_cb=self.approval_callback,
             auto_validate=ex.auto_test,  # TDD 内环开关
@@ -2264,15 +2621,25 @@ class AutoMindAgent:
             # v1.11.0：输入框引用的 MCP 连接器 / 技能工具 —— 必须下发给模型
             prefer_tools=list(getattr(self, "prefer_tools", None) or []),
         )
+        if max_iterations is not None:
+            # v1.11.21：显式覆盖是**硬上限**。ReActExecutor 在"仍在推进"时会把
+            # 上限自动续加一次（v1.11.7），那会把「修复轮最多 1 步」变成 2 步 ——
+            # 收尾修复轮的预算治理因此失效。只有调用方明确要求时才关掉续加。
+            self.react_executor.max_iteration_extensions = 0
         # 编程模式下注入面向编程的引导
         if self._interaction == InteractionMode.CODING:
             context = f"{self.CODING_SYSTEM_PROMPT}\n\n{context}"
         on_thought, on_action = self._react_callbacks()
+        on_action_start, on_action_progress = self._react_tool_callbacks()
         text = await self.react_executor.run(
             task, context, on_thought=on_thought, on_action=on_action,
             on_no_progress=self._emit, deadline=self._task_deadline,
             on_timeout=self._emit, on_interjection=self._emit,
-            on_reconnect=self._emit, memory_note=memory_note)
+            on_reconnect=self._emit, memory_note=memory_note,
+            # v1.11.20：工具执行可见性（开始 / 每 5 秒心跳）与续步事件
+            on_action_start=on_action_start,
+            on_action_progress=on_action_progress,
+            on_extension=self._emit)
         # 省 token 总账推给观测/前端：让"长任务越跑越省"看得见、可调参
         try:
             rep = self.react_executor.token_report()
@@ -2285,6 +2652,7 @@ class AutoMindAgent:
                           allowed_tools: list[str] | None = None,
                           max_steps: int = 20,
                           max_tokens: int = 60_000,
+                          max_iteration_extensions: int | None = None,
                           event_sink: Any = None,
                           approval_callback: Any = None) -> dict[str, Any]:
         """在受限工具集与独立预算下跑一个**子任务**（v1.11.11，专业版子智能体用）。
@@ -2295,7 +2663,14 @@ class AutoMindAgent:
           · token 预算独立（子任务的失败不应吃掉父任务的预算）；
           · 委派深度 +1：工具层据此禁止子智能体继续委派或向用户提问。
 
-        返回 ``{success, output, steps, tokens, stop_reason, error}``。
+        ``max_iteration_extensions``（v1.11.22）：角色独立步数预算用。ReAct
+        执行器默认在"仍在推进"时会自动续开一个步数窗口（v1.11.7）；工程协同
+        的每个角色需要**到上限就收尾**（``0`` = 不续步），否则"角色最多 N 步"
+        会被放大成 2N 步。``None`` = 沿用执行器默认，既有子智能体行为不变。
+
+        返回 ``{success, output, steps, tokens, stop_reason, error, usage,
+        llm_calls}``（v1.11.22 起带本子任务自己的用量对象与调用次数，供编排器
+        聚合多角色成本）。
         绝不抛异常（除取消外）：子智能体失败要作为结果交回父级，而不是把父级带崩。
         """
         import asyncio
@@ -2305,10 +2680,17 @@ class AutoMindAgent:
         from automind.tools.output_budget import limits_from_config
         from automind.workflow.agent_step import RestrictedToolRegistry
 
+        def _usage_fields() -> dict[str, Any]:
+            """本子任务自己的用量（所有返回路径统一带，父级才能对账）。"""
+            usage = getattr(self.llm, "usage", None) if self.llm is not None else None
+            return {"usage": usage,
+                    "llm_calls": int(getattr(usage, "calls", 0) or 0)}
+
         if self.llm is None:
             return {"success": False, "output": "", "steps": 0, "tokens": 0,
                     "stop_reason": "no_llm",
-                    "error": "子任务无法开始：模型未初始化（检查 API Key）"}
+                    "error": "子任务无法开始：模型未初始化（检查 API Key）",
+                    **_usage_fields()}
         # 工具范围：显式白名单优先；未指定 = **只读 SAFE 工具**（子任务默认
         # 不该有写盘/执行命令的能力，父级要用写工具必须显式点名）。
         if allowed_tools is None:
@@ -2329,7 +2711,8 @@ class AutoMindAgent:
             return {"success": False, "output": "", "steps": 0, "tokens": 0,
                     "stop_reason": "bad_args",
                     "error": "allowed_tools 为空：子智能体将没有任何工具可用；"
-                             "不需要限制时请省略该参数（默认只给只读工具）"}
+                             "不需要限制时请省略该参数（默认只给只读工具）",
+                    **_usage_fields()}
         registry = (RestrictedToolRegistry(self.tool_registry, allowed_tools)
                     if allowed_tools else self.tool_registry)
         ex_cfg = self.config.execution
@@ -2366,6 +2749,13 @@ class AutoMindAgent:
                 obs_keep_chars=(getattr(ex_cfg, "compact_keep_obs_chars", 0) or None),
                 interjection_source=self.drain_interjections,
             )
+            # v1.11.22：工程协同的角色预算需要"到步数就收尾、不许自动续步"。
+            # ReActExecutor 默认在仍在推进时会把上限再续加一个窗口，角色
+            # 独立步数预算（multi_agent_role_max_steps）会被悄悄放大一倍。
+            # None = 不干预（既有子智能体/子代理调用行为完全不变）。
+            if max_iteration_extensions is not None:
+                executor.max_iteration_extensions = max(
+                    0, int(max_iteration_extensions))
             # 让预算续窗时的上下文压缩 / 进度快照拿到正在跑的执行器
             self.react_executor = executor
             sid = getattr(self, "session_id", "") or "default"
@@ -2401,6 +2791,7 @@ class AutoMindAgent:
                     "error": (f"子任务 Token 预算已用尽（已用 {stats['used']}/{stats['budget']}，"
                               f"共 {stats['windows']} 个窗口）：上面是已产出的部分结果，"
                               "可重新派发一个子任务接着做（不要当成已完成）"),
+                    **_usage_fields(),
                 }
             success = stop_reason in ("no_more_tools", "done")
             return {
@@ -2412,6 +2803,7 @@ class AutoMindAgent:
                 "error": "" if success else (
                     executor.interrupted_reason
                     or f"子任务未正常完成（stop_reason={stop_reason}）")[:400],
+                **_usage_fields(),
             }
         except asyncio.CancelledError:
             raise
@@ -2426,12 +2818,14 @@ class AutoMindAgent:
                     if executor is not None else 0,
                     "tokens": int(getattr(getattr(self.llm, "usage", None), "total", 0) or 0),
                     "budget": stats,
-                    "error": f"子任务 Token 预算已用尽：{e}"[:400]}
+                    "error": f"子任务 Token 预算已用尽：{e}"[:400],
+                    **_usage_fields()}
         except Exception as e:                    # pragma: no cover - 防御性
             logger.warning("subtask_failed", error=f"{type(e).__name__}: {e}"[:300])
             return {"success": False, "output": "", "steps": 0, "tokens": 0,
                     "stop_reason": "error",
-                    "error": f"{type(e).__name__}: {e}"[:400]}
+                    "error": f"{type(e).__name__}: {e}"[:400],
+                    **_usage_fields()}
         finally:
             self.event_sink = old_sink
             self.resources = old_resources
@@ -2848,6 +3242,10 @@ class AutoMindAgent:
             project_root=clone.config.project_root,
             approval_mode=getattr(clone.config.execution, "approval_mode", "auto"),
         )
+        # 会话克隆共享同一个工具注册表：这里重装闸门，让 getter 能看到克隆的
+        # 实时审批模式（v1.11.19）。闸门内部按"当前正在跑的 Agent"取值，
+        # 因此多个克隆轮流装也不会把旧模式固化下来。
+        clone._install_tool_governor()
         clone.context_mgr = ContextManager(
             max_tokens=clone.config.memory.short_term_max_tokens,
             summary_threshold=clone.config.memory.short_term_summary_threshold,
@@ -3276,17 +3674,21 @@ class AutoMindAgent:
                 return AgentResult(
                     success=True,
                     output=(f"检查点已恢复；计划状态为「{status_value or 'completed'}」，"
-                            f"{progress['done']}/{progress['total']} 步已完成，无需继续。"))
+                            f"{progress['done']}/{progress['total']} 步已完成，无需继续。"),
+                    # v1.11.21：补最小可观测字段（没跑任何模型调用）
+                    stop_reason="completed", llm_calls=0)
             if progress["total"]:
                 self.checkpoint_mgr.mark(checkpoint_id, "resumed")
                 return await self._resume_plan(checkpoint_id, state, plan, task, progress)
 
         if md.get("status") in ("completed", "dismissed", "resumed") and not md.get("react"):
-            return AgentResult(success=True, output="检查点已恢复；该任务已经完成，无需继续。")
+            return AgentResult(success=True, output="检查点已恢复；该任务已经完成，无需继续。",
+                               stop_reason="completed", llm_calls=0)
         if not task:
             return AgentResult(
                 success=True,
-                output="检查点已恢复（上下文与对话历史）；其中没有可继续的任务。")
+                output="检查点已恢复（上下文与对话历史）；其中没有可继续的任务。",
+                stop_reason="completed", llm_calls=0)
         self.checkpoint_mgr.mark(checkpoint_id, "resumed")
         prompt = build_react_resume_prompt(task, md.get("react") or {})
         await self._emit({"type": "task_resumed", "kind": "react", "checkpoint": checkpoint_id,
@@ -3389,6 +3791,16 @@ class AutoMindAgent:
                 pass
         new_cid = str(result.get("checkpoint_id") or "")
         usage = getattr(self.llm, "usage", None)
+        # v1.11.21：续跑同样要给出结构化状态，历史/失败卡片才说得清"为什么停下"
+        stop_reason = str(result.get("stop_reason")
+                          or ("completed" if success else "partial"))
+        budget_flag = bool(result.get("budget_exhausted")) or stop_reason in (
+            "task_budget", "budget_exhausted")
+        error = str(result.get("error") or "")
+        try:
+            llm_calls = int(getattr(usage, "calls", 0) or 0)
+        except (TypeError, ValueError):              # pragma: no cover - 防御
+            llm_calls = 0
         logger.info("checkpoint_resume_run_mode_done", checkpoint=checkpoint_id,
                     run_mode=run_mode, success=success,
                     steps=steps_executed, new_checkpoint=new_cid)
@@ -3398,6 +3810,11 @@ class AutoMindAgent:
             token_usage=usage if isinstance(usage, TokenUsage) else TokenUsage(),
             duration_ms=(time.perf_counter() - start) * 1000,
             checkpoints=[new_cid] if new_cid else [],
+            stop_reason=stop_reason,
+            error=error,
+            resumable=bool(new_cid) and not success,
+            budget_exhausted=budget_flag,
+            llm_calls=llm_calls,
         )
 
     async def _resume_plan(self, checkpoint_id: str, state: Any, plan: Any,
@@ -3452,17 +3869,37 @@ class AutoMindAgent:
             self._workspace_plan = ws_plan
             out += self._workspace_note(ws_plan)
             await self._emit_workspace_result()
+        # v1.11.21：补结构化状态（续跑结果也要能诊断、可再次续跑）
+        usage_plan = self.llm.usage if self.llm is not None else TokenUsage()
+        try:
+            plan_llm_calls = int(getattr(usage_plan, "calls", 0) or 0)
+        except (TypeError, ValueError):               # pragma: no cover - 防御
+            plan_llm_calls = 0
+        failed = [s for s in steps if not getattr(s, "success", False)]
+        plan_error = ""
+        if failed:
+            plan_error = "；".join(
+                f"{getattr(s, 'goal_description', '') or '步骤'}："
+                f"{getattr(s, 'error', '') or '执行失败'}" for s in failed)[:500]
         return AgentResult(
             success=ok, output=out, plan=plan, steps_executed=len(steps),
-            token_usage=self.llm.usage if self.llm is not None else TokenUsage(),
+            token_usage=usage_plan,
             duration_ms=(time.perf_counter() - start) * 1000,
+            stop_reason="completed" if ok else "partial",
+            error=plan_error,
+            resumable=False,
+            budget_exhausted=False,
+            llm_calls=plan_llm_calls,
         )
 
     # ═══════════════════════════════════════════════════════════
     # 自主任务闭环 — 多 Agent 审查 + Loop 验证 + TDD 测试
     # ═══════════════════════════════════════════════════════════
 
-    async def _autonomy_closure(self, task: str, output: str, context: str) -> str:
+    async def _autonomy_closure(self, task: str, output: str, context: str, *,
+                                main_partial: bool = False,
+                                main_stop_reason: str = "",
+                                simple: bool = False) -> str:
         """自主任务闭环：TDD 测试 → 多 Agent 审查 → Loop 验收（未过带反馈自动修复）。
 
         仅作用于 工作/编程 模式；各环节由 ExecutionConfig 开关控制（默认全开）。
@@ -3471,6 +3908,15 @@ class AutoMindAgent:
         **失败不得静默化**（v1.6.4 的核心修正）：每个环节都区分三种结局 ——
         通过 / 未通过 / **设施不可用**。设施不可用时如实标注"未执行"，
         既不伪装成通过（伪造结论），也不伪装成未通过（白烧修复轮 token）。
+
+        v1.11.21 的两道"别花冤枉钱"的闸：
+
+        * ``main_partial``：主任务已经部分交付（到步数/预算/断连上限，或
+          ``no_progress``）。此时手里的成果是**半成品**，再让 LLM 去审查、
+          验收、修复只会拿同一份半成品反复烧钱 —— 直接把状态如实写进
+          ``_verify_state`` 并跳过闭环，已完成的工作原样保留。
+        * ``simple``：简单任务（无工具动作 / 只有只读 SAFE 工具且全部成功）。
+          对这种任务跑"审查 + 验收 + 修复"的成本远超收益，跳过并保留结果。
         """
         ex = self.config.execution
         summary: list[str] = []
@@ -3479,6 +3925,29 @@ class AutoMindAgent:
         degraded: list[str] = []
         #: 留档：每一环的真实结局（落盘证据里要能看出"这环到底跑没跑"）
         evidence: dict[str, Any] = {"review": None, "verify": None, "tdd": None}
+
+        # ⓪ 部分交付 / 简单任务：不调用任何 LLM 环节。
+        #    _verify_state 写明确的 skipped 标记（不是空字典）——质量评估据此
+        #    知道"闭环被刻意跳过"，而不会误以为"验收通过"。
+        if main_partial:
+            reason = main_stop_reason or "partial"
+            summary.append(
+                f"主任务已部分交付（原因：{reason}），跳过 LLM 审查/验收修复轮；"
+                f"已完成工作保留，可续跑")
+            self._verify_state = {"skipped": "partial_main",
+                                  "stop_reason": reason, "summary": list(summary)}
+            await self._emit({"type": "autopilot", "stage": "skipped",
+                              "reason": "partial_main", "stop_reason": reason})
+            logger.info("autopilot_closure_skipped", reason="partial_main",
+                        stop_reason=reason)
+            return f"{output}\n\n---\n🔄 自主闭环：{' · '.join(summary)}"
+        if simple:
+            summary.append("简单任务：跳过审查/验收/修复轮")
+            self._verify_state = {"skipped": "simple", "summary": list(summary)}
+            await self._emit({"type": "autopilot", "stage": "skipped",
+                              "reason": "simple"})
+            logger.info("autopilot_closure_skipped", reason="simple")
+            return f"{output}\n\n---\n🔄 自主闭环：{' · '.join(summary)}"
 
         # ① TDD：编程模式跑项目级测试（若存在 tests/）
         if ex.auto_test and self._interaction == InteractionMode.CODING:
@@ -3525,6 +3994,14 @@ class AutoMindAgent:
         # ③ Loop 验收：产物断言 + 语义判定；未过则带反馈补充修复轮
         if ex.auto_verify and self.llm is not None:
             rounds = 0
+            # v1.11.21：修复轮独立预算 —— 原先复用 ex.max_iterations（50 步，
+            # 还会自动续步），一个验收失败的完成计划可以被重新跑成 150 步。
+            # 0 = 关闭自动修复；每个修复轮最多 fix_max 步。
+            try:
+                fix_max = max(0, int(
+                    getattr(ex, "auto_verify_fix_max_iterations", 1) or 0))
+            except (TypeError, ValueError):
+                fix_max = 1
             while True:
                 verdict = await self._loop_verify(task, output)
                 available = bool(verdict.get("available", True))
@@ -3548,6 +4025,10 @@ class AutoMindAgent:
                     summary.append("验收未执行（验收设施不可用）⚠")
                     degraded.append("Loop 验收")
                     break
+                if fix_max <= 0:
+                    # 自动修复被显式关闭：不再进入修复轮，如实说明原因
+                    summary.append("验收未过（自动修复已关闭）✗")
+                    break
                 if rounds >= ex.auto_verify_max_rounds:
                     summary.append(f"验收未过（已修复 {rounds} 轮）✗")
                     break
@@ -3556,12 +4037,33 @@ class AutoMindAgent:
                     [str(verdict.get("reason", ""))] + issues)[:1000]
                 issues = []  # 意见已并入反馈
                 await self._emit({"type": "autopilot", "stage": "fix_round",
-                                  "round": rounds, "feedback": feedback[:300]})
-                logger.info("autopilot_fix_round", round=rounds)
-                output = await self._run_react(
+                                  "round": rounds, "feedback": feedback[:300],
+                                  "max_steps": fix_max})
+                logger.info("autopilot_fix_round", round=rounds, max_steps=fix_max)
+                fix_task = (
                     f"{task}\n\n[自主闭环 · 修复第 {rounds} 轮] "
-                    f"上一轮结果未通过验收，请针对以下反馈修复并完成任务：\n{feedback}",
-                    context)
+                    f"上一轮结果未通过验收，请针对以下反馈修复并完成任务：\n{feedback}")
+                # v1.11.21：修复轮只继承**剩余**墙钟 deadline，且不许开新预算
+                # 窗口 —— 收尾阶段的修修补补不该再续一份完整预算/工时。
+                # `_closure_no_new_window` 由 `_pre_call` 里的 _roll_budget_window
+                # 守卫读取；这里用 try/finally 保证异常路径也恢复原值。
+                # 不改 `_task_deadline`（= 剩余时间）、不加 `_deadline_shift`
+                # （= 不沿主任务续窗顺延的时间）。
+                prev_no_window = getattr(self, "_closure_no_new_window", False)
+                self._closure_no_new_window = True
+                try:
+                    fix_output = await self._run_react_in_fix_round(
+                        fix_task, context, max_iterations=fix_max)
+                finally:
+                    self._closure_no_new_window = prev_no_window
+                # v1.11.24 真实测评修复：修复轮输出**追加**而不是覆盖主交付。
+                # 此前 `output = fix_output` 会让主任务已经给出的答案/结果
+                # 被一个"1/1 步"的部分交付清单整个替换（实测：read_file 已读到
+                # ZEBRA-42，验收误判后修复轮把答案覆盖掉，最终输出不含标记）。
+                # 修复轮只应补充/纠正，历史交付必须保留，便于核对和断点续跑。
+                if fix_output and str(fix_output).strip():
+                    output = (f"{output}\n\n[自主闭环 · 第 {rounds} 轮修复结果]\n"
+                              f"{fix_output}")
 
         if summary:
             output = f"{output}\n\n---\n🔄 自主闭环：{' · '.join(summary)}"
@@ -3573,6 +4075,132 @@ class AutoMindAgent:
         evidence["summary"] = summary
         self._verify_state = evidence
         return output
+
+    async def _run_react_in_fix_round(self, task: str, context: str, *,
+                                      max_iterations: int) -> str:
+        """收尾修复轮的 ReAct 调用（v1.11.21）。
+
+        单独包一层是为了**向后兼容**：``max_iterations`` 是本版新加的关键字
+        参数，而既有测试 / 子类替身里的 ``_run_react`` 可能还是 ``(task,
+        context)`` 两参签名。能接受新参数就走新签名（硬上限），否则退回旧
+        签名 —— 预算治理的接线不该把既有替身的调用点打红。
+        """
+        import inspect
+
+        fn = self._run_react
+        try:
+            params = inspect.signature(fn).parameters
+            accepts = ("max_iterations" in params
+                       or any(p.kind is inspect.Parameter.VAR_KEYWORD
+                              for p in params.values()))
+        except (TypeError, ValueError):          # 无签名的内建替身：按旧签名
+            accepts = False
+        if accepts:
+            return await fn(task, context, max_iterations=max_iterations)
+        return await fn(task, context)
+
+    #: 写 / 执行类工具 —— 出现任意一个即不满足"简单任务"（必须走完整闭环）
+    _SIMPLE_WRITE_TOOLS = frozenset({
+        "file_write", "file_edit", "file_multi_edit", "terminal", "pwsh",
+        "python_sandbox",
+    })
+
+    def _is_simple_task(self, step_results: list[Any]) -> bool:
+        """判断"简单任务"—— 命中则收尾跳过审查/验收/修复轮（v1.11.21）。
+
+        简单 = 没有真正改变外部状态的动作：没调工具，或只调了**只读 SAFE**
+        工具且全部成功。这种任务再花 2~3 次 LLM 调用去做审查与验收，成本
+        远超收益（用户写一句问候/问一个概念不值得跑完整自主闭环）。
+
+        判定刻意保守（宁可多跑闭环，也不误跳过）：
+          * 非 工作/编程 模式 → 不算简单（本方法只在闭环前被调用，这里再兜一层）；
+          * ReAct：只要执行器里有过任何动作 → 不简单；
+          * Plan：任一步失败 → 不简单；任一步动了写/执行类工具，
+            或工具权限等级不是 SAFE → 不简单。
+        """
+        if self._interaction not in (InteractionMode.WORK, InteractionMode.CODING):
+            return False
+        if self._mode == ExecutionMode.REACT:
+            ex = getattr(self, "react_executor", None)
+            return not bool(getattr(ex, "actions", None))
+        # Plan 模式：**没有任何步骤 ≠ 简单任务**。空列表上的 `all()` 是真空真
+        # （vacuous truth）—— 计划生成后一步都没执行（被驳回 / 规划失败 /
+        # 预算到点）会被误判成"简单任务"，既跳过闭环，也可能让 success 误判。
+        # 宁可多跑一次闭环，也不把"没执行"当成"简单完成"。
+        if not step_results:
+            return False
+        registry = getattr(self, "tool_registry", None)
+        for step in step_results or []:
+            if not bool(getattr(step, "success", False)):
+                return False
+            tr = getattr(step, "tool_result", None)
+            name = str(getattr(tr, "tool_name", "") or "")
+            if not name:
+                continue
+            if name in self._SIMPLE_WRITE_TOOLS:
+                return False
+            tier = None
+            try:
+                tool = registry.get(name) if registry is not None else None
+                tier = getattr(tool, "permission_tier", None)
+            except Exception:                    # 只读替身 / 未注册工具
+                tier = None
+            tier_value = getattr(tier, "value", tier)
+            if tier_value != "safe":
+                # 权限等级未知（含未注册工具）按非 SAFE 处理：跳过闭环是
+                # 省钱方向，但错判的代价是"该审的没审"，宁可保守。
+                return False
+        return True
+
+    def _quality_from_closure(self) -> QualityReport | None:
+        """把闭环里已经得到的审查/验收结论复用来构造 QualityReport（v1.11.21）。
+
+        此前 ``_autonomy_closure`` 刚让模型判过"完成没有"，收尾又让另一个
+        模型（quality_assessor）再判一次，接着 reflexion 再反思一次 —— 同一
+        件事付三份钱。这里直接复用已有证据：
+
+          * 没有 review/verify 证据（或闭环被跳过）→ 返回 None，走原路径；
+          * ``available=False``（设施没跑成）**不算通过**；
+          * 审查 ``approved=False`` 或验收 ``done=False`` → 不通过；
+          * 验收 ``done=True`` 且审查没有明确否决 → 通过。
+        """
+        state = getattr(self, "_verify_state", None) or {}
+        if not isinstance(state, dict):
+            return None
+        review = state.get("review")
+        verify = state.get("verify")
+        has_review = isinstance(review, dict) and bool(review)
+        has_verify = isinstance(verify, dict) and bool(verify)
+        if not has_review and not has_verify:
+            return None
+
+        passed = True
+        issues: list[str] = []
+        if has_review:
+            if review.get("available") is False:
+                passed = False
+                issues.append("多 Agent 审查未执行（设施不可用）")
+            elif review.get("approved") is False:
+                passed = False
+                if review.get("issues"):
+                    issues.append("审阅者意见：" + str(review["issues"])[:600])
+        if has_verify:
+            if verify.get("available") is False:
+                passed = False
+                issues.append("Loop 验收未执行（设施不可用）")
+            elif not verify.get("done"):
+                passed = False
+                if verify.get("reason"):
+                    issues.append("验收未通过：" + str(verify["reason"])[:600])
+        return QualityReport(
+            completeness=1.0 if passed else 0.0,
+            correctness=1.0 if passed else 0.0,
+            consistency=1.0 if passed else 0.0,
+            hallucination_score=0.0 if passed else 0.5,
+            issues=issues,
+            suggestions=[],
+            overall_pass=passed,
+        )
 
     async def _review_result(self, task: str, output: str) -> dict:
         """多 Agent 审查：审阅者角色复核结果，可调用只读工具核实（MCP 工具共享）。
@@ -3717,9 +4345,18 @@ class _CodeGenerateTool:
                 "input_schema": self.parameters}
 
     async def execute(self, **kwargs: Any) -> Any:
+        from automind.core import governance as _gov
         from automind.core.types import ToolResult
-        result = await self._agent.skill_registry.invoke(
-            "code_generator", kwargs, self._agent)
+        # 技能内部会直接 dispatch 工具（code_generator / test_runner 等）——
+        # 这些内部调用没有经过 ReAct 的逐次审批，必须按"技能"通道受分派级闸门
+        # 管辖（v1.11.19）。绑定 source="skill" 后，内部 dispatch 的账本来源
+        # 与拦截判定都按无人值守通道处理；退出时恢复外层来源（通常是 react）。
+        token = _gov.bind_source("skill")
+        try:
+            result = await self._agent.skill_registry.invoke(
+                "code_generator", kwargs, self._agent)
+        finally:
+            _gov.reset_source(token)
         return ToolResult(
             tool_name=self.name,
             success=result.success,
@@ -3793,7 +4430,17 @@ class _SkillInvokeTool:
             return ToolResult(tool_name=self.name, success=False, output=None,
                               error=f"技能「{name}」的输入不对：{err}")
         try:
-            result = await reg.invoke(name, inp, self._agent)
+            # Python 技能内部会直接 dispatch 工具（web_research / test_runner /
+            # project_init / data_insight …）。这些调用没有经过 ReAct 的逐次
+            # 审批，因此在此绑定 source="skill"，让分派级治理闸门按无人值守
+            # 通道判定，并让账本记录下真实的调用来源（v1.11.19）。
+            from automind.core import governance as _gov
+
+            token = _gov.bind_source("skill")
+            try:
+                result = await reg.invoke(name, inp, self._agent)
+            finally:
+                _gov.reset_source(token)
         except Exception as e:
             return ToolResult(tool_name=self.name, success=False, output=None,
                               error=f"技能「{name}」执行失败：{type(e).__name__}: {e}")

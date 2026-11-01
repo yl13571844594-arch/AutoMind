@@ -71,11 +71,23 @@
     v1.10.0 追加：request_identity(request) / workflow_authorize(request, verb, file) /
     workflow_can(identity, verb, file) / workflow_policy(file, schema, trigger=) /
     workflow_loader() / workflow_dir() / save_workflow_file(name, text, overwrite=)
+
+强制社区版模式（``AUTOMIND_FORCE_COMMUNITY``，v1.11.19）：环境变量取真值
+（``1`` / ``true`` / ``yes`` / ``on``，大小写不敏感）时 :func:`load_extensions`
+**跳过商业扩展加载**，即使本机装了 ``automind-pro``、``~/.automind/license``
+处于有效期内，也稳定返回社区版。用途仅限 CI、发布验收与排障复现：
+
+    * 本机存在商业许可证时，社区版门控类用例（权限/特性/降级）会大面积失败，
+      验收结论不可信；强制社区版让「社区版结论」可重复；
+    * 这是**只降不升**的开关 —— 它只能让进程停在社区版，不能借此获得任何商业
+      特性；不改变 ``AUTOMIND_LICENSE`` / ``AUTOMIND_LICENSE_*`` 等既有行为
+      （详见 ``docs/ACCEPTANCE.md``）。
 """
 
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -266,13 +278,38 @@ class ExtensionAPI:
 
 # ── 扩展加载 ──────────────────────────────────────────────
 
+#: 强制社区版的开关名（值域见 :func:`force_community_enabled`）
+FORCE_COMMUNITY_ENV = "AUTOMIND_FORCE_COMMUNITY"
+
+#: 视为「真」的环境变量取值（大小写不敏感）
+_FORCE_COMMUNITY_TRUTHY = frozenset({"1", "true", "yes", "on"})
+
+
+def force_community_enabled() -> bool:
+    """``AUTOMIND_FORCE_COMMUNITY`` 是否为真值（1/true/yes/on，大小写不敏感）。
+
+    只读环境变量、不改任何状态，供验收脚本与排障代码单独判断。
+    """
+    return os.environ.get(FORCE_COMMUNITY_ENV, "").strip().lower() in _FORCE_COMMUNITY_TRUTHY
+
 
 def load_extensions(force: bool = False) -> str:
     """探测并激活商业扩展包（幂等；未安装 / 未授权则保持社区版）。
 
     返回激活后的版本名。任何扩展侧异常都不影响社区核心启动。
+
+    ``AUTOMIND_FORCE_COMMUNITY`` 为真值时**显式跳过**商业扩展加载（v1.11.19，
+    只降不升）：首次加载 / ``force=True`` 的重新加载会收敛回社区版并清空已注册
+    特性；已经完成的加载结果不被无谓改写（避免打断测试里对版本状态的直接模拟）。
     """
     if _state["loaded"] and not force:
+        return _state["edition"]
+    if force_community_enabled():
+        changed = (not _state["loaded"]) or _state["edition"] != EDITION_COMMUNITY
+        _state.update({"edition": EDITION_COMMUNITY, "features": {},
+                       "license": None, "loaded": True})
+        if changed:
+            logger.info("edition_force_community", env=FORCE_COMMUNITY_ENV)
         return _state["edition"]
     _state["loaded"] = True
     try:

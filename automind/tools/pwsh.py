@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from automind.core.logging import get_logger
+from automind.core.proc import silent_process_kwargs
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools._toolkit import bad, live_execution_config, run_blocking
 from automind.tools.base import AbstractTool
@@ -177,6 +178,8 @@ class PwshTool(AbstractTool):
                 *argv, cwd=workdir,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                # v1.11.20：Windows 无控制台时不给 CREATE_NO_WINDOW 会闪黑框
+                **silent_process_kwargs(),
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(

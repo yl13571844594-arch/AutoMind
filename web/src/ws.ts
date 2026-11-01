@@ -5,7 +5,9 @@ import { apiGet } from './api/client';
 import { chatSid, isMySid, MODE_LABELS, useApp, workspaceSid, type Mode } from './store/app';
 import { settleChips } from './lib/overrides';
 import {
-  uid, useChat, type ChatItem, type LoopIter, type MaStep, type PlanRow, type TraceItem,
+  stopReasonZh, uid, useChat,
+  type ChatItem, type LoopIter, type MaMetrics, type MaReview, type MaStep,
+  type MaVerification, type PlanRow, type TraceItem,
 } from './store/chat';
 import { useObserve } from './store/observe';
 import { usePanel, type SubAgentInfo } from './store/panel';
@@ -18,6 +20,19 @@ import { fmtDuration, notifyTask } from './lib/notify';
 let ws: WebSocket | null = null;
 let retry = 0;
 let timer: ReturnType<typeof setTimeout> | null = null;
+
+// ── v1.11.20：断线保活 ────────────────────────────────────
+// 服务端用 LiveRun 把"任务"与"连接"解耦：断线后任务继续跑，页面重连（或刷新）
+// 后通过 bind 回放的 run_state 接管。前端这边要给这段宽限一个上限 ——
+// 一直连不上就不能永远锁着输入框，到点仍按失败收尾（结果可在服务端 TTL 内
+// 刷新页面看到）。150s 取"服务端 grace 120s + 重连退避 30s"的余量。
+const RUN_RECONNECT_GRACE_MS = 150000;
+let reconnectFailTimer: ReturnType<typeof setTimeout> | null = null;
+
+function clearReconnectFailTimer(): void {
+  if (reconnectFailTimer) { clearTimeout(reconnectFailTimer); reconnectFailTimer = null; }
+}
+
 
 // 进行中面板的 id（按任务模式记录）
 const live: { stream?: string; exec?: string; multi?: string; loop?: string } = {};
@@ -59,6 +74,9 @@ export function connectWS() {
   ws.onopen = () => {
     const wasDown = useApp.getState().wsAttempt > 0;
     retry = 0;
+    // 重新连上就当面对过账了：150s 失联计时器不再需要（若服务端还有任务在跑，
+    // 随后的 bind 会回放 run_state 把界面接管回来）
+    clearReconnectFailTimer();
     useApp.setState({ wsState: 'connected', wsAttempt: 0, wsNextRetryAt: 0 });
     // 断过再连上要说一声：用户刚才看到的是"正在重连"，得有个收尾
     if (wasDown) message.success('已重新连接到服务器');
@@ -78,17 +96,28 @@ function scheduleReconnect() {
   // 判定 —— 绝不能因为"还有补充没等到回音"就拖着界面不解锁。
   settleInterjectsOnDisconnect();
 
-  // 任务跑到一半断线：后端把这次执行绑在这条 socket 上，事件再也送不回来了。
-  // 若不复位 running，输入框会一直是 disabled，用户既看不到结果也没法重发 ——
-  // 表现为"卡在执行中不动"。故落一张失败卡片（带重跑入口）并解锁界面。
+  // 任务跑到一半断线：v1.11.20 起服务端会把任务保住（LiveRun + 120s grace），
+  // 所以**先不判死**：保留 running、显示"仍在服务器继续"，给 150s 宽限等重连
+  // 接管（重连后 bind 会收到 run_state，据此恢复容器/回放结果）。
+  // 到点仍未连上才走旧的失败收尾 —— 否则输入框会一直 disabled，用户既看不到
+  // 结果也没法重发，表现为"卡在执行中不动"。
   if (app().running) {
-    const mode = taskMode();
-    removeTyping(mode);
-    finalizeStream(mode, null);
-    finalizeAll(mode);
-    appendFailure(mode, '中断', '与服务器的连接已断开，本次执行的结果无法送回。'
-      + '连接恢复后可用下方按钮重跑。');
-    setRunning(false);
+    panel().patchProgress({ label: '连接中断，任务仍在服务器继续…' });
+    // 只起一次计时器：重连是退避重试的，每次都重起会把"失联上限"无限推后
+    if (!reconnectFailTimer) {
+      reconnectFailTimer = setTimeout(() => {
+        reconnectFailTimer = null;
+        if (!app().running) return;              // 这期间已经连上并接管/结束了
+        const mode = taskMode();
+        removeTyping(mode);
+        finalizeStream(mode, null);
+        finalizeAll(mode);
+        appendFailure(mode, '中断', '与服务器的连接中断，任务可能已失联。'
+          + '可重新连接后刷新页面查看结果，或用下方按钮重跑/续跑。');
+        setRunning(false);
+      }, RUN_RECONNECT_GRACE_MS);
+      message.info('与服务器的连接已断开，任务仍在服务器继续，正在自动重连…', 6);
+    }
   }
 
   // 把"第几次重连"和"下次何时重试"发布出去，界面据此显示倒计时
@@ -160,11 +189,18 @@ useApp.subscribe((s, prev) => {
  */
 // 已发出、尚未收到 task_start 的那条用户消息 id（任务没能开始时据此把 chip 标为未生效）
 let pendingRef = '';
+// v1.11.20：本页面"正在跑"的任务属于哪个会话。run_state 回放要据此判断
+// "它讲的是我现在这个会话，还是用户切走前另一个会话里的运行"。
+let runningSid = '';
 
 export function sendRun(task: string, images: string[], extra?: Record<string, any>) {
   pendingRef = String(extra?.ref || '');
+  runningSid = chatSid();
   ws!.send(JSON.stringify({
     action: 'run', task, interaction: app().mode, images, session_id: chatSid(),
+    // v1.11.20：声明"这次运行支持断线接管" —— 服务端据此决定连接断开时
+    // 是继续跑（等重连）还是按旧语义取消。旧前端不带这个字段，行为不变。
+    reattach: true,
     ...(extra || {}),
   }));
 }
@@ -456,6 +492,183 @@ const MA_ROLE_CN: Record<string, string> = {
   planner: '规划', researcher: '研究', coder: '编程', writer: '写作', reviewer: '审阅',
 };
 
+// ── v1.11.22 工程协同事件解析 ────────────────────────────
+// 新编排器按**节点 id** 发事件，旧文本流水线只发 **index** —— 两套都要认。
+// 事件形状也可能有两种：字段平铺在顶层（{type, id, ...}）或塞进 data.step
+// （{type, step:{...}}）。统一先合成一份 src 再读，少一处假设就少一处崩。
+
+/** 取事件里描述"节点/步骤"的那份对象（兼容 step 嵌套与顶层平铺，顶层优先）。 */
+function maSrc(data: any): any {
+  if (data && typeof data.step === 'object' && data.step) return { ...data.step, ...data };
+  return data || {};
+}
+
+/**
+ * 定位步骤：id → index（旧后端）→ 角色名兜底。
+ * 带 id 却找不到时返回 -1 而不是按 index 猜 —— 宁可新建一条，也不要把结果
+ * 写到另一个角色的步骤上（旧后端的 index 与 DAG 的 id 顺序并不保证一致）。
+ */
+function maFind(steps: MaStep[], data: any): number {
+  const src = maSrc(data);
+  const id = src.id != null ? String(src.id)
+    : src.step_id != null ? String(src.step_id)
+      : src.node_id != null ? String(src.node_id) : '';
+  if (id) return steps.findIndex((s) => s.id === id);
+  const idx = Number(src.index);
+  if (Number.isFinite(idx) && idx >= 0 && idx < steps.length) return idx;
+  const role = String(src.role || '');
+  if (role) {
+    for (let k = steps.length - 1; k >= 0; k--) if (steps[k].role === role) return k;
+  }
+  return -1;
+}
+
+function maIdList(v: unknown): (string | number)[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.map((x) => (typeof x === 'number' ? x : String(x)))
+    .filter((x) => x !== '');
+  return out.length ? out : undefined;
+}
+
+function maStrList(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.map((x) => String(x)).filter((x) => x !== '');
+  return out.length ? out : undefined;
+}
+
+/** DAG 节点 → 卡片里的一行步骤（新编排器的 ma_plan 节点带 id/依赖/写范围）。 */
+function maStepFromNode(node: any): MaStep {
+  const src = node || {};
+  const dep = maIdList(src.depends_on ?? src.dependsOn);
+  const wp = maStrList(src.write_paths ?? src.writePaths);
+  const id = src.id != null ? String(src.id) : undefined;
+  const label = src.label != null ? String(src.label) : undefined;
+  return {
+    role: String(src.role || 'researcher'),
+    subtask: String(src.subtask || ''),
+    state: 'pending',
+    ...(id ? { id } : {}),
+    ...(label ? { label } : {}),
+    ...(dep ? { dependsOn: dep } : {}),
+    ...(wp ? { writePaths: wp } : {}),
+  };
+}
+
+/** 事件里可带来的步骤字段（只收存在的键，缺的保持原值）。 */
+function maPatchFromNode(node: any): Partial<MaStep> {
+  const src = node || {};
+  const patch: Partial<MaStep> = {};
+  if (src.role != null) patch.role = String(src.role);
+  if (src.subtask != null) patch.subtask = String(src.subtask);
+  if (src.label != null) patch.label = String(src.label);
+  if (src.output != null) patch.output = String(src.output).slice(0, 600);
+  const dep = maIdList(src.depends_on ?? src.dependsOn);
+  if (dep) patch.dependsOn = dep;
+  const wp = maStrList(src.write_paths ?? src.writePaths);
+  if (wp) patch.writePaths = wp;
+  // 角色预算：三个数字都可能缺（旧后端一个都没有），有哪个收哪个
+  if (typeof src.tokens === 'number') patch.tokens = src.tokens;
+  if (typeof src.steps === 'number') patch.steps = src.steps;
+  const calls = src.llm_calls ?? src.llmCalls;
+  if (typeof calls === 'number') patch.llmCalls = calls;
+  if (typeof src.rework === 'number') patch.rework = src.rework;
+  const review = maReviewFrom(src);
+  if (review) patch.review = review;
+  if (src.stop_reason != null) patch.stopReason = String(src.stop_reason);
+  if (src.error != null && String(src.error)) patch.error = String(src.error).slice(0, 800);
+  return patch;
+}
+
+/** 步骤终态：优先显式 state，其次 skipped 标记，最后按 success 推断。 */
+function maStateFromNode(node: any): MaStep['state'] | null {
+  const st = String(node?.state || '').toLowerCase();
+  if (st === 'skip' || st === 'skipped') return 'skip';
+  if (st === 'fail' || st === 'failed' || st === 'error') return 'fail';
+  if (st === 'ok' || st === 'done' || st === 'success') return 'ok';
+  if (st === 'run' || st === 'running') return 'run';
+  if (node?.skipped === true) return 'skip';
+  if (node?.success === true) return 'ok';
+  if (node?.success === false) return 'fail';
+  return null;
+}
+
+/** 审查结论：可能是嵌套 data.review，也可能是扁平 {approved, issues...}。 */
+function maReviewFrom(src: any): MaReview | null {
+  const raw = src?.review;
+  if (raw && typeof raw === 'object') {
+    const out: MaReview = {};
+    if (typeof raw.approved === 'boolean') out.approved = raw.approved;
+    if (typeof raw.available === 'boolean') out.available = raw.available;
+    if (raw.issues != null) out.issues = String(raw.issues);
+    if (raw.reason != null) out.reason = String(raw.reason);
+    if (raw.error != null) out.error = String(raw.error);
+    return Object.keys(out).length ? out : null;
+  }
+  if (!src || !('approved' in src || 'available' in src || 'issues' in src)) return null;
+  return maReviewFrom({ review: src });
+}
+
+function maTestsFrom(v: any): MaVerification['tests'] {
+  if (v === null) return null;
+  if (typeof v !== 'object') return undefined;
+  // 没有 passed/unavailable 的片段不算测试结论 —— 别让"{}"渲染成"测试未通过"
+  if (typeof v.passed !== 'boolean' && typeof v.unavailable !== 'boolean') return undefined;
+  const out: NonNullable<MaVerification['tests']> = {};
+  if (typeof v.passed === 'boolean') out.passed = v.passed;
+  if (typeof v.unavailable === 'boolean') out.unavailable = v.unavailable;
+  if (v.detail != null) out.detail = String(v.detail);
+  return out;
+}
+
+function maVerdictFrom(v: any): MaVerification['llm'] {
+  if (v === null) return null;
+  if (typeof v !== 'object') return undefined;
+  if (typeof v.done !== 'boolean' && typeof v.available !== 'boolean') return undefined;
+  const out: NonNullable<MaVerification['llm']> = {};
+  if (typeof v.done === 'boolean') out.done = v.done;
+  if (typeof v.available === 'boolean') out.available = v.available;
+  if (v.reason != null) out.reason = String(v.reason);
+  if (v.source != null) out.source = String(v.source);
+  return out;
+}
+
+/** 收尾验证：嵌套 data.verification 或扁平 {done, tests, llm}。 */
+function maVerificationFrom(data: any): MaVerification | null {
+  const raw = data?.verification && typeof data.verification === 'object'
+    ? data.verification : null;
+  const src = raw || data || {};
+  const has = raw || 'done' in src || 'tests' in src || 'llm' in src;
+  if (!has) return null;
+  const out: MaVerification = {};
+  if (typeof src.done === 'boolean') out.done = src.done;
+  const tests = maTestsFrom(src.tests);
+  if (tests !== undefined) out.tests = tests;
+  const llm = maVerdictFrom(src.llm);
+  if (llm !== undefined) out.llm = llm;
+  if (src.reason != null) out.reason = String(src.reason);
+  if (typeof src.rounds === 'number') out.rounds = src.rounds;
+  return Object.keys(out).length ? out : null;
+}
+
+/** 编排器聚合指标（只留可展示的标量；字段缺就返回 undefined，不伪造）。 */
+function maMetricsFrom(data: any): MaMetrics | undefined {
+  const m = data?.metrics;
+  if (!m || typeof m !== 'object') return undefined;
+  const out: MaMetrics = {};
+  for (const [k, v] of Object.entries(m)) {
+    if (v === null || typeof v === 'number' || typeof v === 'string' || typeof v === 'boolean') {
+      out[k] = v;
+    }
+  }
+  return Object.keys(out).length ? out : undefined;
+}
+
+/** 合并到已有卡片上的验证摘要（后到的事件只覆盖它带了的字段）。 */
+function maMergeVerification(multi: any, next: MaVerification | null): any {
+  if (!next) return multi;
+  return { ...multi, verification: { ...(multi.verification || {}), ...next } };
+}
+
 /** 按 goal_id 从进行中的执行面板反查"这是第几步、步骤文案是什么"，供进度条显示。 */
 function planStepInfo(goalId: any): { idx: number; text: string } {
   if (!live.exec) return { idx: 0, text: '' };
@@ -499,7 +712,40 @@ function execTrace(mode: Mode, label: string, body: string, kind: string) {
 
 function finalizeAll(mode: Mode, data?: any) {
   if (live.exec) { chat().update(mode, live.exec, (i: any) => ({ ...i, done: true })); live.exec = undefined; }
-  if (live.multi) { chat().update(mode, live.multi, (i: any) => ({ ...i, done: true })); live.multi = undefined; }
+  if (live.multi) {
+    // v1.11.22：task_complete 记录里可能带 verification/metrics（工程协同），
+    // 以及 multi_steps（服务端一直有存的最终步骤快照）。事件在断线/回放中丢了时，
+    // 用这份快照把卡片状态补齐 —— 特别是"依赖失败被跳过"的节点，它可能根本没有
+    // 自己的 ma_step_end 事件。
+    const v = data ? maVerificationFrom(data) : null;
+    const metrics = data ? maMetricsFrom(data) : undefined;
+    const finalSteps: any[] = data && Array.isArray(data.multi_steps) ? data.multi_steps : [];
+    chat().update(mode, live.multi, (i: any) => {
+      let steps: MaStep[] = Array.isArray(i.steps) ? i.steps : [];
+      if (finalSteps.length) {
+        const used = new Set<number>();
+        const merged = finalSteps.map((node: any, k: number) => {
+          // 优先按 id 对齐（新编排器），旧文本流水线没有 id 就按 index 对齐
+          const byId = node?.id != null ? steps.findIndex((s) => s.id === String(node.id)) : -1;
+          const at = byId >= 0 ? byId : k;
+          if (at >= 0 && at < steps.length) used.add(at);
+          const base = steps[at] || maStepFromNode(node);
+          const st = maStateFromNode(node);
+          return { ...base, ...maPatchFromNode(node), ...(st ? { state: st } : {}) } as MaStep;
+        });
+        // 事件里有、最终快照却没带的步骤不能丢（否则卡片上会凭空少一行）
+        const rest = steps.filter((_, k) => !used.has(k));
+        steps = rest.length ? [...merged, ...rest] : merged;
+      }
+      return {
+        ...maMergeVerification(i, v),
+        steps,
+        done: true,
+        ...(metrics ? { metrics } : {}),
+      };
+    });
+    live.multi = undefined;
+  }
   if (live.loop) {
     const stop = data?.stop_reason || '';
     chat().update(mode, live.loop, (i: any) => ({ ...i, done: true, stopReason: stop }));
@@ -511,7 +757,21 @@ function appendResult(mode: Mode, data: any) {
   const meta: string[] = [];
   // v1.11.16：这一轮是"接着上次跑"而不是从头跑 —— 在结果消息上留个记号
   if (data.resumed_from) meta.push('↻ 续跑');
-  if (data.success === false && data.resumable) meta.push('⏸ 已保存断点');
+  if (data.success === false) {
+    // v1.11.21：失败/部分交付的结果也要一眼看出"为什么停"。stop_reason 是
+    // 机器枚举，先翻成中文；llm_calls 回答"这一轮到底花了多少次模型调用"。
+    // "已保存断点"沿用 v1.11.16 的记号，续跑入口与它保持一致。
+    const sr = stopReasonZh(data.stop_reason);
+    if (sr) meta.push(`⏹ 停止原因：${sr}`);
+    if (data.resumable) meta.push('⏸ 已保存断点');
+    if (typeof data.llm_calls === 'number') meta.push(`${data.llm_calls} 次调用`);
+    // 只放一句截断后的原因：完整报错在失败卡片与「任务历史」详情里可查，
+    // 结果气泡的 meta 不该被一段长文淹没。
+    if (data.error) {
+      const one = String(data.error).replace(/\s+/g, ' ').trim();
+      if (one) meta.push(`⚠ ${brief(one, 80)}`);
+    }
+  }
   if (data.interaction && data.interaction !== 'chat') {
     if (data.steps) meta.push(`${data.steps}步`);
     if (data.backtracks) meta.push(`${data.backtracks}回溯`);
@@ -527,12 +787,27 @@ function appendResult(mode: Mode, data: any) {
 
 // 失败/中断一律落成一张带恢复入口的卡片（而不是一行红字 + 一个可能不出现的
 // 续跑气泡）。任务原文直接写进卡片，重启后依然能续跑。
-function appendFailure(mode: Mode, why: '出错' | '中断', error: string) {
+// v1.11.21：服务端 task_error 现在会带 stop_reason / resumable / llm_calls /
+// budget_exhausted，原样存进卡片 —— 事后回看时"为什么停、还能不能续、
+// 花了多少次调用"不必靠猜。字段缺失（旧后端 / 断线兜底）时一个都不写，
+// 卡片布局与改动前完全一致。
+function appendFailure(
+  mode: Mode, why: '出错' | '中断', error: string,
+  extra?: {
+    stopReason?: string; resumable?: boolean;
+    budgetExhausted?: boolean; llmCalls?: number;
+  },
+) {
   const last = chat().lastTask;
+  const stop = String(extra?.stopReason || '').trim();
   chat().append(mode, {
     kind: 'error', id: uid(), why, error,
     task: last?.text, taskMode: last?.mode ?? mode,
     at: new Date().toLocaleTimeString(),
+    ...(stop ? { stopReason: stop } : {}),
+    ...(extra?.resumable ? { resumable: true } : {}),
+    ...(extra?.budgetExhausted ? { budgetExhausted: true } : {}),
+    ...(typeof extra?.llmCalls === 'number' ? { llmCalls: extra.llmCalls } : {}),
   });
   // 用户不在这个模式/视图时看不到卡片，补一句提示指路
   if (!(app().view === 'chat' && app().mode === mode)) {
@@ -573,6 +848,10 @@ function setRunning(on: boolean) {
   // 完成/失败/中断/断线都会走到这里，进度条统一在此收掉，
   // 免得漏了某条终态路径，进度指示永远停在"第 3/7 步"不动。
   if (!on) {
+    // v1.11.20：任何收尾路径都不该再留着"断线失联"计时器（兜底一次；
+    // 各终态分支与 run_state 回放处也会显式清）
+    clearReconnectFailTimer();
+    runningSid = '';
     chat().setTaskMode(null);
     settleInterjectsOnRunEnd();
     chat().persist();
@@ -587,6 +866,108 @@ function setRunning(on: boolean) {
 }
 
 // ── 事件分发 ───────────────────────────────────────────
+/**
+ * 服务端回放的"这个会话的运行状态"（v1.11.20 断线保活）。
+ *
+ * 页面刷新 / 断线重连后，bind 会收到它：
+ *   · running=true  —— 服务端还在跑：把界面切回执行中并重建容器，接管后续输出；
+ *   · running=false + terminal —— 断线期间已经结束：直接回放终态（含完整回答）；
+ *   · running=false 且无 terminal —— 任务已在服务端结束/中断：若本地还在跑就收尾。
+ * 三种情况都先清掉 150s 失联计时器：已经和服务端对完账了。
+ */
+function handleRunState(data: any): void {
+  // 只处理"当前正在看的会话"：切会话时可能还有上一条 bind 的回放在路上，
+  // 拿别的会话的运行状态去接管界面会把当前视图搞乱
+  if (data?.session_id && String(data.session_id) !== chatSid()) return;
+  // 本地正在跑的任务属于另一个会话（用户切了会话去看别的）：这条 run_state
+  // 与它无关，不能据此把当前界面上的运行判死/接管
+  if (app().running && runningSid && runningSid !== chatSid()) return;
+  clearReconnectFailTimer();
+  const run = data?.run || {};
+  const terminal = data?.terminal;
+  const record = data?.terminal_record || {};
+  const mode = (run.interaction || record.interaction || taskMode()) as Mode;
+
+  if (data?.running) {
+    if (!app().running) {
+      // 刷新页面 / 新标签页接管一次仍在服务端的运行：重建"执行中"界面
+      setRunning(true);
+      chat().setTaskMode(mode);
+      panel().resetUsage();
+      panel().clearQuestion();
+      panel().clearSubagents();
+      panel().startProgress(
+        mode === 'multi' ? '协同中'
+          : mode === 'loop' ? '迭代中'
+            : mode === 'chat' ? '正在回答' : '正在执行',
+        mode === 'chat' ? '' : '已接管仍在服务器执行的任务…');
+      if (mode === 'chat') startStream(mode);
+      else if (mode === 'multi') startMulti(mode);
+      else if (mode === 'loop') startLoop(mode);
+      else startExec(mode);
+      // 断线期间的过程事件没有补发，只能提示"从此刻起继续显示"
+      if (mode === 'chat') {
+        message.info('已接管仍在服务器执行的任务（断线期间的部分过程可能未显示）', 6);
+      } else {
+        execTrace(mode, '↻ 已接管仍在执行的任务',
+          '连接中断期间的部分过程可能未显示', 'action');
+      }
+    } else {
+      // 同一页面重连：容器还在，只刷新进度文案
+      panel().patchProgress({ label: '↻ 已重新连接，任务仍在服务器执行…' });
+    }
+    return;
+  }
+
+  if (terminal?.type === 'chat_done') {
+    const output = String(record?.output || '');
+    if (output) {
+      // 断线期间回答已经写完：用完整 output 回放。本地那条断线前的半截流即使
+      // 还在也不完整 —— 丢掉它，比为了保留半截文本而缺整段回答要好。
+      // removeTyping 是必需的：重连但未刷新时本地可能还挂着"正在输入"空泡，
+      // 不收拾掉就会和下面的完整回答并存。
+      removeTyping(mode);
+      if (streamFlushTimer) { clearTimeout(streamFlushTimer); streamFlushTimer = null; }
+      if (live.stream) { chat().remove(mode, live.stream); live.stream = undefined; }
+      streamBuf = '';
+      chat().append(mode, {
+        kind: 'msg', id: uid(), role: 'agent', md: output,
+        meta: ['↻ 断线期间完成', record.duration_ms ? `${record.duration_ms}ms` : '']
+          .filter(Boolean).join(' · '),
+      });
+      chat().persist();
+    } else {
+      finalizeStream(mode, terminal);
+    }
+    panel().setStats({
+      steps: 0, backtracks: 0, tokens: terminal.tokens || 0,
+      duration_ms: terminal.duration_ms || record.duration_ms || 0,
+    });
+    panel().bumpRefresh();
+    setRunning(false);
+    notifyDone('ok', mode, terminal);
+    return;
+  }
+
+  if (terminal) {
+    // 其它终态（完成/失败/中断）：先把模式切成这次运行的模式，再交给既有的
+    // 终态处理器 —— 结果卡片、统计、通知、计时器清理全部复用同一条路径。
+    chat().setTaskMode(mode);
+    handle(terminal);
+    return;
+  }
+
+  // 服务端已无运行、也没有终态：任务结束/中断在别处完成且结果已过期，
+  // 本地若还在等就按"已结束"收尾，别让输入框永远锁着。
+  if (app().running) {
+    removeTyping(mode);
+    finalizeStream(mode, null);
+    finalizeAll(mode);
+    appendFailure(mode, '中断', '任务已在服务器结束或中断。可重跑/续跑。');
+    setRunning(false);
+  }
+}
+
 /** 会让团队看板数据变化的事件（v1.11.15）：收到即通知 TeamView 节流刷新。 */
 const TEAM_BOARD_KINDS = new Set([
   'task_created', 'task_updated', 'task_moved', 'task_commented',
@@ -598,7 +979,15 @@ function handle(data: any) {
   // 观测中心：同一份事件流就地累积成执行 DAG（实时，无需轮询后端）
   try { useObserve.getState().onEvent(data); } catch { /* 观测失败不影响主流程 */ }
   switch (data.type) {
+    case 'run_state':
+      // v1.11.20：断线重连/刷新页面后，服务端回放的运行状态（接管 or 回放结果）
+      handleRunState(data);
+      break;
+
     case 'task_start':
+      // v1.11.20：连接正常、新任务已开始 —— 断线失联计时器不再需要
+      clearReconnectFailTimer();
+      runningSid = chatSid();
       removeTyping(mode);
       // running 在这里置位，而不是只靠 ChatPanel 的 send()。补充被服务端"提升"
       // 成新任务时（interjection_promoted）界面上没有任何人替它置位，漏了这一步
@@ -680,30 +1069,144 @@ function handle(data: any) {
       }
       break;
 
-    case 'ma_plan':
+    // ── v1.11.22 工程协同：DAG 计划 / 角色步骤 / 审查回炉 / 收尾验证 ──
+    // 旧文本流水线仍走同样几个事件（只有 index/role/subtask/output）；新编排器在
+    // 此基础上带 id/依赖/写范围/角色预算。处理器按"字段有就用"解析 —— 旧事件进来
+    // 时行为与 v1.11.21 完全一致，旧记录（localStorage 里的 multi 卡片）也不变。
+    case 'ma_plan': {
       if (!live.multi) startMulti(mode);
-      chat().update(mode, live.multi!, (i: any) => ({
-        ...i,
-        steps: (data.plan || []).map((s: any): MaStep => ({ role: s.role, subtask: s.subtask, state: 'pending' })),
-      }));
-      panel().patchProgress({ total: (data.plan || []).length, label: '分工已确定' });
-      break;
-    case 'ma_step_start':
-      panel().patchProgress({
-        cur: (data.index ?? 0) + 1,
-        label: `${MA_ROLE_CN[data.role] || data.role || ''}：${data.subtask || ''}`.slice(0, 60),
+      const nodes: any[] = Array.isArray(data.plan) ? data.plan : [];
+      // 续跑时后端可能把已完成的步骤一并带回（data.steps / resume progress.steps）：
+      // 先按 index 合并状态，否则"已完成的角色"会被重新画成待执行，看起来像进度丢了。
+      const doneSteps: any[] = Array.isArray(data.steps) ? data.steps
+        : Array.isArray(data.progress?.steps) ? data.progress.steps : [];
+      let total = nodes.length;
+      chat().update(mode, live.multi!, (i: any) => {
+        const steps: MaStep[] = nodes.map((node, k) => {
+          const base = maStepFromNode(node);
+          const prior = doneSteps[k];
+          if (!data.resumed || !prior || typeof prior !== 'object') return base;
+          const st = maStateFromNode(prior);
+          return { ...base, ...maPatchFromNode(prior), ...(st ? { state: st } : {}) } as MaStep;
+        });
+        total = steps.length;
+        return { ...i, steps, engineering: data.engineering === true };
       });
-      if (live.multi) chat().update(mode, live.multi, (i: any) => ({
-        ...i, steps: i.steps.map((s: MaStep, k: number) => (k === data.index ? { ...s, state: 'run' } : s)),
-      }));
+      panel().patchProgress({
+        total,
+        label: data.engineering === true ? '🧩 工程分工已确定（DAG）' : '分工已确定',
+      });
       break;
-    case 'ma_step_end':
-      if (live.multi) chat().update(mode, live.multi, (i: any) => ({
-        ...i,
-        steps: i.steps.map((s: MaStep, k: number) => (k === data.index
-          ? { ...s, state: 'ok', output: (data.output || '').slice(0, 600) } : s)),
-      }));
+    }
+
+    case 'ma_step_start': {
+      if (!live.multi) startMulti(mode);
+      const src = maSrc(data);
+      let pos = 0, total = 0, labelText = '';
+      chat().update(mode, live.multi!, (i: any) => {
+        const steps: MaStep[] = Array.isArray(i.steps) ? [...i.steps] : [];
+        const at = maFind(steps, data);
+        const next: MaStep = {
+          ...(at >= 0 ? steps[at] : maStepFromNode(src)),
+          ...maPatchFromNode(src),
+          state: 'run',
+        };
+        if (at >= 0) steps[at] = next; else steps.push(next);
+        pos = at >= 0 ? at : steps.length - 1;
+        total = steps.length;
+        // 事件可能只带 id 不带 subtask（计划里已有文案）：用合并后的步骤文案兜底
+        labelText = `${MA_ROLE_CN[next.role] || next.role || ''}：${next.subtask || ''}`;
+        return { ...i, steps };
+      });
+      panel().patchProgress({ cur: pos + 1, total, label: labelText.slice(0, 60) });
       break;
+    }
+
+    case 'ma_step_end': {
+      if (!live.multi) startMulti(mode);
+      const src = maSrc(data);
+      let total = 0, failed = false;
+      chat().update(mode, live.multi!, (i: any) => {
+        const steps: MaStep[] = Array.isArray(i.steps) ? [...i.steps] : [];
+        const at = maFind(steps, data);
+        // 旧 ma_step_end 只有 index/role/output、没有 success —— 按"完成"处理（旧行为）
+        const state = maStateFromNode(src) || 'ok';
+        failed = state === 'fail';
+        const next: MaStep = {
+          ...(at >= 0 ? steps[at] : maStepFromNode(src)),
+          ...maPatchFromNode(src),
+          state,
+        };
+        if (at >= 0) steps[at] = next; else steps.push(next);
+        total = steps.length;
+        return { ...i, steps };
+      });
+      // 只在失败时插一句进度提示：成功路径保持旧行为，不打断"正在执行…"
+      if (failed) panel().patchProgress({ label: `⚠ 角色步骤失败（已记录 ${total} 步）` });
+      break;
+    }
+
+    case 'ma_review': {
+      if (!live.multi) break;
+      const review = maReviewFrom(maSrc(data));
+      if (!review) break;
+      chat().update(mode, live.multi, (i: any) => {
+        const steps: MaStep[] = Array.isArray(i.steps) ? [...i.steps] : [];
+        const at = maFind(steps, data);
+        if (at < 0) return i;
+        steps[at] = { ...steps[at], review };
+        return { ...i, steps };
+      });
+      break;
+    }
+
+    case 'ma_rework': {
+      if (!live.multi) break;
+      const src = maSrc(data);
+      let who = '';
+      chat().update(mode, live.multi, (i: any) => {
+        const steps: MaStep[] = Array.isArray(i.steps) ? [...i.steps] : [];
+        const at = maFind(steps, data);
+        if (at < 0) return i;
+        // 计数优先用后端给的（带轮次时准确），缺了就本地 +1
+        const n = typeof src.rework === 'number' ? src.rework
+          : typeof src.attempt === 'number' ? src.attempt
+            : (steps[at].rework || 0) + 1;
+        steps[at] = { ...steps[at], rework: n, state: 'run' };
+        who = MA_ROLE_CN[steps[at].role] || steps[at].role;
+        return { ...i, steps };
+      });
+      panel().patchProgress({ label: `↻ ${who || '角色'}审查未通过，回炉重做…` });
+      break;
+    }
+
+    case 'ma_verify': {
+      if (!live.multi) break;
+      const verification = maVerificationFrom(data);
+      if (!verification) break;
+      chat().update(mode, live.multi, (i: any) => maMergeVerification(i, verification));
+      panel().patchProgress({
+        label: verification.done === false
+          ? '⚠ 收尾验证未通过，正在如实收尾'
+          : '验证完成，正在综合结果…',
+      });
+      break;
+    }
+
+    case 'ma_done': {
+      // 旧编排器：角色全部跑完后发（output 是综合结果）；新编排器还会带
+      // verification/metrics。先把"进行中"的动效收掉，结果气泡由 task_complete 补。
+      if (!live.multi) break;
+      const verification = maVerificationFrom(data);
+      const metrics = maMetricsFrom(data);
+      chat().update(mode, live.multi, (i: any) => ({
+        ...maMergeVerification(i, verification),
+        done: true,
+        ...(metrics ? { metrics } : {}),
+      }));
+      panel().patchProgress({ label: '协同完成，正在综合结果…' });
+      break;
+    }
 
     case 'loop_iter_start':
       panel().patchProgress({
@@ -1260,6 +1763,7 @@ function handle(data: any) {
       scheduleFlush(mode);
       break;
     case 'chat_done':
+      clearReconnectFailTimer();
       finalizeStream(mode, data);
       panel().setStats({ steps: 0, backtracks: 0, tokens: data.tokens || 0, duration_ms: data.duration_ms || 0 });
       panel().bumpRefresh();
@@ -1268,6 +1772,7 @@ function handle(data: any) {
       break;
 
     case 'task_complete':
+      clearReconnectFailTimer();
       removeTyping(mode);
       finalizeAll(mode, data);
       appendResult(mode, data);
@@ -1292,6 +1797,9 @@ function handle(data: any) {
       break;
 
     case 'task_error':
+      // v1.11.20：终态到了 —— 断线期间起的"失联"计时器必须撤掉，
+      // 否则 150s 后还会再落一张重复的失败卡片
+      clearReconnectFailTimer();
       if (pendingRef) {       // 任务根本没开始：本条的设置自然也都没生效
         const ref = pendingRef;
         pendingRef = '';
@@ -1307,17 +1815,31 @@ function handle(data: any) {
         setRunning(false);
         break;
       }
-      appendFailure(mode, '出错', String(data.error || '未知错误'));
+      appendFailure(mode, '出错', String(data.error || '未知错误'), {
+        // v1.11.21：结构化停因透传（字段可能缺：旧后端只发 error）
+        stopReason: String(data.stop_reason || ''),
+        resumable: data.resumable === true,
+        budgetExhausted: data.budget_exhausted === true,
+        llmCalls: typeof data.llm_calls === 'number' ? data.llm_calls : undefined,
+      });
       panel().bumpRefresh();
       setRunning(false);
       notifyDone('fail', mode, data);
       break;
 
     case 'task_cancelled':
+      clearReconnectFailTimer();
       finalizeStream(mode, null);
       removeTyping(mode);
       finalizeAll(mode);
-      appendFailure(mode, '中断', String(data.error || '任务被手动停止'));
+      appendFailure(mode, '中断', String(data.error || '任务被手动停止'), {
+        // 取消事件也可能带断点信息（预算耗尽走 task_complete，不在此列）；
+        // 缺失时不显示，与旧行为一致。
+        stopReason: String(data.stop_reason || ''),
+        resumable: data.resumable === true,
+        budgetExhausted: data.budget_exhausted === true,
+        llmCalls: typeof data.llm_calls === 'number' ? data.llm_calls : undefined,
+      });
       panel().bumpRefresh();
       setRunning(false);
       notifyDone('stop', mode, data);

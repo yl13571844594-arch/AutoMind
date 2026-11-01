@@ -1,0 +1,41 @@
+{
+  "schema": "automind.benchmark_environment/1",
+  "generated_at": "2026-10-31T23:20:55+08:00",
+  "run_id": "v1.11.24b",
+  "os": {
+    "name": "Microsoft Windows 10 专业版",
+    "version": "10.0.19045",
+    "build": "19045",
+    "architecture": "x64"
+  },
+  "cpu": {
+    "model": "Intel Core i3-14100F",
+    "physical_cores": 4,
+    "logical_processors": 8
+  },
+  "memory_gb": 63.8,
+  "python": "3.12.10",
+  "model": {
+    "provider": "deepseek",
+    "model": "deepseek-flash",
+    "temperature": 0.7,
+    "max_tokens": 8192,
+    "approval_mode": "approve_all"
+  },
+  "run": {
+    "started_at": "2026-10-31T22:05:34+08:00",
+    "finished_at": "2026-10-31T23:02:02+08:00",
+    "timezone": "Asia/Shanghai",
+    "note": "含三版本评测编排（约 22:05–22:14）与报告聚合（23:02 完成）"
+  },
+  "network": {
+    "measured": false,
+    "value": null,
+    "label": "未测量",
+    "note": "本轮未测量网络指标，不宣称网络条件"
+  },
+  "notes": [
+    "环境信息用于解释测评结果的可复现性；未测量项不补值、不猜值。",
+    "核心版本 1.11.24；数据完整性 82/82，validation.ok=true。"
+  ]
+}

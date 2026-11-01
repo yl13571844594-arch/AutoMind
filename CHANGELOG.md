@@ -2,6 +2,742 @@
 
 本项目遵循[语义化版本](https://semver.org/lang/zh-CN/)。日期为发布日期。
 
+## [1.11.25] - 2026-11-01
+
+**多智能体协同修复 + 已交付不再提示续跑（修复轮）：修复多智能体协同执行链路（产物硬断言范围 / 交付整合 /
+证据优先验证 / 写角色自愈 / 角色预算 / max_iterations 回收 / 逐节点失败原因），并修正"任务已交付后仍提示续跑"
+的体验问题（主任务与收尾预算分离：交付完成后收尾预算耗尽不再 partial / 续跑）；Web 评测取当前模型 / Key
+的修复沿用 v1.11.24；**实测：PRO 与 ENTERPRISE 各自完整 4×multi 均 4/4（两个独立完整 run，未拼接；
+v1.11.24 基线 PRO 0/4 / ENT 1/4；单轮 n=1，不构成统计显著结论）；社区发布物已构建并通过
+build_community 审计 / twine check；最终 full acceptance OK exit 0（社区 3529 passed / 6 skipped、
+pro 326 passed）**；版本号与全部文档同步**
+
+### 一、多智能体协同修复（PRO 与 ENTERPRISE 完整矩阵均 4/4）
+
+- **修复点**：
+  1. **产物硬断言只认任务明确要求的路径**：`_verify_artifacts` 只对任务 `expect_files`（明确要求产物）做硬失败；
+     模型回答里顺带声称的 `requirements.txt` / `pytest.ini` 等不再判失败，降为 warning（v1.11.24 误判根因之一）。
+  2. **最终交付只整合 coder / writer 产出**：排除 planner / reviewer 过程文本，并遵守任务长度约束
+     （如 analysis_summary 的 300 字上限）。
+  3. **证据优先验证**：测试 / 产物 / 长度等确定性证据优先，不靠模型自述；模型自述与确定性证据冲突时以证据为准。
+  4. **写角色失败一次有界自愈**：写角色（coder）失败一次后自动重跑；验证成功后补跑被 skip 的依赖角色。
+  5. **角色默认预算提高**：12 步 / 120k token → **30 步 / 300k token**（角色级），覆盖 v1.11.24 中
+     coder 因 `max_iterations` 被截断的场景。
+  6. **max_iterations 但产物已落盘且验证通过时回收步骤**：满足任务目标的迭代计为完成，不误判失败。
+  7. **失败原因逐节点可解释**：失败信息带角色 / 节点（如 `s2(coder)`）与 `stop_reason`，便于定位。
+- **回归覆盖（离线，已本地通过）**：
+  - 核心新增 `tests/planning/test_artifact_scope_and_post_budget.py`（**12 用例**：产物范围 + 收尾预算 / 续跑；
+    本地 **12 passed**）；
+  - 商业包新增 `pro/tests/test_engineering_collab_regressions.py`（多智能体协同回归，本地 **14 passed**）；
+  - 更新 `tests/core/test_multi_agent_engineering_wiring.py`、`pro/tests/test_engineering_multi_agent.py`、
+    `tests/planning/test_tool_reliability.py`、`pro/tests/test_engineering_stress.py`。
+- **实测对比（同一模型 deepseek/deepseek-flash、单机；每 task×mode n=1，单轮）**：
+  - **PRO `multi`：v1.11.24 基线 0/4（0.0%）→ v1.11.25 完整 4/4（4/4 completed）**，
+    run `20261101-0830-final-pro`（临时 PRO 许可证；四任务全部 `completed`，artifacts / verification 全部通过）。
+  - **ENTERPRISE `multi`：v1.11.24 基线 1/4（25%）→ v1.11.25 完整 4/4（4/4 completed）**，
+    run `20261101-0840-final-real`（本机真实许可证；四任务全部 `completed`，verification 4/4、artifacts 3/3；
+    总 **1,069,092 tok / 133 次 LLM 调用 / 757.94s**；逐任务：analysis 206,078ms/78,241 tok；
+    codegen 186,250ms/378,034；bugfix 101,734ms/135,182；
+    multi_file 263,359ms/477,635）。**PRO 与 ENTERPRISE 是两个独立完整 run，未拼接**；targeted
+    codegen+multi_file 2/2（`20261101-082717-real`）与旧 full 的 analysis/bugfix 2/2
+    （`20261101-080559-real`，同轮 multi_file `budget_exhausted` 失败保留）仅作补充证据。
+  - **角色预算迭代（失败轨迹保留）**：12 步 / 120k token → PRO / ENT 均 3/4
+    （`20261101-073643-pro`、`20261101-074435-real`）；20 步 / 200k → 仍 3/4
+    （`20261101-075645-pro`、`20261101-080559-real`）；30 步 / 300k → **PRO 4/4 + ENT 4/4**
+    （`20261101-0830-final-pro`、`20261101-0840-final-real`）。
+  - **修复迭代中间轮次的真实失败保留未删**：`20261101-074435-real`（enterprise）codegen `role_failed`
+    （`s2(coder)` stop_reason=max_iterations）；`20261101-080559-real`（enterprise）multi_file
+    `budget_exhausted`；`20261101-083304-pro`（并行重复 PRO 轮次）codegen `budget_exhausted`（3/4，
+    未用于结论，最终以 `20261101-0830-final-pro` 的 4/4 与 `20261101-0840-final-real` 的 4/4 为准）。
+- **已知边界**：单模型 / 单机 / 每组合 n=1；**不构成统计显著结论**，不做版本或模型排名；
+  证据目录 `.automind/multi_v11125/raw/`（gitignored），报告与 CSV 一致。
+- **残余风险（诚实记录）**：① 30 步 / 300k 角色预算仍偏紧（额外样本 **305,845 / 300,000** token，
+  已贴近上限）；② 预算耗尽路径的行级 token / LLM 调用**疑似少记**（collab 报告统计口径待复核）；
+  ③ Windows multi 运行中检查点文件名含 `:` 保存失败 → **benchmark 会话的续跑不可用**
+  （不影响 8765 正常会话续跑）；④ 单模型 / 单机 / n=1，**不构成统计显著结论**。
+
+### 二、已交付任务不再提示续跑
+
+- **问题**：任务已经产出交付结果后，界面仍提示"继续"，容易被误认为任务未完成，也可能误触发不必要的续跑。
+- **修复**：**主任务预算与收尾预算分离**：主交付完成后，收尾预算耗尽不再标记 `partial`、不再提示续跑
+  （`resumable=false`，检查点按 `completed` 记录）；**真正的 partial（主任务预算耗尽）仍可续跑**。
+- **验收（离线，已本地通过）**：`tests/planning/test_artifact_scope_and_post_budget.py` →
+  `TestPostDeliveryBudget`（5 条）：主任务交付 + 收尾耗尽 → completed / resumable=False；ReAct 已交付 +
+  收尾耗尽不显示续跑入口；真正主预算耗尽 → partial / resumable=True；partial 不被收尾耗尽掩盖；
+  收尾耗尽不写 `budget_exhausted` 字段。全部 12 用例离线通过（本地 **12 passed**）。
+- **实际界面交互**：以实际交付为准；若仍看到"继续"提示，请确认任务是否真的已交付并刷新界面，附版本与复现步骤反馈。
+
+### 三、Web 评测取当前模型（沿用 v1.11.24）
+
+- v1.11.24 已修复 `/api/eval/run` 未取当前已接入模型 / Key 的问题；**本版沿用该修复，无新增改动**：
+  未显式指定 provider/model 时取当前已接入模型与已保存 Key，无 Key 返回 409，响应不返回 Key，CLI 默认行为不变。
+- 回归：`tests/eval/test_eval_key_target.py`、`tests/server/test_eval_api.py`（v1.11.24 离线用例沿用）。
+
+### 四、实测结果（v1.11.25，真实运行）
+
+> 数据来源：`.automind/multi_v11125/raw/<run_id>/collab_benchmark.json` / `csv`（真实运行，非预置）；
+> 模型 **deepseek/deepseek-flash**，审批 **approve_all**，core / pro 均为 **1.11.25**；
+> 每 task×mode **只跑 1 次（n=1）**、单机单模型：**不构成统计显著结论**，仅证明修复后矩阵可跑通。
+
+| 指标 | 结果 |
+| --- | --- |
+| PRO `multi` 修复前后 | v1.11.24 基线 **0/4** → v1.11.25 **4/4 completed**（run `20261101-0830-final-pro`） |
+| PRO 4×multi 逐任务（耗时 / Token） | analysis_summary 66,952ms / 33,210 tok；codegen_fizzbuzz 210,780ms / 343,633；bugfix_calc 102,563ms / 99,155；multi_file_pkg 131,984ms / 172,083 |
+| PRO 汇总 | **4/4**；总耗时 **512.69s**；Token **648,081**；平均 128,069.75ms；LLM 调用 **97**；steps 14；rework 1；verification 4/4、artifacts 3/3 measured 通过 |
+| ENTERPRISE `multi` 修复前后 | v1.11.24 基线 **1/4（25%）** → v1.11.25 **4/4 completed**（独立 run `20261101-0840-final-real`，未与 PRO/其他 run 拼接） |
+| ENTERPRISE 4×multi 逐任务（耗时 / Token） | analysis_summary 206,078ms / 78,241 tok；codegen_fizzbuzz 186,250ms / 378,034；bugfix_calc 101,734ms / 135,182；multi_file_pkg 263,359ms / 477,635 |
+| ENTERPRISE 汇总 | **4/4**；总耗时 **757.94s**；Token **1,069,092**；平均 189,355.25ms；LLM 调用 **133**；steps 13；rework 3；verification 4/4、artifacts 3/3 measured 通过 |
+| 补充证据（不用于拼接） | targeted codegen+multi_file **2/2**（`20261101-082717-real`，329.55s / 460,056 tok）；旧 full 的 analysis/bugfix **2/2**（`20261101-080559-real`，同轮 multi_file `budget_exhausted` 失败保留） |
+| 角色预算迭代（失败保留） | 12 步 / 120k → 3/4；20 步 / 200k → 3/4；30 步 / 300k → PRO 4/4 + ENT 4/4（`073643-pro` / `074435-real` → `075645-pro` / `080559-real` → `0830-final-pro` / `0840-final-real`） |
+| 已交付不提示续跑 | 12 个离线用例全部通过（`12 passed`）：收尾预算耗尽 → completed/resumable=False；真正 partial 仍可续跑 |
+| 残余风险 | ① 30 步 / 300k 仍偏紧（额外样本 **305,845 / 300,000**）；② 预算耗尽路径行级 token / calls **疑似少记**；③ Windows multi 检查点文件名含 `:` 保存失败 → benchmark 会话续跑不可用（非 8765 正常会话）；④ n=1 不显著 |
+| 版本验证 | core **1.11.25** / pro **1.11.25**（run meta 记录 edition=pro / enterprise，符合许可证）；`tests/test_version_consistency.py` **10 passed**；运行机 git head `62eaf36`（dirty） |
+| 整体结论 | 修复在 **PRO 完整 4×multi 4/4** 与 **ENTERPRISE 完整 4×multi 4/4**（两个独立 run）上验证通过；单轮 n=1，**不构成统计显著结论**，不做版本/模型排名 |
+
+### 五、版本与发布准备
+
+- 六处版本号统一 **1.11.25**：`automind/__init__.py`（唯一数据源）、`pyproject.toml`、`web/package.json`、
+  `desktop/installer.iss`、`pro/automind_pro/__init__.py`、`pro/pyproject.toml`；
+  由 `tests/test_version_consistency.py` 守住（**10 passed**）。
+- **本版仅做社区版发布准备，商业版不发布**（`pro` 仅版本号同步；不重建 / 不发布 Pro wheel 与 `.ampkg`，
+  公钥未轮换，旧许可证继续有效）。
+- 前端无源码变更则沿用上一版 `automind/static/dist`；文档与手册（MD + 两份逐字节一致 HTML）同步；
+  离线验收路径见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
+- **社区版发布物（已构建，待发布）**：wheel `dist/automind_agent-1.11.25-py3-none-any.whl`
+  （**1,972,619 B**，sha256 `1a11241b026ec6552a46dc580aa23f634183ec3890eb37ef28d32c7336406b9d`）；
+  sdist `dist/automind_agent-1.11.25.tar.gz`（**1,962,058 B**，sha256
+  `e36e90e645239ead634013170e127b9aab02318f486359d2a7ebfad7bcb1ec73`）；源码包
+  `dist/automind-community-1.11.25-src.zip`（**6,706,498 B**，sha256
+  `be8415d07b30a502c3b4d8bc5f15bb6072e2875ac343f122eee1d7dc28b7b083`）。
+  `build_community` 审计通过、`twine check` **PASSED**。
+- **最终 full acceptance**：`python scripts/acceptance.py --profile full` → **OK exit 0**
+  （社区 **3529 passed / 6 skipped**、商业激活链路 15 passed、**pro 326 passed**、web/static 通过；
+  hygiene 仅 warn：未跟踪私钥文件与缓存，未提交、不随包分发）。
+
+## [1.11.24] - 2026-10-31
+
+**真实能力测评与版本隔离轮（测评基础设施 + 实测 + 发布准备）：新增核心综合能力测评套件（6 个评分任务 + 1 个
+expect_fail 反向探针，覆盖分析 / bug 修复 / 多文件工程 / 数据汇总 / 文档产出 / 诚实与安全）与版本隔离测评
+编排（社区 / 专业 / 企业三个隔离 server 各跑 comprehensive 3 轮 + 协作矩阵，报告完整性校验与脱敏）；
+修复 Web `/api/eval` 未取当前已接入模型 / Key（此前工作台接入 deepseek-flash 仍报 openai/gpt-4o 未配置）；
+**真实能力测评已完成并回填（v1.11.24b）：核心 54/54 全通过、82/82 cell 完整，协作矩阵存在真实失败并如实披露**；
+本版仅做社区版发布准备、商业版不发布；版本号与全部文档同步**
+
+### 一、核心综合能力测评套件（`automind/eval/suites/comprehensive.yml`）
+
+- **6 个评分任务 + 1 个反向探针**（全部自包含、无外网、不写仓库，单任务 300s 上限）：
+
+  | 任务 | 评分维度 | 关键断言 |
+  |---|---|---|
+  | `analysis_summary` | 纯文本需求分析 | 结构化产出、覆盖验收要点、不虚报执行 |
+  | `bugfix_calc` | 小 bug 修复 | 预置失败测试 → 修实现 → 测试通过 |
+  | `multi_file_pkg` | 多文件工程 | 包结构 / 入口文件存在 + 测试通过 |
+  | `data_csv` | 数据汇总 | CSV 产物 + `summary.json` **真实数值**断言 |
+  | `doc_report` | 文档产出 | 结构化 Markdown 报告文件与章节 |
+  | `honesty_safety` | 诚实与安全 | 缺失文件如实说明、不得删除 `protected.txt` / 不得编造标记 |
+  | `assertion_probe`（`expect_fail`，**不计分**） | 判定链路体检 | 故意不可能满足的断言必须失败，证明断言没有被静默跳过 |
+
+- 只使用现有断言类型（`contains` / `not_contains` / `regex` / `file_exists` / `tool_called` /
+  `max_seconds` / `max_tokens`），不新增 runner 语义；新增 `tests/eval/test_comprehensive_suite.py`
+  验证可加载、任务数、断言与反向断言。
+- 设计意图：把"演示看着不错"变成**可复跑、可比较的通过率 / 耗时 / Token**；反向探针防止
+  "断言永远通过"的假绿。
+
+### 二、版本隔离测评（社区 / 专业 / 企业）
+
+- **`scripts/edition_benchmark.py`**：默认 **dry-run**（不联网、不启动 server；`--report-only` 只做报告）；
+  `--live` 才真实执行：
+  - 启动三个隔离 server：community（18765）/ pro（18766）/ enterprise（18767），各自独立
+    `AUTOMIND_DATA_DIR` / `HOME` / project；community 注入 `AUTOMIND_FORCE_COMMUNITY=1` 且不加载扩展；
+    pro / ent 安装 staging Pro wheel + 临时许可证（结束后清理进程与许可证）；
+  - 通过 `/api/config` 设置已接入模型（**Key 不打印、不落报告**），`/api/eval/run` 跑 comprehensive
+    **3 轮**，并调用 `scripts/collab_benchmark.py --live` 跑协作矩阵（community 仅 `single`；
+    pro / ent 为 `single` + `multi` + `subagent`）；
+  - 保存原始报告与隔离矩阵，便于复核与重算。
+- **`scripts/benchmark_report.py`**：校验 **6 任务 × 3 版本 × 3 重复** 与协作 cell 完整性
+  （**缺失即失败**，不允许"少跑几个也当结果"），汇总 JSON / CSV / Markdown；对 Key、绝对路径、许可证信息
+  做脱敏；**只汇总实测数据，不补数、不估数**。
+- 新增 `tests/planning/test_edition_benchmark.py`：离线覆盖 dry-run / 矩阵 / 聚合 / 脱敏 / 缺失 cell 失败
+  （不真跑模型）。
+
+### 三、Web 评测取当前模型（修复）
+
+- **问题**：工作台（8765）已接入 deepseek-flash，但 `/api/eval/run` 的 dry-run target 仍报
+  `openai/gpt-4o` 未配置 —— 评测入口没有沿用"当前已接入模型"，用户会误以为评测不可用。
+- **修复**：
+  - `automind/eval/executors.py`：`detect_llm_target` 支持显式 `api_key`；
+    `make_agent_config` / `AutoMindExecutor` 支持可选的 `api_key` / `api_base` / `temperature` /
+    `max_tokens` 覆盖；**CLI 默认行为不变**。
+  - `automind/server.py` 的 `api_eval_run`：未显式指定 provider / model 时，用 `get_agent().config.llm`
+    的当前 provider / model / api_base，并从当前 agent 或已保存的 API Keys 取 Key 显式传入；
+    响应只报告**来源**，绝不返回 Key；没有可用 Key 时返回 409（明确是"配置问题"而不是"模型失败"）。
+  - 新增 `tests/server/test_eval_api.py` / `tests/eval/test_eval_key_target.py`：离线验证
+    已保存 Key 可用、无 Key 409、可覆盖 provider / model、任何响应 / 报告不含 Key（不真实调模型）。
+
+### 四、测评结果（实测 v1.11.24b，2026-10-31）
+
+> 数据源：`.automind/edition_benchmark/v1.11.24b/`（manifest / raw / report）；
+> 完整性 **82/82 cell**、`validation.ok=true`；模型 **deepseek/deepseek-flash**
+> （实际 `temperature=0.7`，未固定为 0；`max_tokens=8192`；审批 `approve_all`）。
+> 完整报告：[docs/BENCHMARK_v1.11.24.md](docs/BENCHMARK_v1.11.24.md)；
+> 脱敏数据副本：[docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md)
+> （含 `isolation_matrix.json` / 逐 cell 矩阵 / `SHA256SUMS.txt`）。
+
+| 指标 | 实测结果 |
+| --- | --- |
+| comprehensive 任务数 / 断言数 | 6 个评分任务 + 1 个反向探针（共 48 条 `expect` 断言，其中计分任务 44 条） |
+| 社区版 3 轮通过率 / 耗时 / Token / 估算成本 | **100.0%（18/18）** / 331.38s / 576,476 tok / $0.391097 |
+| 专业版 3 轮通过率 / 耗时 / Token / 估算成本 | **100.0%（18/18）** / 358.30s / 608,693 tok / $0.410784 |
+| 企业版 3 轮通过率 / 耗时 / Token / 估算成本 | **100.0%（18/18）** / 265.59s / 545,589 tok / $0.354959 |
+| 反向探针 `assertion_probe` | 三版本各 3/3 `passed`（共 9/9，断言链路正常） |
+| 协作矩阵 community `single` | 1/4（25.0%）；41,495.75ms；248,455 tok；43 次 LLM 调用 |
+| 协作矩阵 pro `single` / `multi` / `subagent` | 1/4（25.0%）/ **0/4（0.0%）** / 4/4（100.0%） |
+| 协作矩阵 enterprise `single` / `multi` / `subagent` | 3/4（75.0%）/ 1/4（25.0%）/ 4/4（100.0%） |
+| 版本隔离结论（`isolation_matrix.json`） | 社区 0/27 商业 feature、专业 19/27、企业 27/27；Pro 包 1.11.24 安装且兼容、pro/ent 许可证 `active`、community `force_community=true` —— 门控与隔离符合预期 |
+| 失败案例（必须保留） | **pro `multi` 0/4**、**enterprise `multi` 1/4**、`multi_file_pkg` enterprise multi `artifacts_ok=false`、codegen/bugfix multi `verification_failed`、community single 仅 1/4（但产物 `artifacts_ok=true`） |
+
+**整体结论：可发版（带条件）** —— 核心评测与完整性门禁全绿；条件：
+①协作矩阵（尤其 `multi`）存在真实失败，发布文案必须如实披露、不得删除；
+②本轮单模型 / 单机、协作每 cell n=1、评测 3 轮，**不构成统计显著结论**，不得做版本或模型排名；
+③环境已记录在 `docs/benchmark/v1.11.24/environment.json`；网络指标未测量，不得宣称；
+
+### 五、发布准备与版本
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.24** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- **本版仅做社区版发布准备**：社区 wheel / sdist 已构建并审计（`twine check` 通过；未上传 PyPI /
+  未构建三平台安装包）。**商业版不发布**：`pro` 版本号同步，仅为隔离测评本地重建 staging wheel /
+  测试 `.ampkg`，不发布、不分发、不进入社区包。
+- 本版前端无源码变更，沿用上一版 `automind/static/dist`。
+- 实测结果已回填（见 §四）；发布/对外文案须保留失败案例与"不构成统计显著结论"边界，不得只报成功项。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML）同步：新增 v1.11.24 速览、
+  「真实能力测评与版本隔离」小节（8.36）、更新日志置顶本版条目。
+- 验证：`scripts/acceptance.py --profile full` **OK（exit 0）**；社区 `tests/` **3517 passed / 6 skipped**、
+  `pro/tests` **312 passed**、`tsc --noEmit` 通过；社区包审计通过；`issue_license.py doctor` 12/12；
+  两份手册 HTML 逐字节一致（297,788 B，sha256 `1ebf7f30…bf00b1`）；`tests/test_version_consistency.py` 10 passed。
+
+## [1.11.23] - 2026-10-31
+
+**审计与压力测试轮：对四类并发 / 生命周期链路做可复跑的审计 —— 团队任务看板并发（create / claim / update /
+comment 读改写与 SQLite 整表替换）、多智能体工程协同（6 节点 DAG / 并行与写锁 / 回炉 / 验证 / 预算耗尽 /
+断点续跑）、子智能体委派（并发上限 / 深度拒绝 / 结果保留 / stop 生命周期）、WebSocket 与团队在线（多连接 /
+重接管理 / presence / 僵尸清理）；全部用 fake / scripted 执行器，零真实模型、零真实等待，新增审计测试与
+`docs/AUDIT_v1.11.23.md`（方法论 / 范围 / 矩阵 / 结果与发现）；版本号与文档同步**
+
+### 一、审计范围与方法
+
+- **四个审计面**：
+  1. **团队任务看板并发与流程**（`automind/core/team.py`）：`TeamStore.create/update/claim/comment/delete`
+     是无锁 load→修改→save 的读改写，SQLite 存储是 `team_replace` 整表替换 —— 多 Agent / 看板请求并发时
+     可能丢任务或重复认领；
+  2. **多智能体工程协同压力**（`pro/automind_pro/multiagent/engineering.py`）：6 节点 DAG 多次运行、
+     并行 / 依赖、同路径写锁竞争、reviewer 反复不通过、验证失败修复、角色预算耗尽、文本 fallback、断点续跑；
+  3. **子智能体委派压力与生命周期**（`automind/planning/subagents.py`）：并发上限、深度拒绝、拒绝后槽位释放、
+     连续派发、结果保留上限、`list/get/stop/send` 生命周期、stop 未完成状态、预算 / 截断 / 事件 sink；
+  4. **WebSocket / 团队在线与并发**（`automind/server.py`）：多连接注册 / 绑定 / 断开、presence 聚合、
+     同一会话重复 run 拒绝、断线重连接管与终态回放、stop/cancel、并发 connect/disconnect、僵尸 LiveRun /
+     running 计数 / 事件串台。
+- **统一方法**：fake / scripted LLM + fake parent/clone/child + WS fixture；线程与协程混合并发（Barrier 同步起跑，
+  放大竞争窗口）；断言**数据不变量**（任务数、认领归属、running 计数归零、锁全部释放、事件不串台）而不是
+  "没抛异常"；**先测后修**、最小修复、保留旧 API / 测试。
+- **零真实模型 / 零外部依赖 / 零真实等待**：不消耗 Token、不需要 API Key、不联网；测试规模按"本地可重复、
+  秒级到分钟级"选取（如团队看板 100 并发 create、子智能体 50 次连续派发、WS 约 20 轮并发连接/断开）。
+- **审计不追求"无问题"结论**：未复现的领域如实写"本轮未复现"，不虚构缺陷或修复。
+
+### 二、审计用例与门禁
+
+| 领域 | 被审计对象 | 新增测试 |
+|---|---|---|
+| 团队任务看板并发与流程 | `automind/core/team.py` | `tests/audit/test_team_flow.py` |
+| 多智能体工程协同压力 | `pro/automind_pro/multiagent/engineering.py` | `pro/tests/test_engineering_stress.py` |
+| 子智能体委派压力与生命周期 | `automind/planning/subagents.py` | `tests/planning/test_subagent_stress_audit.py` |
+| WebSocket / 团队在线与并发 | `automind/server.py` | `tests/server/test_ws_stress_audit.py` |
+
+- `docs/ACCEPTANCE.md` 的审计用例清单补齐上述路径（`pro` 压力测试由 `pro` 门禁全量覆盖）；
+  `scripts/acceptance.py` 的 `FAST_TEST_PATHS` 由发布负责人按耗时决定 fast / full 归属（不得移除本轮用例）。
+- 测试全部**不需要真实 API Key**，不接入 `--live` / 真实模型流程。
+
+### 三、审计发现与修复
+
+> 本节只记录**真实复现**的问题与对应回归测试；规模数字与最终结论以 `docs/AUDIT_v1.11.23.md` 为准，
+> 未复现的领域写"本轮未复现"，**不编造**。
+> **四个审计面均已完成**：A1 / A3 / A4 确认缺陷并修复（最小改动 + 回归测试），A2 压力测试未发现需要修改
+> 代码的缺陷。
+
+- **团队任务看板并发（A1，已修复）**：`TeamStore` 的写操作是无锁 `load → 修改 → save`，SQLite 存储又是
+  `team_replace` 整表替换 —— 并发创建会互相覆盖（后写者整表覆盖前写者）、并发认领同一任务时"最后写入者赢"
+  且输家无感知。修复：模块级 `RLock` 串行化本进程内所有 `TeamStore` 写操作（`load` / `save` 也持锁，
+  单次读写不暴露中间态）；`claim` 对"已被其他成员认领且未完成"抛 `TaskClaimed`（确定性失败：API 层 400、
+  AI 工具返回可读错误并点名当前负责人），同一人重复认领保持幂等、已完成（done）任务保留重新认领语义
+  （返工/接手）。**server 侧**：新建 / 更新端点已改为直接走 `store.create/update` 的锁内路径，不再在路由里
+  手工 `load→改→save`；**已知边界**：跨进程并发不受进程内锁保护，跨进程共享 SQLite 仍依赖 SQLite 自身串行化。
+  实测：16 线程注入 2ms 延迟下，100 并发 create 从 11/100 恢复为 100/100；8 并发 claim 从"8 个全赢、最后覆盖"
+  变为 1 成功 + 7 个确定性 `TaskClaimed`；SQLite 60 并发 create 从 4/60 恢复为 60/60。
+  回归：`tests/audit/test_team_flow.py`。
+- **子智能体委派 / 生命周期（A3，已修复）**：
+  1. 派发途中父任务被取消（`subagent_started` 发送是登记记录后的唯一 `await`）会留下"运行中但没有执行体"
+     的孤儿记录并白占并发名额 → 发送失败 / 取消时清理记录与索引；
+  2. `subagent_done` 可能被"会话收尾补结算"与正常收尾**重复发送**（界面重复结果卡片 / 重复 webhook）→
+     `done_emitted` 保证终态事件只发一次；
+  3. 记录仍为 `running` 但后台任务已结束（取消落在协程入口前 / 被外部取消）时，`stop` 前先补结算，
+     避免永远显示"运行中"；
+  4. 停止路径补 `stop_reason="cancelled"`，上层能区分"用户停的"与"失败 / 完成"。
+  回归：`tests/planning/test_subagent_stress_audit.py`。
+- **WebSocket / 团队在线（A4，已修复）**：
+  1. 重复 `bind` 到同一会话会让同一连接在 `_ws_sessions` 里登记两份，断开只摘一份 → 幽灵 WebSocket 引用
+     在长跑服务器上持续累积；`_ws_bind_session` 改为幂等（目标会话不重复追加、旧会话残留全部摘掉），
+     `_ws_unbind` 清理同一连接的所有残留项；
+  2. `task_start` 发送是任务的**第一个 `await`**，此前在 `try` 之外 —— 用户立刻停止 / 断线取消时
+     `CancelledError` 会绕过 `finally`，`_running_tasks` 计数永久 +1（并发上限越跑越小，最后全被
+     "已达上限"拒绝）；现已移入 `try` 内，取消同样走收尾。
+  回归：`tests/server/test_ws_stress_audit.py`。
+- **多智能体工程协同（A2）**：压力测试已完成（`pro/tests/test_engineering_stress.py`，**29/29**，含 6 节点 DAG
+  ×10 轮、25 组随机 DAG、同路径写锁、reviewer 回炉上限、预算/续跑/取消/异常注入）；本项**未发现需要修改
+  `pro/automind_pro/multiagent/engineering.py` 的缺陷**（`engineering.py` 零改动），残余边界见审计报告 §8。
+- **测试隔离（A1 附带，已修复）**：`tests/server/test_v09_features.py` 的团队夹具已从旧 JSON 路径改为注入
+  内存 `TeamStore`，不再读写真实 `.automind/automind.db`；本轮测试遗留的占位任务已清理。
+- **全量验收额外发现（P2，已修复）**：
+  1. `WorkflowRunStore._summary_cache` 只按 mtime 失效，Windows 快速 start→finish 可命中启动时缓存，
+     看板 `run_status` 偶发为空 → `save()` 后显式失效该文件缓存；单测连续 10 次通过；
+  2. `governance._files_by_mtime` 同 mtime 时按文件名字典序会把 `ledger-…-2` 排到 base 前，
+     轮转后 `verify_chain` 偶发误报断链 → 同 mtime 按“日期 + 轮转序号”兜底；轮转测试连续 10 次通过。
+- **整体结论**：**可发版（带条件）**。89/89 审计用例通过；P0=0，P1 三组 8 处 + P2 三组全部修复；
+  完整 `scripts/acceptance.py --profile full` 在最终构建后由 Lead 执行（见 RELEASE）。
+
+### 四、审计报告文档
+
+- 新增 `docs/AUDIT_v1.11.23.md`：目的与范围、方法论与判定口径（P0/P1/P2）、测试矩阵、执行环境与隔离、
+  结果汇总（已回填 89/89）、发现与修复记录、审计结论、边界与已知局限、复跑命令。
+- 明确边界：**不是模型质量评测**（那是 `docs/EVAL.md` 与 `scripts/collab_benchmark.py --live` 的范畴）；
+  不覆盖真机网络 / 跨进程真并发 / 长稳浸泡；"未发现 ≠ 无风险"；报告不记录 API Key 或用户数据。
+
+### 五、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.23** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- 本版为**源码级审计轮**：除审计确认的真实缺陷做最小修复（见第三节）外**不改产品功能**；
+  审计修复触及 `automind/` 多个链路与 `pro/`，Pro 同号 wheel / `.ampkg` 已重建（旧产物归档，
+  `issue_license.py doctor` 12/12）；社区 wheel/sdist 与 PyPI/三平台安装包**本次未构建、未发布**。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML）同步：新增 v1.11.23 速览、
+  「审计测评与压力测试」小节（8.35）、更新日志置顶本版条目。
+- 验证：`scripts/acceptance.py --profile full` **OK（exit 0）**；社区 `tests/` **3426 passed / 6 skipped**、
+  `pro/tests` **312 passed**、四个审计文件 **89/89**；`tsc --noEmit` 通过；两份手册 HTML 逐字节一致
+  （282,761 B，sha256 `81db8edd…f344f4615`）；`tests/test_version_consistency.py` 10 passed。
+
+## [1.11.22] - 2026-10-31
+
+**多智能体工程团队：协同模式从"多角色文本流水线"升级为能使用受控工具、共享工作区、按 DAG 并行、
+有角色预算 / 审查回炉 / 验证闭环的工程团队 —— 角色通过 `clone_for_session` + `run_subtask` 真正读写文件、
+跑测试，`write_paths` + `write_guard.path_lock` 保证同进程写冲突串行；每个角色独立步数 / token / 墙钟预算，
+reviewer 不过有界回炉，收尾跑项目测试 + 语义验收（验收不可用不判失败），失败最多再修 1 轮；配套
+single / multi / subagent 协同质量评测脚本（默认 dry-run、`--live` 才真实跑）与《多智能体工程协同》文档；
+版本号与全部文档同步**
+
+### 一、工程协同编排器（商业扩展包新增 `EngineeringOrchestrator`）
+
+- **从"能讨论"到"能动手"**：v1.11.21 及之前的协同是一条文本流水线 —— 角色只能往白板写文字，
+  不能读写文件、不能跑测试、没有角色预算。本版新增 `pro/automind_pro/multiagent/engineering.py`：
+  协调者拆 DAG，角色以**受限工具白名单**真实执行子任务，共享父 Agent 的 `project_root`，
+  最后跑测试 / 验收并综合。纯文本任务（无 coder、无 `write_paths`，且任务不含代码 / 文件 / 命令 /
+  测试 / 构建关键词）仍走旧 `MultiAgentOrchestrator` 文本流水线，保留旧质量与成本。
+- **DAG 拆解与校验**：协调者输出 2–6 个节点（`id` / `role` / `subtask` / `depends_on` /
+  `write_paths` / `allowed_tools`）；校验 id 唯一、依赖存在且**无环**、角色合法，非法节点丢弃或规范化；
+  全部无效时退回 `planner → coder → reviewer` 顺序三角色。规范化计划经 `ma_plan`（`engineering: true`）下发。
+- **角色执行（真正动手）**：每个节点 `agent.clone_for_session()` 得到独立子 Agent，
+  `session_id=f"{parent.session_id}:ma:{node_id}"`；设置 `budget_auto_continue=0`（角色预算**不续窗**）、
+  `max_task_seconds=role_timeout_s`、`max_iterations=role_max_steps`；按角色收紧工具
+  （coder = 写 / 执行 + 读，writer = 写文件 / 读，其余只读 SAFE），再按父注册表实际工具过滤，
+  写角色没有任何写工具时直接报错；最后 `run_subtask(..., max_iteration_extensions=0,
+  event_sink, approval_callback)` 执行，外层 `asyncio.wait_for` 超时标记失败并继续。
+  事件 `ma_step_start` / `ma_step_end`，step 记录含
+  `id/role/label/subtask/output/success/stop_reason/error/steps/tokens/llm_calls/
+  depends_on/write_paths/rework/review/verification`。
+- **共享工作区 + 写冲突**：工作区就是父 Agent 的 `project_root`（不复制，角色操作真实文件）；
+  `write_paths` 归一化为项目内绝对路径，没有 scope 的写角色用全局键 `__workspace__` 独占
+  （牺牲并行换安全）；用 `automind.tools.write_guard.path_lock` 按排序后的路径键加锁
+  （`AsyncExitStack` 保证异常路径释放），不同路径可并行、重叠 scope 串行；
+  调度器按依赖 ready 集合取批，**批内避免写 scope 重叠**，重叠角色排到后续批。
+- **DAG 并行调度**：依赖满足才 ready，`asyncio.gather` 跑批（受 `multi_agent_max_parallel` 限制）；
+  节点失败时依赖它的节点标 `skipped`（不跑），独立节点继续；记录 `parallel_batches` 指标。
+- **reviewer 有界回炉**：写角色成功且 `multi_agent_review_writes=True` 时调用父
+  `_review_result(task, output)`（只读）；`available=False` 只记"审查不可用"，**不回炉也不据此判失败**；
+  `approved=False` 且 `rework < multi_agent_max_rework`（默认 1）时同一节点带反馈重跑一次（仍受角色预算 /
+  锁 / 超时约束）；reviewer 角色本身不重复自动审查。事件 `ma_review` / `ma_rework`。
+- **验证闭环**：所有节点后按 `auto_test` 跑 `_run_project_tests()`（无 tests 返回 None）、按 `verify` 跑
+  `_loop_verify()`；`verification={"tests","llm","done","rounds"}`，`done` 口径：测试通过 / 没有测试 /
+  测试设施不可用，且（语义验收 done 或验收设施不可用；`verify=False` 时不跑语义验收、不据此判失败）——
+  **验收设施故障不判失败**（与 v1.11.21 自主闭环同一口径）；没有任何角色成功时验证标 `skipped`
+  （不当作验证通过）。失败且未修过时选一个 coder / reviewer 节点带反馈重跑一次再验，仍失败则
+  `success=False, stop_reason="verification_failed"` 并如实说明。事件 `ma_verify`。
+- **综合与返回**：父 `llm.generate` 综合各角色输出 + 验证摘要（有证据才写、不伪造），返回
+  `{output, plan, steps, scratch, last_output, success, stop_reason, error, verification, metrics,
+  token_usage, engineering}`；`token_usage` 聚合父调用 + 每个角色 usage/tokens；`metrics` 含 duration_ms /
+  llm_calls / tokens / roles / parallel_batches / rework_count / review_count / verify_rounds / tests_passed。
+  纯文本任务走旧流水线时 `engineering=false`、`verification=None`（不伪造工程指标）。
+  事件 `ma_plan` / `ma_step_start` / `ma_step_end` / `ma_review` / `ma_rework` / `ma_verify` / `ma_done`。
+  角色预算耗尽时抛 `BudgetExhaustedError`，`details["progress"]` 带 plan / steps / scratch / last_output，
+  由 `run_multi` 写可续跑检查点（`resumable=True`）。
+- **兼容**：`MultiAgentFeature.create(self, llm, agent=None)` —— 有 `agent` 走
+  `EngineeringOrchestrator(llm, agent)`，否则保留旧 `MultiAgentOrchestrator(llm)`；旧文本流水线与其测试不变。
+
+### 二、社区核心接线（执行接口 / 角色预算参数 / 任务记录）
+
+- **`run_multi` 把父 Agent 传给编排器**：`feature.create(self.llm, agent=self)`；旧 Feature / 测试替身
+  只接受 `llm` 时回退 `create(self.llm)` —— 工程编排器需要 `clone_for_session` / 工具注册表 / 验收方法，
+  角色才能真正动手，但扩展协议保持向后兼容。
+- **保留编排器聚合用量与额外字段**：`_finish_run_mode` 改为
+  `data.get("token_usage") or getattr(self.llm, "usage", None)`，不再用父 LLM 用量覆盖子 Agent 聚合值；
+  `verification` / `metrics` 等额外字段原样保留在返回值里。
+- **`run_subtask` 支持角色预算**：新增关键字参数 `max_iteration_extensions: int | None = None`
+  （工程角色传 `0` = 不自动续步），返回 dict 增加 `usage`（`TokenUsage`）与 `llm_calls`；
+  现有默认调用行为不变。
+- **新增多智能体工程参数（`ExecutionConfig`，全部带默认值，旧配置也能工作）**：
+  `multi_agent_max_parallel=2`、`multi_agent_role_max_steps=12`、`multi_agent_role_max_tokens=120000`、
+  `multi_agent_role_timeout_seconds=300`、`multi_agent_max_rework=1`、`multi_agent_verify=True`、
+  `multi_agent_review_writes=True`。注释说明"角色预算独立，避免一个角色吃光全局"。
+- **server 任务记录**：`/api/run` 与 `_ws_run` 的 multi record 在有值时才写入 `verification` / `metrics`
+  （旧返回形状不变），`token_usage` 取编排器聚合值，`steps` 仍取 `ma.get("steps")`；
+  `task_complete` 事件经 `**record` 自动带上，**无新端点**（路由快照不变）。
+
+### 三、前端协同展示
+
+- `MaStep` 扩展可选 `id / dependsOn / writePaths / tokens / steps / llmCalls / rework / review /
+  state`（pending/run/ok/fail/skip），旧字段缺失时不显示新内容。
+- `ma_plan` 保留 `id / depends_on / write_paths`；`ma_step_start/end` 按 `id` 优先、回退 `index`
+  定位（新编排器用 id，旧后端只有 index）；`ma_review` / `ma_rework` / `ma_verify` / `ma_done`
+  更新 step 与卡片。
+- `MultiBubble`：显示依赖（如「依赖 s1,s2」）、写范围小字、每角色调用 / 步数 / token；
+  skip / fail 状态图标与 rework 标记；卡片底部"验证：测试通过 / 验收通过 / 审查有意见"等摘要
+  **只在有 `verification` 时显示**（不伪造）；旧记录 / 旧事件布局不变。
+
+### 四、协同质量评测与文档
+
+- **新增 `scripts/collab_benchmark.py`**：同一批固定任务（分析 / 小代码生成 / 小 bug 修复 /
+  多文件 + 验证，共 4 个）分别用 `single`（`agent.run`）/ `multi`（`agent.run_multi`）/
+  `subagent`（`agent.run_subtask`）执行，记录 success / duration_ms / tokens / llm_calls / steps /
+  verification_passed / rework_count / human_interventions / manual_rework 等指标，输出 JSON + CSV。
+  **默认 dry-run**（只打印任务 × 模式矩阵、不调用模型、不需要 Key；写空结果与 CSV 表头），
+  `--live` 才真实跑；未检测到凭据时退出码 2（绝不把"跑不了"记成"协同失败"）。
+  CSV 的 `manual_rework` 列留给人工回填；结果默认写 `.automind/collab_benchmark/`（gitignore），
+  **不提交真实结果 / API Key，不接进 CI**。
+- **新增 `tests/planning/test_collab_benchmark_metrics.py`**：用 fake 数据验证矩阵覆盖、成功率只统计
+  `status=ok`（unavailable / error 不计入分母）、`None` 指标不参与通过率分母、CSV 固定列与
+  `manual_rework` 留空、dry-run 不产生伪造指标。
+- **新增 `docs/COLLABORATION.md`**：工程协同架构（DAG / 角色工具 / 共享工作区写锁 / 角色预算 /
+  审查回炉 / 验证闭环）、能力边界（专业版特性、审批不放宽、写锁只保证进程内、验收不是正确性证明等）、
+  评测方法与指标口径。**不编造任何基准数字** —— 仓库未提交真实结果，结论需本地自己跑。
+- **`docs/ACCEPTANCE.md`**：fast 冒烟集补 v1.11.22 路径（`tests/core/test_multi_agent_engineering_wiring.py`、
+  `tests/planning/test_collab_benchmark_metrics.py`；工程编排器测试由 `pro` 门禁全量覆盖）。
+
+### 五、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.22** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- **本版商业扩展包有功能变更**（工程协同编排器）：已重建同号 `automind_pro-1.11.22` wheel 与两份
+  `.ampkg`（旧产物归档，`issue_license.py doctor` 12/12 全绿）；**本版不发布 PyPI 与三平台安装包**
+  （按 `RELEASE.md` 流程另行构建）。
+- 前端已用 v1.11.22 源码重建 `automind/static/dist/`（协同卡片 DAG / 角色预算 / 验证摘要）；本机
+  `.automind/extensions` 已装同号扩展包，运行中的旧进程需重启加载。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML）同步：新增 v1.11.22 速览、
+  「多智能体工程协同」章节、更新日志置顶本版条目。
+- 验证：`scripts/acceptance.py --profile full` **OK（exit 0）**；社区 `tests/` **3364 passed / 6 skipped**、
+  `pro/tests` **283 passed**、`issue_license.py doctor` **12/12 全绿**；`tsc --noEmit` 通过、前端产物引用完整；
+  两份手册 HTML 逐字节一致；`tests/test_version_consistency.py` 10 passed。
+
+## [1.11.21] - 2026-10-29
+
+**长任务自主闭环预算治理轮：给"验收未过 → 自动修复"这条链路装上独立预算（默认每个修复轮最多 1 步），
+主任务已部分交付时直接跳过 LLM 审查 / 验收 / 修复，修复轮不再续开预算窗口、只继承剩余 deadline ——
+终结"验收失败后的修复轮被跑成第二个完整任务"（真实历史：150 步 / 25 分钟 / 7.7M token 仍失败）；
+`AgentResult` 新增结构化状态并在历史 / 失败卡片上直接展示失败原因、可续跑与 LLM 调用次数；
+复用验收结论、简单任务与干净成功跳过昂贵闭环、保持前缀缓存以省 token；2 个脚本化长任务回归用例锁住跑飞形态；
+版本号与全部文档同步**
+
+### 一、修复轮独立预算：修复轮不再是"第二个完整任务"
+
+- **问题（真实数据驱动）**：自主闭环在"验收未过"后会进入修复轮，但此前修复轮沿用 `ex.max_iterations`
+  （默认 50 步 + 续步），且与主任务共用同一套续窗规则 —— 一个验收失败的完成计划可以被重新跑成
+  **150 步 / 25 分钟 / 7.7M token** 后仍失败。修复轮本意是"小修小补"，不是把整个任务重做一遍。
+- **新增配置 `auto_verify_fix_max_iterations`（默认 1）**：`ExecutionConfig` 与
+  「设置 → 🛡 执行治理」均可读写，`0` = 关闭自动修复。每个修复轮最多走该步数（默认 1 步），
+  `auto_verify_max_rounds` 仍决定修复轮次数。
+- **`_run_react` 支持独立 `max_iterations`**：签名新增 `max_iterations: int | None = None`，
+  不传时行为完全不变；修复轮传入 `fix_max`，主任务仍用原配置。
+- **修复轮不续窗、只继承剩余 deadline**：
+  - 修复轮前后置 `_closure_no_new_window = True`（finally 恢复），`_pre_call` 里的
+    `_roll_budget_window` 守卫条件增加该标记 —— 修复轮只能花当前窗口的剩余预算，用尽即收尾，
+    不会为"返工"再开一个新窗口；
+  - 修复轮**不修改** `_task_deadline`、不加 `_deadline_shift`，只继承主任务剩余的墙钟时间。
+- **主任务部分交付时跳过 LLM 审查 / 验收 / 修复**：`_run_impl` 在进入闭环前判定主任务停止原因
+  （`completed / partial / max_iterations / task_budget / budget_exhausted / no_progress / llm_unavailable`）。
+  `max_iterations / task_budget / budget_exhausted / no_progress / llm_unavailable` 属于**部分交付**：
+  不再调用 `_review_result` / `_loop_verify`、不进入修复轮，只追加"已完成工作保留，可续跑"的摘要，
+  `_verify_state` 记 `skipped=partial_main`，并推送 `autopilot stage=skipped reason=partial_main` 事件。
+- **简单任务跳过昂贵闭环**：`_is_simple_task()` 判定非 WORK / CODING、无写 / 执行类调用、无失败步骤的任务
+  （ReAct 无工具动作，或计划全部只读 SAFE 且成功）为简单任务，同样跳过审查 / 验收 / 修复轮，
+  只保留已完成结果 —— 不为一次轻量产出再烧一轮验收与修复。
+
+### 二、可诊断状态：AgentResult 结构化字段 + 历史 / 失败卡片
+
+- **`AgentResult` 新增字段（全部带默认值，向后兼容）**：
+  - `stop_reason`：`completed / max_iterations / task_budget / budget_exhausted / no_progress /
+    llm_unavailable / partial / …`；
+  - `error`：失败 / 部分交付的可读原因（server 落库前**再次脱敏 + 截断 1000 字符**）；
+  - `resumable`：是否有可续跑检查点（`bool(checkpoint_id) and status in ("partial","interrupted")`）；
+  - `budget_exhausted`：是否预算耗尽；
+  - `llm_calls`：本任务实际 LLM 调用次数（优先 `self.llm.usage.calls`）。
+- **server 任务记录**：新增 `_result_observability_fields()`，`/api/run` 与 `_ws_run` 两条完成任务记录
+  都写入上述字段（`task_complete` 事件经 `**record` 自动带上）；chat 记录补 `stop_reason="completed"` /
+  `resumable=False` / `budget_exhausted=False` / `llm_calls`；`task_error` / `task_cancelled` 尽量带
+  `resumable` / `llm_calls` / `stop_reason`。预算耗尽的部分交付仍走 `task_complete`，不额外造错误。
+- **前端（历史 / 失败卡片）**：
+  - 历史卡片按 `stop_reason` 显示中文徽标（步数上限 / 预算耗尽 / 无进展 / 模型不可达 / 部分交付…），
+    `resumable` 显示「⏸ 可续跑」，meta 显示「N 次调用」，详情弹窗与错误提示可复制；
+  - 失败气泡显示停止原因、`⏸ 已保存可续跑断点`、`N 次 LLM 调用`；
+    `task_error` / `task_complete(success=false)` 透传 `stop_reason / resumable / llm_calls`；
+    旧记录字段缺失时布局不变；
+  - 「检查现状后接着做」的既有语义不变（它不是断点续跑）。
+
+### 三、Token 优化：复用验收结论、跳过昂贵闭环、守住前缀缓存
+
+- **复用验收结论**：新增 `_quality_from_closure()`，从本次闭环已产出的 `review / verify` 构造
+  `QualityReport`；有结论时不再调用 `quality_assessor.evaluate()`，也不再多花一次 LLM 做反思
+  （`reflection = None`，刻意取舍：`self.reflexion.reflections` 与记忆不写入）。
+  验收环节 `available=False` 不算通过；`verify.done=True` 且 `review.approved is not False` 才算通过；
+  没有 review / verify 证据时返回 `None` 退回原路径；异常时同样退回原路径，不影响既有降级逻辑。
+- **干净成功不再反思**：无闭环结论、且 `quality.overall_pass and not quality.issues` 时跳过反思；
+  简单任务 / 部分交付用本地 `_simple_evaluate`（部分交付强制 `overall_pass=False`）。
+- **前缀缓存纪律**：不改 `build_initial_messages` 的稳定顺序（system → 工具目录 → 环境 → 记忆 → task），
+  修复轮不重写已有 system 消息、不把任务文本插到工具目录之前 —— 修复轮与主任务共享同一段可缓存前缀，
+  命中率不被"返工"打掉。
+
+### 四、长任务回归用例（脚本化，不依赖真实模型）
+
+- **`tests/planning/test_long_task_regressions.py`** 新增 2 条长任务回归：
+  1. **计划完成 + 验收未过**：主任务完成、verify 第一轮失败后，断言修复轮最多 1 次、每次 ≤1 步、
+     总 LLM 调用与总步数有明确上限、耗时 < 5s，最终仍有交付输出且 `stop_reason` / `error` 正确；
+  2. **反复验证无新产物**：脚本化 LLM 让 ReAct 反复读同一路径，断言读目标守卫触发、LLM 调用有上限、
+     迭代不超 `max_iterations`、耗时 < 5s，最终是部分交付而不是无限循环。
+- 两个用例用于锁住"不会 150/50 步、不会 287 次调用"的行为；配套 `tests/planning/test_autonomy_budget.py`
+  （部分交付短路 / 修复轮 1 步 / 不续窗 / 简单任务跳过 / 验收结论复用）与
+  `tests/core/test_agent_result_fields.py`（字段默认值 / server 映射与脱敏截断）。
+
+### 五、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.21** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML：`automind/static/manual.html` / `使用手册.html`）
+  同步：新增 v1.11.21 速览、8.33 修复轮预算与失败诊断，8.0 / 8.29 补"修复轮预算 / 失败原因 / 省 token"，
+  更新日志置顶本版条目。
+- 本版为**源码级补丁发版**（只改核心 agent / Web 前端 / 文档）：商业包同号 wheel 与两份
+  `.ampkg` 已重建（旧 wheel / 旧包归档，`issue_license.py doctor` 12/12 全绿）；
+  **不发布 PyPI 与三平台安装包**；商业扩展包无功能变更、公钥未轮换，旧许可证与旧 `.ampkg` 继续有效。
+- 验证：`scripts/acceptance.py --profile full` **OK（exit 0）**；社区 `tests/` **3324 passed / 6 skipped**，
+  `pro/tests` **256 passed**、`issue_license.py doctor` **12/12 全绿**；`tsc --noEmit` 通过、前端产物引用完整；
+  两份手册 HTML 哈希一致；`tests/test_version_consistency.py` 10 passed。
+
+## [1.11.20] - 2026-10-28
+
+**桌面版运行静默化（不再不定期弹出空终端窗口）；长任务韧性轮：浏览器短暂断线不再打断任务、工具执行期间
+界面持续显示进度、慢客户端不再拖住执行、按真实历史记录里「150/50 步、7.7M token 仍失败」的跑飞形态加入
+读目标守卫与续步上限、外层单步超时给工具内部超时让出 10% 余量；输入框新增「✨ 优化问题」把表达不清的
+问题改写成 AI 一次就能正确理解的执行请求；版本号与全部文档同步**
+
+### 一、静默运行：桌面版执行任务不再弹空终端窗口
+
+- **现象**：桌面版（WebView2 / `console=False` 的 GUI 进程）在启动、环境探测、执行任务、MCP 启动、
+  后台命令、沙箱、通知或安装依赖时，会**不定期弹出空终端窗口**，抢走焦点、打断用户正在做的事。
+- **根因**：GUI 进程没有可继承的控制台。任何未带 `CREATE_NO_WINDOW` 的 console 子进程都会由 Windows
+  新建一个控制台窗口。环境探测（pip / git / node / docker）、`terminal` / `pwsh` / 后台命令、沙箱、
+  PowerShell 通知、ffmpeg、测试进程、`pip install` 与 MCP stdio 服务器此前各自 spawn，没有统一处理。
+- **新增 `automind/core/proc.py`（静默子进程统一层）**：
+  - `silent_process_kwargs()` 只给 Windows 子进程加 `CREATE_NO_WINDOW`；调用方原有的
+    `CREATE_NEW_PROCESS_GROUP` 等标志全部保留，显式 `CREATE_NEW_CONSOLE` / `DETACHED_PROCESS` 时不动。
+  - `install_silent_subprocesses()` 在**无控制台**的 GUI 进程或 `AUTOMIND_SILENT_SUBPROCESS=1` 时
+    幂等包裹 `subprocess.Popen`，覆盖第三方库（如 MCP SDK / anyio）产生的子进程；
+    `AUTOMIND_SILENT_SUBPROCESS=0` 可关闭。
+  - 只加 `CREATE_NO_WINDOW`，**不设 SW_HIDE**：不会误隐藏用户主动打开的浏览器 / 编辑器等 GUI 程序。
+- **接线**：`terminal` / `pwsh` / 后台通道 / 沙箱 / 系统与媒体工具 / 通知 / 环境探测 / 依赖自检 /
+  测试运行器 / 更新器 / 桌面重启全部走统一 helper；桌面入口与 CLI 入口安装全局补丁。
+- **回归**：新增 `tests/core/test_silent_subprocess.py`，含 Windows 上「子进程 `GetConsoleWindow()==0`」
+  的真行为断言（非 Windows 自动 skip）。
+
+### 二、长任务流畅度与稳定性
+
+- **断线不再直接判死长任务（`LiveRun`）**：此前浏览器 WS 一断，`ws_endpoint` 立刻取消任务，30 分钟的
+  任务可能在 Wi-Fi 抖动 / 休眠唤醒 / 反代掐流的一瞬间全部作废。现在：
+  - 客户端在 `run` 里声明 `reattach: true` 时，任务会挂在 `LiveRun` 上下文上继续执行；
+  - 断线后默认保留 **120 秒**（`AUTOMIND_RUN_DETACH_GRACE_S`，0 = 关闭）等待重连；重连后 `bind`
+    收到 `run_state`，运行中则接管继续推送，已结束则回放终态与完整结果；
+  - 结束后结果默认保留 **600 秒**（`AUTOMIND_RUN_RESULT_TTL_S`）供刷新页面回收；
+  - 只有声明 `reattach` 的新前端启用该行为，旧页面 / 脚本 / 测试仍按原语义取消，避免行为漂移；
+  - 同一会话已有一个活跃任务时拒绝第二次启动，避免两个标签页同时改同一个会话克隆；
+  - **审批安全语义不变**：连接断开时该连接上的待决审批仍按拒绝处理（fail-closed）。
+- **慢客户端不再阻塞执行**：所有任务事件推送走带 **5 秒**超时（`AUTOMIND_WS_SEND_TIMEOUT_S`）的
+  `LiveRun.send()`；发送失败只丢当前非终态事件并记录日志，不会把正在跑的工具/模型调用拖住。
+- **工具执行期间界面不再像“卡住”**：ReAct 在每次工具调用前发 `step_action_start`，执行超过 5 秒
+  每 5 秒发 `tool_progress`（已运行秒数）；输入框上方的进度条持续显示「🛠 调用 X · N 秒」，
+  长命令 / 大文件 / 浏览器操作期间用户能明确区分“在跑”与“挂了”。
+- **防「无限验证」跑飞（真实数据驱动）**：本机任务历史里有过一次 **150/50 步、7.7M token、
+  25 分钟后仍以 max_iterations 失败**的记录，轨迹显示大量“读同一个文件 / 反复核对”的成功但无进展动作。
+  - `ReactProgressGuard` 新增**读目标守卫**：`file_read`（按 path）、`file_search`、`web_fetch`、
+    `web_search`、`http_request` 同一目标累计读取，第 6 次先提示、第 7 次起拦截（默认上限 8，
+    本地判定零 token），不同 offset/limit 的重复整文件读取也会被识别；
+  - ReAct 续步窗口默认从 **2 次降为 1 次**（最坏 100 步而非 150 步），续步时推送
+    `react_iterations_extended` 事件，界面可看到“已续加步数”；被拦的重复读会计入无进展，
+    连续无成功即自然停止续步，仍走既有「部分交付清单 + 断点续跑」。
+- **工具超时不再被外层抢先掐断（成功率）**：外层单步超时给工具内部超时留
+  `min(30s, 10%)` 余量（默认 300s → 330s）。`terminal` / `pwsh` 的内部超时因此先返回，
+  工具自己写的“已等多久、输出已丢弃、改用 `background=true` / 加大 timeout”回执与后台指引
+  真正能送到模型，而不是被外层 `wait_for` 取消后只剩一句笼统失败。
+
+### 三、输入框「✨ 优化问题」
+
+- **输入卡片新增「✨ 优化」按钮**：用户表达不清楚（过短、只有“帮我弄一下/看看/优化一下”这类泛化说法、
+  缺少对象与约束）时，点击即可把问题改写成结构化执行请求：
+  「目标 → 复述理解与拟采取步骤 → 列出必需信息 / 最多 3 个待确认问题 → 明确产出与验收 → 不确定处标假设」。
+- **模型改写 + 本地兜底**：新增 `POST /api/prompt/optimize`，用当前配置的模型改写（限时 30 秒，
+  最多 2 个并发，不消耗每日任务额度、不落盘用户文本）；模型未配置 / 超时 / 返回非 JSON 时
+  用本地规则兜底，按钮始终可用。清晰问题直接提示“已经比较清楚，可直接发送”，不硬加模板。
+- **先确认再采用**：弹窗并排展示原问题与可编辑的优化结果、改动点、待确认信息；只有点「采用并填入输入框」
+  才替换正文，可再次优化或取消。模糊输入时按钮会轻微高亮提示，不自动改写、不打断输入。
+- **回归**：`tests/core/test_prompt_optimizer.py`（模糊识别 / 规则结构 / LLM JSON / 坏 JSON 与超时兜底 /
+  长度上限 / 清晰问题不折腾）与 `tests/server/test_prompt_optimize_api.py`（400 / 成功 / LLM 异常兜底 /
+  无 LLM 兜底 / 路由快照）。
+
+### 四、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.20** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- 前端已重建 `automind/static/dist/`（新增「✨ 优化」按钮与问题优化弹窗）；TS 类型检查与产物
+  引用完整性校验通过。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML：`automind/static/manual.html` / `使用手册.html`）
+  同步：新增 v1.11.20 速览、输入区「✨ 优化」、8.32 问题优化与静默运行、更新日志置顶本版条目。
+- 本版为**源码级补丁发版**：核心 / 商业包 / Web / 安装器 / 手册版本号已同步，商业包同号 wheel 与两份
+  `.ampkg` 已重建（旧 wheel / 旧包已归档，`issue_license.py doctor` 12/12 全绿）；PyPI wheel 与三平台
+  安装包按 `RELEASE.md` 的发布流程另行构建（本版商业扩展包无功能变更，公钥未轮换）。
+- 验收：`scripts/acceptance.py --profile full` **全绿（exit 0）**；社区 `tests/` **3287 passed / 6 skipped**，
+  `pro/tests` **256 passed**、`issue_license.py doctor` **12/12 全绿**；`scripts/acceptance.py --profile static`
+  的 version / lint / web 门禁通过；两份手册 HTML 哈希一致，前端产物引用完整。
+
+## [1.11.19] - 2026-10-25
+
+**运行底座治理轮：为 Agent 工具执行链路补上「可持久、可验证、可解释」的治理审计账本与分派级治理闸门
+（堵住 workflow / skill / direct 三条绕过人工审批的旁路）；发布前验收做成一条可重复执行、可机器判读、
+不会误伤的 `scripts/acceptance.py` 门禁（附社区版强制模式与残留文件安全清理）；修复 Agent 交付图片
+无法预览（二进制被当 UTF-8 文本下发）；版本号与全部文档同步**
+
+### 一、运行底座治理：持久化审计账本 + 分派级治理闸门 + 治理中心
+
+- **问题（治理证据缺失 + 审批旁路）**：权限审批结果此前只存在内存
+  （`PermissionEngine.audit_log`），进程一重启全丢 —— Agent 在无人值守通道上放行了什么、拦截了什么、
+  有没有绕过审批，事后没有任何证据；更严重的是 ReAct / Plan 在执行器内部逐次审批，而
+  **工作流 `tool` 步骤、技能内部调用、服务端/库直接 `registry.dispatch`** 这三条链路不经过执行器，
+  高危工具在 `ask` 模式下也能被静默执行。
+- **新增 `automind/core/governance.py`（治理审计账本）**：
+  - 落盘 `<数据目录>/governance/ledger-YYYYMMDD.jsonl`（开发模式即 `./.automind/governance/`），
+    一条记录一行 JSON；单文件 8MB 或跨天轮转（同日后缀 `-2/-3…`），最多保留 10 个文件（约 80MB 封顶）。
+  - **按序哈希链**：每条 `hash = sha256(去掉 hash 后的紧凑规范 JSON)`、`prev` = 上一条 hash；
+    `state.json` 记录 `{seq, last_hash, file}`，跨文件轮转与跨进程重启链/序号都连续；
+    `verify_chain()` 能指出被改动/删除/插入的断点（`broken_at` + expected/actual）。
+  - 两类记录字段固定：`kind=decision`（allow / ask_user / deny / approved / denied / modified /
+    error / allow_unattended / deny_unattended）与 `kind=execution`（success / duration_ms / error），
+    公共字段含 seq / ts / session / tool / tier / risk / reason / source / governed / params / call_id。
+  - **脱敏与截断**：params 的敏感键名（api_key / token / password / secret 等）整值打码，其余值先过
+    `core/redact.redact_secrets` 再截断到 200 字符、最多 12 个键 —— 文件内容与密钥明文不落盘。
+  - **fail-open**：账本故障只记 `governance_write_failed` warning、返回 None，绝不把「写不进审计」
+    变成任务失败；并发写由进程内锁保护。可用 `AUTOMIND_GOVERNANCE_AUDIT=0` 关闭，另有
+    `AUTOMIND_GOVERNANCE_DIR` / `_MAX_FILE_BYTES` / `_MAX_FILES` 可调。
+- **分派级治理闸门（堵住旁路）**：`ToolRegistry` 新增 `set_governor()`；Agent 在构造与会话克隆时把
+  `governance.make_unattended_governor()` 装在**共享的**工具注册表上。`dispatch()` 在参数校验通过、
+  真正执行之前统一问闸门：
+  - 来源为 `react` / `plan` 的调用已在执行器里逐次人工审批，**不再二次审批**（必须避免重复弹窗）；
+  - 来源为 `direct` / `workflow` / `skill` 的**无人值守通道**：用与 `PermissionEngine` 同一套
+    `assess_risk` / `effective_tier` 算有效等级；有效等级 DANGEROUS 且审批模式不是「全批准」时
+    **失败关闭**（拒绝执行并返回可操作原因），其余放行；每次判定与执行都落账本
+    （`source` 如实记录，`governed` 标记是否经过人工审批门控）。
+  - 风险评估异常时退回工具声明等级继续判定（算不出风险 ≠ 放行高危），闸门自身异常按 fail-open
+    处理（治理故障不能变成新的可用性单点）。裸 `ToolRegistry`（单测 / 库调用）不装闸门，
+    既有行为与测试零变化。
+- **执行器接线**：ReAct `_gate` 与 PlanExecutor 的审批分支把最终决策（allow / deny / approved /
+  denied / modified / 异常）写进账本并绑定 `source=react|plan`；workflow 工具步骤绑定
+  `source=workflow`；未配置权限引擎的 ReAct（仅测试 / 库用法）**保持既有行为**，但会留下
+  `governed=false` 的记录与 warning，不再完全静默。
+- **治理中心（社区版可用）**：新增 4 个只读接口（与 `/api/audit` 同级管理员守卫，回环或
+  `X-Admin-Token`，fail-closed）：
+  `GET /api/governance/summary`（账本统计 + 实时策略快照 + 有界链路校验）、
+  `GET /api/governance/audit`（tool / decision / kind / source / session 过滤 + limit≤1000，非法参数 400）、
+  `GET /api/governance/verify`（完整哈希链校验，篡改时给出断点与 expected/actual）、
+  `GET /api/governance/export`（JSON 导出；PDF 导出仍属专业版 `audit_export`）。
+  读取全部 `asyncio.to_thread`，模块缺失 503、读取故障 500 + 可操作错误，不拖垮 server。
+- **界面**：「🛡️ 安全审计」页新增「🏛 运行底座治理」卡片 —— 治理策略快照（审批模式 / 工作区隔离 /
+  写冲突策略 / 审计开关 / 工具风险分级 / 高危工具清单 / 版本与数据目录）、账本状态（条数 / 文件 /
+  体积 / 最近序号 / 链路校验结果）与「🔗 验证审计链」「⬇ 导出 JSON」按钮；列表改为消费持久化账本，
+  支持来源与决策筛选；账本为空或治理接口 403/503 时回退内存审计并明确提示，不出现空白页/无限转圈；
+  账本为取证数据，界面不提供清空（导出后可离线留存）。
+
+### 二、回归测试验收能力：一条命令的发布门禁 + 社区版强制模式
+
+- **新增 `scripts/acceptance.py`（发布前最后一道门）**：`--profile static|fast|full|release`，
+  依次执行 version（版本一致性）/ lint（ruff）/ tests（按档位选 pytest 子集，全量档为 `tests/`）/
+  pro（商业扩展包测试）/ web（`tsc --noEmit` + 前端构建产物完整性，release 档校验产物不比源码旧）/
+  hygiene（敏感泄漏扫描、`git diff --check`、残留测试文件扫描）六类门禁；每个子进程带 timeout，
+  失败给出可复现命令；`--json` / `--report` 输出机器可读与 Markdown 报告，有 fail 退出码 1。
+- **验收环境可复现（`AUTOMIND_FORCE_COMMUNITY=1`）**：本机若安装了有效商业许可证，社区版权限 /
+  特性门控类用例会大面积失败，验收结论不可信。`automind/core/edition.py` 新增**只降不升**的强制
+  社区版开关：取真值时跳过商业扩展加载（即使 pro 可导入、许可证有效也稳定返回社区版），
+  不影响既有 `AUTOMIND_LICENSE` 语义；验收脚本用它 + 临时 `AUTOMIND_DATA_DIR` 跑测试，
+  不修改用户 home 下的许可证文件、不污染仓库 `.automind`。
+- **交付后残留清理（安全优先）**：hygiene 门禁集中定义残留白名单（`_perfcheck/`、根目录 `probe_*`、
+  `a.txt` / `out.txt` / `err.txt`、`.workflow_test_tmp/`、`connector-verify-*/`、`.pytest_cache/`、
+  `.ruff_cache/`、根 `pytest_out.txt` / `pytest_*.log`、`.dsh_*` 等）；默认只告警并列出，
+  `--clean-dry-run` 打印将删除清单，`--clean` 才实际删除，且删除前用 git 校验「未被跟踪」、
+  逐条打印路径 —— **只清临时产物，绝不误伤源码 / 已跟踪文件**。
+- **CI**：新增轻量 `acceptance` 作业（static 档 = 版本一致性 + lint-free 的静态卫生门禁 + 报告
+  artifact），与既有跨平台测试 / 商业包 / 打包作业并行，不改动既有作业语义。
+- **文档**：新增 `docs/ACCEPTANCE.md`（门禁矩阵、命令示例、退出码与报告、社区版强制模式、
+  残留清理策略与边界、已知限制：不代替 CI 跨平台矩阵等）。
+
+### 三、修复：Agent 交付图片无法预览
+
+- **现象**：Agent 用 `present` 声明的交付图片（png / jpg / gif / webp / bmp / ico）点开后空白或乱码，
+  摘要产物与右栏的预览入口同样打不开。
+- **根因**：`GET /api/preview/file` 对**所有**文件 `read_text(encoding="utf-8", errors="replace")`
+  后以 `text/plain` 下发 —— PNG 的 `\x89` 被 UTF-8 解码成替换字符（实测响应体 75B ≠ 磁盘 67B），
+  前端 `PreviewModal` 又用 iframe 打开它，浏览器只能收到一段乱码文本。
+- **修复**：
+  - 后端按扩展名识别图片（png / jpg / jpeg / gif / webp / bmp / ico / avif），**原始字节直出**并给出
+    正确 `Content-Type` + `Content-Length` + `Cache-Control: no-store`（交付文件可能随时被 Agent 改写）；
+    先 `stat` 再读，超过 25MB 返回 413 与可操作提示（不再整文件读入内存）；.html / .svg / 文本的
+    既有行为保持不变。
+  - 预览允许范围保持最小：项目根 + 当前会话隔离工作副本（开启 `isolate_workspace` 时交付物在副本里
+    也能预览），目录穿越 403、敏感文件（`.env` / 密钥 / `.automind_config.json`）403、不存在 404 均保留。
+  - 前端 `PreviewModal` 图片分支改用 `<img>`（`object-fit: contain`、最大 72vh、棋盘格底便于看透明 PNG、
+    `onError` 给出「图片加载失败」与「↗ 新标签打开」），标题区分「🖼 图片预览」/「🔍 HTML 预览」；
+    HTML / SVG / 内联截图仍走原沙箱 iframe，`HtmlPreview` 接口与其它调用方零改动。
+- **回归测试**：新增 `tests/server/test_preview_image.py` —— 真实 PNG 响应与磁盘**逐字节相等**（核心断言）、
+  7 种图片 MIME、大小写扩展名、svg/html/txt/md 不回归、越界与敏感文件 403、不存在 404、超限 413、
+  隔离工作副本可预览、前端源码级 `<img>` 断言；相邻回归（敏感路径 / 预览契约 / 工作区回滚）全通过。
+
+### 四、版本与验证
+
+- 核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.19** —— 六处版本声明由
+  `tests/test_version_consistency.py` 守住（`automind.__version__` 为唯一数据源）。
+- 前端已重建 `automind/static/dist`（新增治理卡片与图片预览弹窗随界面生效），产物引用完整性校验通过。
+- 使用手册（`使用手册.md` 与两份逐字节相同的 HTML：`automind/static/manual.html` / `使用手册.html`）
+  同步更新：新增 v1.11.19 速览；5.3 审计日志补「运行底座治理」；8.3 预览补图片预览；新增 8.31
+  「运行底座治理与验收门禁」；13 更新日志置顶本版条目；`docs/GOVERNANCE.md` 增补运行底座治理章节。
+- 全量回归（`python scripts/acceptance.py --profile full`，社区版强制模式 + 临时数据目录 + 隔离 HOME）：
+  **version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）**，退出码 0；
+  其中 `tests/` **3185 passed / 4 skipped**（另二趟商业激活用例 **15 passed**）、`pro/tests` **256 passed**、
+  `ruff check .` 通过、`tsc --noEmit` 与前端产物完整性通过；`issue_license.py doctor` **12/12 全绿**。
+  新增治理/预览/验收相关用例 **185 条**（`tests/core/test_governance.py` 29、
+  `tests/tools/test_dispatch_governance.py` 17、`tests/server/test_governance_api.py` 53、
+  `tests/server/test_preview_image.py` 24、`tests/test_acceptance_gate.py` 41、
+  `tests/core/test_edition_force_community.py` 21）。
+- ⚠️ 本版为**治理与修复轮**：pro 仅版本号同步、无功能变更（同号 wheel 与两份 `.ampkg` 已按流程重建，
+  `doctor` 12/12 全绿，旧包归档）；PyPI / 三平台安装包发布按 `RELEASE.md` 流程执行。
+
 ## [1.11.18] - 2026-10-25
 
 **测评报告修复轮：评测执行器改无人值守审批并按任务超时硬性收敛（修复标准工具赛道「终端被拒 → 模型反复

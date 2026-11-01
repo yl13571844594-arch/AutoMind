@@ -36,6 +36,20 @@ if not getattr(sys, "frozen", False):
     if _ROOT not in sys.path:
         sys.path.insert(0, _ROOT)
 
+# v1.11.20：静默子进程 —— 必须在替换 sys.stdout 之前安装：
+# 检测"有没有控制台"要看 sys.stdout 是否为 None（冻结 GUI 形态），换成
+# _NullStdIO 之后就看不出来了。装上后所有子进程（探活/命令/更新器）都不再
+# 在桌面上闪空终端窗口。静默化只是体验优化，任何失败都不该拖垮启动。
+try:
+    from automind.core.proc import install_silent_subprocesses as _install_silent
+    from automind.core.proc import silent_process_kwargs as _silent_kwargs
+
+    _install_silent()
+except Exception:  # pragma: no cover - 防御性
+    def _silent_kwargs() -> dict:
+        """静默化模块不可用时的空实现（保持启动可用）。"""
+        return {}
+
 # ── 标准流兜底（双击启动的根因修复）────────────────────
 # console=False 的冻结 GUI 进程从资源管理器双击启动时 sys.stdout/stderr
 # 为 None：uvicorn 配置日志会调 sys.stdout.isatty() → AttributeError，
@@ -689,7 +703,9 @@ def main() -> None:
         try:   # 冻结模式 sys.executable 即 AutoMind.exe；源码模式重跑脚本
             args_tail = sys.argv[1:] if getattr(sys, "frozen", False) \
                 else sys.argv
-            subprocess.Popen([sys.executable, *args_tail])  # noqa: S603
+            # v1.11.20：兼容模式重启同样是"后台重开自己"，别闪一个终端窗口
+            subprocess.Popen([sys.executable, *args_tail],  # noqa: S603
+                             **_silent_kwargs())
         except Exception as e:
             _log(f"兼容模式重启失败：{e}")
         quit_app()

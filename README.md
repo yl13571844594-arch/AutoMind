@@ -13,6 +13,7 @@
 [![Downloads](https://static.pepy.tech/badge/automind-agent)](https://pepy.tech/project/automind-agent)
 [![Release](https://img.shields.io/github/v/release/yl13571844594-arch/AutoMind?logo=github)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+[![Benchmark](https://img.shields.io/badge/benchmark-100%25%20(18%2F18)-brightgreen)](docs/BENCHMARK_v1.11.24.md)
 
 [English](README.en.md) · [使用手册](使用手册.md) · [更新日志](CHANGELOG.md) · [下载安装包](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 
@@ -29,26 +30,88 @@
 > **数据不出本机。** 模型 API Key 存在本地配置文件，任务历史存在本地 SQLite，
 > 知识库向量索引存在本地目录 —— 除了你自己配置的模型服务商，不向任何第三方发送数据。
 
-## ✨ v1.11.18 更新亮点
+## 📊 真实能力测评：社区版 100% 通过（可复跑，失败也公开）
 
-- 🛡 **评测 / 无人值守审批，修掉"终端被拒 → 反复重试 → 超时爆 Token"**：评测执行器此前把审批模式配成
-  `auto`，`terminal` 的敏感调用在**没有审批通道**的评测进程里被按拒绝处理，模型只能反复重试 ——
-  标准工具赛道 `smoke_run_command` 因此超时 **237.2s**、烧掉 **436,698** token。现在评测默认
-  **`approve_all` 无人值守审批**（`--approval-mode` 可覆盖，报告 notes 标注口径），执行器同时按任务
-  `timeout_seconds` **硬性收敛**，评测不再挂死。
-- 🪙 **中文写入一次完成**：`file_write` 成功后**从磁盘回读校验**，回执带
-  `size_bytes` / `chars` / `encoding` / `verified` / `readback_matches` —— 写好就是"已验证"，模型不需要再
-  `file_read` 或开终端复核（这是简单任务 Token 超限的主因：`smoke_chinese_content` 两条赛道
-  180,170 / 139,053 token）。工具描述与编程提示词也明确支持中文文件名 / 内容（UTF-8），
-  并加入"简单任务验证一次即收尾"的纪律。
-- 🧰 **多任务与协作能力补齐**：`pwsh` 新增原生后台通道（`background=true` 立即返回 `task_id`，用
-  `terminal_background` poll / output / list / kill，长耗时 PowerShell 命令不再同步等死）；
-  `subagent_list` 支持 `agent_id` 查看单个子智能体的**完整输出**（超长标注截断）；
-  新增团队共享任务工具 **`team_task`**（list / summary / create / update / claim / comment），
-  接入团队任务看板 SQLite 存储并实时广播到 Web 看板 —— Agent 可以自己查重、认领、更新状态、留痕，
-  和人在同一块看板上协作。
-- 🚀 **v1.11.18 发布**：核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.18**；
-  本版为补丁发版，商业扩展包与前端无功能变更；版本一致性由 `tests/test_version_consistency.py` 守住（六处同号）。
+> 不做只挑成功片的演示。v1.11.24 起用**固定任务 + 固定断言 + 隔离环境**跑真实测评：
+> 6 个工程任务（需求分析 / 修 bug / 多文件 Python 包 / 数据汇总 / 文档产出 / 诚实与安全）×
+> 3 轮，社区版核心评测 **18/18 全部通过（100%）**，3 轮总耗时 **331.38s**、
+> Token **576,476**、估算成本 **$0.391**（估算值，不是账单）；数据完整性 **82/82 cell**、
+> `validation.ok=true`，反向探针（故意不可能满足的断言）**3/3 如实失败**，证明断言链路真的在工作。
+
+| 社区版实测（v1.11.24b，2026-10-31） | 结果 |
+|---|---|
+| 6 个计分任务 × 3 轮通过率 | **100.0%（18/18）** |
+| 3 轮总耗时 / Token / 估算成本 | **331.38s** / **576,476** / **$0.391097**（估算） |
+| 数据完整性 | **82/82 cell**，`validation.ok=true` |
+| 反向探针 | **3/3 passed**（故意失败 = 断言链路正常） |
+| 模型 / 环境 | deepseek/deepseek-flash（temperature 0.7，未固定为 0）· Windows 10 19045 · Python 3.12 · 单机 |
+
+**诚实边界（请和数字一起读）**：单模型 / 单机、核心评测 3 轮、协作矩阵每个 task×mode 仅 1 次（n=1），
+**不构成统计显著结论**，不做版本或模型排名；协作矩阵存在真实失败（例如 community `single` 1/4、
+pro `multi` 0/4、enterprise `multi` 1/4），我们**原样保留**，未删除、未弱化。完整方法、全部失败案例、
+脱敏原始数据与复跑命令见 [基准报告](docs/BENCHMARK_v1.11.24.md) 与
+[docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md)。商业版能力需单独的 `automind-pro`
+扩展包与有效许可证，**不随社区版分发**。
+
+## ✨ v1.11.25 更新亮点
+
+- 🤝 **多智能体协同修复（PRO 与 ENTERPRISE 完整 4×multi 均 4/4）**：修复协同执行链路 —— 产物硬断言只认任务明确要求的路径
+  （顺带声称的 `requirements.txt` / `pytest.ini` 降 warning）、最终交付只整合 coder / writer（排除
+  planner / reviewer 过程文本并遵守长度约束）、证据优先验证（测试 / 产物 / 长度，不靠模型自述）、
+  写角色失败一次有界自愈、角色默认预算 12 步 / 120k → **30 步 / 300k token**、`max_iterations` 但产物
+  已落盘且验证通过时回收步骤、失败原因逐节点可解释。
+  **实测（单轮 n=1，不构成统计显著结论）**：v1.11.24 基线 PRO **0/4**、ENT **1/4**；v1.11.25
+  PRO 完整 4×multi **4/4**（run `20261101-0830-final-pro`）与 ENTERPRISE 完整 4×multi **4/4**
+  （**独立 run** `20261101-0840-final-real`，未拼接）；角色预算迭代 12/120k→3/4、20/200k→3/4、
+  30/300k→4/4（失败轨迹保留）。**残余风险**：30 步/300k 仍偏紧（额外样本 305,845/300,000）、
+  预算耗尽路径行级 token/calls 疑似少记、Windows multi 检查点文件名含 `:` 保存失败导致 benchmark
+  会话续跑不可用（非 8765 正常会话）。
+- 🧭 **已交付不提示续跑（修复）**：主任务预算与收尾预算分离 —— 主交付完成后收尾预算耗尽不再标记 partial /
+  不再提示续跑（`resumable=false`、检查点按 completed 记录）；真正 partial（主任务预算耗尽）仍可续跑。
+  新增 **12 个离线用例**（`tests/planning/test_artifact_scope_and_post_budget.py`，本地 **12 passed**）。
+- 🌐 **Web 评测取当前模型（沿用 v1.11.24）**：`/api/eval/run` 未显式指定时取当前已接入模型的
+  provider / model / api_base 与已保存 Key；无可用 Key 返回 409（配置问题，不是模型失败）；
+  响应只报告来源、**不返回 Key**；CLI 默认行为不变。本版沿用该修复，无新增改动。
+- 📊 **实测结果（v1.11.25，真实运行；单轮 n=1）**：PRO 4×multi **4/4**（总耗时 **512.69s**、
+  Token **648,081**、LLM 调用 **97**；analysis 66,952ms/33,210 tok、codegen 210,780ms/343,633、
+  bugfix 102,563ms/99,155、multi_file 131,984ms/172,083）；ENTERPRISE 4×multi **4/4**
+  （**独立 run** `20261101-0840-final-real`：总耗时 **757.94s**、Token **1,069,092**、LLM 调用 **133**；
+  verification 4/4、artifacts 3/3）。两个**独立完整 run，不拼接**；targeted 2/2 与旧 full 2/2 仅作补充证据。
+  **单模型 / 单机 / 每组合 n=1，不构成统计显著结论**，也不做版本或模型排名；
+  证据在 `.automind/multi_v11125/raw/`（gitignored），失败与中间轮次记录保留未删。
+- 🚀 **v1.11.25 发布准备**：核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.25**；
+  **本版仅做社区版发布准备**（社区 wheel / sdist / 安装包按发布流程验收），**商业版不发布**
+  （`pro` 仅版本号同步、不重建 / 不发布 Pro wheel 与 `.ampkg`）；版本一致性由
+  `tests/test_version_consistency.py` 守住（六处同号）。**社区版发布物已构建**：wheel 1,972,619 B /
+  sdist 1,962,058 B / src.zip 6,706,498 B（sha256 见 [RELEASE.md](RELEASE.md)），
+  `build_community` 审计通过、`twine check` **PASSED**；最终 full acceptance **OK exit 0**
+  （社区 **3529 passed / 6 skipped**、**pro 326 passed**、web/static 通过）。
+
+## ✨ v1.11.24 更新亮点
+
+- 🧪 **真实能力测评：核心综合套件**：新增 `automind/eval/suites/comprehensive.yml` —— **6 个评分任务**
+  （纯文本分析 / 小 bug 修复 / 多文件工程 / 数据 CSV 汇总 / 文档报告产出 / 诚实与安全）+ **1 个
+  `expect_fail` 反向探针**（故意不可能满足的断言必须失败，证明断言没有被静默跳过）。任务自包含、无外网、
+  不写仓库，单任务 300s 上限；断言真实数值与产物，而不只是"看起来完成了"。
+- 🧬 **版本隔离测评（社区 / 专业 / 企业）**：新增 `scripts/edition_benchmark.py` 与
+  `scripts/benchmark_report.py` —— 默认 dry-run（不联网）；`--live` 才启动**三个隔离 server**
+  （community / pro / enterprise，各自独立数据目录 / HOME / 项目；community 强制社区版、
+  pro/ent 安装 staging 商业包 + 临时许可证），跑 comprehensive **3 轮** + 协作矩阵（single / multi /
+  subagent），结束后清理进程与许可证。报告校验 **6 任务 × 3 版本 × 3 重复** 与协作 cell 完整性
+  （缺失即失败），汇总 JSON / CSV / Markdown，并对 Key / 绝对路径 / 许可证脱敏。
+- 🧭 **Web 评测取当前模型（修复）**：此前工作台已接入 deepseek-flash，但 `/api/eval/run` 的 dry-run target
+  仍报 `openai/gpt-4o` 未配置。现在评测入口会取**当前已接入模型**（provider / model / api_base）与已保存
+  Key；没有可用 Key 时返回 409（配置问题，不是模型失败）；响应只报告来源，**不返回 Key**；CLI 默认行为不变。
+- 📊 **真实能力测评已完成（v1.11.24b，2026-10-31）**：核心 6 任务 × 3 版本 × 3 轮 **54/54 全通过**
+  （每版 18/18，100%）；隔离探测显示 **社区 0/27、专业 19/27、企业 27/27** 商业 feature 生效，
+  扩展包 1.11.24 安装成功、许可证 `active`；协作矩阵**如实披露**：`subagent` 在 pro/enterprise 均 4/4，
+  但 `pro multi 0/4`、`enterprise multi 1/4`（真实失败，非统计显著结论），`community single` 1/4。
+  数据完整性 **82/82 cell**、`validation.ok=true`；完整报告 `docs/BENCHMARK_v1.11.24.md`，
+  脱敏数据（含隔离矩阵 / 逐 cell 矩阵 / SHA256SUMS）在 `docs/benchmark/v1.11.24/`。
+- 🚀 **v1.11.24 发布准备**：核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.24**；
+  **本版仅做社区版发布准备**（社区 wheel / sdist / 安装包按发布流程验收），**商业版不发布**
+  （`pro` 仅版本号同步、不重建 / 不发布 Pro wheel 与 `.ampkg`）；版本一致性由
+  `tests/test_version_consistency.py` 守住（六处同号）。
 
 ## 界面一览
 
@@ -80,6 +143,13 @@
 | 分层规划 · 符号推理 · 自我纠错 · 记忆系统 | ✅ | ✅ | ✅ |
 | Web 工作台 + CLI + 自主任务闭环 | ✅ | ✅ | ✅ |
 | 工具审批 · 安全审计 · 鉴权 / 限流 / 脱敏 | ✅ | ✅ | ✅ |
+| 🏛 运行底座治理账本 · 分派级治理闸门 · 治理中心（v1.11.19） | ✅ | ✅ | ✅ |
+| 🤝 多智能体协同修复 · 已交付不提示续跑（v1.11.25） | ✅ | ✅ | ✅ |
+| 🧪 真实能力测评 · 版本隔离（社区/专业/企业）· Web 评测取当前模型（v1.11.24） | ✅ | ✅ | ✅ |
+| 🧪 并发审计与压力测试 · 团队看板 / 工程协同 / 子智能体 / WS 可复跑（v1.11.23） | ✅ | ✅ | ✅ |
+| 🤝 多智能体工程团队 · DAG 并行 · 共享工作区写锁 · 角色预算 · 验证闭环（v1.11.22） | — | ✅ | ✅ |
+| 🧯 长任务修复轮预算 · 结构化失败原因 · 省 token（v1.11.21） | ✅ | ✅ | ✅ |
+| ✨ 输入问题优化 · 🪟 桌面静默运行 · 断线保活（v1.11.20） | ✅ | ✅ | ✅ |
 | 基础统计（任务/成功率/Token/工具排行） | ✅ | ✅ | ✅ |
 | 📚 RAG 知识库（分段/embedding/对话自动检索） | 5 文档·10MB | 无限·200MB | 全部不限 |
 | 📚 多知识库 · Reranker · 引用溯源 · 定时重嵌入 | — | ✅ | ✅ |
@@ -111,7 +181,7 @@
 > 试用期 `--days`、离线 CRL 吊销、周期复检 + 宽限期、公钥平滑轮换** 等运营能力。
 > 拿到发行方的 `.ampkg` 一键升级包后，在「设置 → ⭐ 升级专业版 / 企业版」里把文件拖进
 > 「⚡ 一键升级」即完成**装包 + 激活** —— 不需要 pip、不需要改环境变量、不需要管理员权限。
-> **升级换发与主程序同号版本的 `.ampkg`（当前 v1.11.18；本版未改商业扩展包，已换发 v1.11.17 的客户可继续使用）**（公钥未轮换 → 旧许可证继续有效；旧 `.ampkg` 仍可激活，
+> **升级换发与主程序同号版本的 `.ampkg`（当前 v1.11.25；本版商业版不发布，`pro` 仅版本号同步、无功能变更，无需换发）**（公钥未轮换 → 旧许可证继续有效；旧 `.ampkg` 仍可激活，
 > 但只有当前版本的包内含 v3 许可证 / 机器绑定 / CRL / 周期复检等新扩展能力）。
 > 发行侧出包前用 `issue_license.py doctor`（12 项）自检公钥 / 私钥 / wheel / 版本 / CRL / 轮换 / 复检一致性。
 > 完整流程见 [docs/COMMERCIAL_ACTIVATION.md](docs/COMMERCIAL_ACTIVATION.md)，
@@ -134,6 +204,27 @@
 - 🙋 **询问** — 除只读工具外，每次工具调用前弹窗请求人工批准。
 - ⚡ **自动**（默认）— 自动批准普通/低风险工具，仅高危操作需确认。
 - ✅ **全批准** — 跳过所有工具审批，完全自主运行（慎用）。
+
+## 🏛 运行底座治理（v1.11.19，社区版起）
+
+Agent 运行时到底执行了什么、谁批准的、有没有绕过审批 —— 现在有**可持久、可校验**的答案。
+
+- **治理审计账本**：每次治理决策（allow / deny / approved / denied / modified / error /
+  allow_unattended / deny_unattended）与每次工具执行都写入 `<数据目录>/governance/ledger-*.jsonl`；
+  按序哈希链，`verify_chain()` 可定位被改动 / 删除 / 插入的断点；参数脱敏截断（内容与密钥不落盘）；
+  写入 fail-open（账本故障不影响任务），`AUTOMIND_GOVERNANCE_AUDIT=0` 可关闭。
+- **分派级治理闸门**：审批只在 ReAct / Plan 内部做的时代结束 —— 工作流 `tool` 步骤、技能内部调用、
+  服务端/库直接 `registry.dispatch` 三条链路统一经过闸门：有效等级 DANGEROUS 且审批模式不是
+  「全批准」时**失败关闭**并留痕；ReAct / Plan 已人工审批不重复弹窗；裸 `ToolRegistry` 行为零变化。
+- **治理中心**：「🛡️ 安全审计」页顶部「🏛 运行底座治理」卡片 —— 策略快照、账本状态、
+  「🔗 验证审计链」「⬇ 导出 JSON」；对应接口
+  `GET /api/governance/{summary,audit,verify,export}`（管理员守卫、fail-closed）。
+  账本为取证数据，界面不提供清空；导出 JSON 后可离线留存。
+- **发布验收门禁**：`python scripts/acceptance.py --profile full` 一条命令跑
+  version / lint / tests / pro / web / hygiene 六类门禁并出 JSON+Markdown 报告；
+  本机带商业许可证时可用 `AUTOMIND_FORCE_COMMUNITY=1` 稳定复现社区版结论；
+  残留清理默认 dry-run、只删未被 git 跟踪的白名单临时产物（**绝不误伤源码**）。
+  详见 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) 与 [docs/GOVERNANCE.md](docs/GOVERNANCE.md)。
 
 ## 循环工程 / 定时任务 / 统计
 
@@ -184,16 +275,26 @@ cd AutoMind
 pip install -e ".[web]"
 
 # 方式 C：从 PyPI 安装
-pip install "automind-agent[web]==1.11.18"     # 当前版本 · Web + OpenAI 兼容后端
-# 升级：pip install -U "automind-agent[web]==1.11.18"；全部模型后端换成 [full]
+pip install "automind-agent[web]"               # 当前 PyPI 最新版 · Web + OpenAI 兼容后端
+# 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
 ```
 
-> ✅ **v1.11.18 已发布**：PyPI 已同步，`pip install -U "automind-agent[web]"` 拿到的就是本版本；
+> ✅ **v1.11.25 为社区版发布准备版本**：本版修复多智能体协同执行链路与"已交付仍提示续跑"的体验问题，
+> 并沿用 v1.11.24 的 Web 评测取当前模型/Key 修复。**实测（单轮 n=1，不构成统计显著结论）**：
+> PRO 多智能体完整 4×multi **4/4**（v1.11.24 基线 0/4；512.69s / 648,081 tok / 97 次 LLM 调用）；
+> ENTERPRISE 完整 4×multi **4/4**（**独立 run** `20261101-0840-final-real`；757.94s / 1,069,092 tok /
+> 133 次 LLM 调用；未拼接）；v1.11.24 基线 ENT 1/4，角色预算迭代 12/120k→3/4、20/200k→3/4、30/300k→4/4；
+> 已交付不提示续跑 **12 个离线用例通过**；社区发布物已构建并通过 build_community 审计 / twine check，
+> 最终 full acceptance **OK exit 0**（社区 3529 passed / 6 skipped、pro 326 passed）。上一版 v1.11.24 的
+> 真实能力测评已完成：核心 54/54、82/82 cell 完整，协作矩阵真实失败已如实披露
+> （见 [基准报告](docs/BENCHMARK_v1.11.24.md)）。
+> **商业版不发布**（`pro` 仅版本号同步）；社区 wheel / sdist 与三平台安装包按
+> [RELEASE.md](RELEASE.md) 流程验收，发布后 PyPI 上的最新版即为 1.11.25。
 > 桌面安装包见 [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > （Windows `.exe` 已代码签名 · macOS `.dmg` 通用二进制 · Linux `.deb`），
 > 三平台包的 `SHA256SUMS` 随 Release 一并提供，可直接 `sha256sum -c` 校验。
 >
-> 内网 / 离线环境无法访问 PyPI 时，用 `pip download "automind-agent[web]==1.11.18"` 在联网机备好
+> 内网 / 离线环境无法访问 PyPI 时，用 `pip download "automind-agent[web]"` 在联网机备好
 > wheel 目录后拷入，再按 [docs/OFFLINE_OPS.md](docs/OFFLINE_OPS.md) 离线安装。
 
 ```bash
@@ -381,6 +482,13 @@ docker compose up --build
   关闭时零成本），`python -m automind.core.replay <文件>` 照着重跑并比对；
   `python -m automind.eval run smoke` 跑内置套件，给出通过率/耗时/成本，
   退出码 0/1/2/3 区分"全过 / 有未通过 / 配置问题 / 中断"。见 `docs/EVAL.md`。
+  真实能力测评见 `automind/eval/suites/comprehensive.yml`（综合套件）与
+  `scripts/edition_benchmark.py` / `scripts/benchmark_report.py`（社区 / 专业 / 企业版本隔离，默认 dry-run）；
+  v1.11.24 实测报告见 [docs/BENCHMARK_v1.11.24.md](docs/BENCHMARK_v1.11.24.md)，
+  数据副本见 [docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md)。
+- **🤝 多智能体工程协同（v1.11.22）**：协同模式升级为能真正动手的工程团队（DAG 拆解 / 工具化角色 /
+  共享工作区写锁 / 角色预算 / 审查回炉 / 测试 + 语义验收）；`python scripts/collab_benchmark.py --dry-run`
+  查看 single / multi / subagent 同任务评测矩阵（`--live` 才真实调用模型）。见 `docs/COLLABORATION.md`。
 - **📣 出站事件与外部审批**：任务与审批事件推送到你的工单/IM
   （`AUTOMIND_WEBHOOKS`，HMAC 签名 + 指数退避 + 有界队列，绝不阻塞任务）；
   审批可在外部系统里回执（`POST /api/approvals/{id}`，迟到回执明确 409）。

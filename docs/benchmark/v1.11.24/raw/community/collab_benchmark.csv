@@ -1,0 +1,5 @@
+﻿task_id,category,mode,status,success,artifacts_ok,duration_ms,tokens,llm_calls,steps,verification_passed,rework_count,human_interventions,manual_rework,stop_reason,error,notes
+analysis_summary,analysis,single,ok,true,,6545,5619,1,0,,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\analysis_summary-single
+codegen_fizzbuzz,codegen,single,ok,false,true,52797,81958,14,0,false,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\codegen_fizzbuzz-single
+bugfix_calc,bugfix,single,ok,false,true,66469,84930,16,0,false,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\bugfix_calc-single
+multi_file_pkg,multi_file,single,ok,false,true,40172,75948,12,0,false,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\multi_file_pkg-single

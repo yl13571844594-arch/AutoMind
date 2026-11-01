@@ -1,0 +1,13 @@
+﻿task_id,category,mode,status,success,artifacts_ok,duration_ms,tokens,llm_calls,steps,verification_passed,rework_count,human_interventions,manual_rework,stop_reason,error,notes
+analysis_summary,analysis,single,ok,true,,6921,6015,1,0,,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\analysis_summary-single
+analysis_summary,analysis,multi,ok,true,,89655,37549,9,2,true,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\analysis_summary-multi
+analysis_summary,analysis,subagent,ok,true,,4655,3612,1,1,,0,0,,no_more_tools,,workspace=<REPO>\.automind\collab_benchmark\work\analysis_summary-subagent
+codegen_fizzbuzz,codegen,single,ok,true,true,30625,77303,11,0,true,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\codegen_fizzbuzz-single
+codegen_fizzbuzz,codegen,multi,ok,false,true,136155,211603,28,3,false,0,0,,verification_failed,s3(reviewer): 依赖未完成：s2,workspace=<REPO>\.automind\collab_benchmark\work\codegen_fizzbuzz-multi
+codegen_fizzbuzz,codegen,subagent,ok,true,true,66780,162599,16,16,,0,0,,no_more_tools,,workspace=<REPO>\.automind\collab_benchmark\work\codegen_fizzbuzz-subagent
+bugfix_calc,bugfix,single,ok,true,true,57750,87365,14,0,true,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\bugfix_calc-single
+bugfix_calc,bugfix,multi,ok,false,true,113125,203981,37,3,false,0,0,,verification_failed,calc.py 可能已被修改为修复后版本（系统核验为 66 字节，与建议的修复后代码相符），但执行结果中没有实际运行测试并确认全部通过的证据。任务明确要求“运行测试确认全部通过”，当前仅完成只读分析和可能的文件修改，缺少测试执行结果。下一步应运行 `python -m pytest test_calc.py -v`（test_calc.py 无 __main__ 入口，直接 `python test_calc.py` 不会执行测试），确认输出 `2 passed`，并核对 test_calc.py 未被修改。,workspace=<REPO>\.automind\collab_benchmark\work\bugfix_calc-multi
+bugfix_calc,bugfix,subagent,ok,true,true,25922,31308,7,7,,0,0,,no_more_tools,,workspace=<REPO>\.automind\collab_benchmark\work\bugfix_calc-subagent
+multi_file_pkg,multi_file,single,ok,false,true,47061,75576,11,0,false,0,0,,completed,,workspace=<REPO>\.automind\collab_benchmark\work\multi_file_pkg-single
+multi_file_pkg,multi_file,multi,ok,false,false,110171,174735,26,4,false,0,0,,verification_failed,s3(coder): 依赖未完成：s2；s4(reviewer): 依赖未完成：s3,workspace=<REPO>\.automind\collab_benchmark\work\multi_file_pkg-multi
+multi_file_pkg,multi_file,subagent,ok,true,true,53875,111861,15,15,,0,0,,no_more_tools,,workspace=<REPO>\.automind\collab_benchmark\work\multi_file_pkg-subagent

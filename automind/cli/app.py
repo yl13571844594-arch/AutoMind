@@ -203,6 +203,13 @@ async def run_cli(args: argparse.Namespace) -> int:
 
 def main() -> None:
     """CLI 入口点。"""
+    # v1.11.20：静默子进程。必须在任何输出之前：命令行模式下通常有控制台，
+    # 检测会得到"有控制台"→ no-op；但从 GUI/计划任务等无控制台形态拉起时，
+    # 这一句能保证之后所有子进程不再逐个闪出空终端窗口。
+    from automind.core.proc import install_silent_subprocesses
+
+    install_silent_subprocesses()
+
     # 必须在任何输出之前：中文 Windows 控制台默认 GBK，
     # 任务报告里的 emoji / 制表符一写就 UnicodeEncodeError 崩进程。
     enable_utf8_console()

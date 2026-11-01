@@ -9,7 +9,66 @@ export interface TraceItem {
 }
 // goalId：后端事件用 goal_id 标识步骤（不是下标），进度更新必须按它匹配
 export interface PlanRow { text: string; goalId?: string; state: 'pending' | 'run' | 'ok' | 'fail'; error?: string }
-export interface MaStep { role: string; subtask: string; state: 'pending' | 'run' | 'ok'; output?: string }
+
+// 多智能体审查结论（父 Agent._review_result 的形状）。
+// issues 是**字符串**（问题清单拼成一段话），不是数组 —— 别按数组渲染。
+export interface MaReview {
+  approved?: boolean;
+  available?: boolean;     // false = 审查设施没跑成，不能当成"审查通过"
+  issues?: string;
+  reason?: string;
+  error?: string;
+}
+
+// 收尾验证里"项目测试"那一段（_run_project_tests 的形状）。
+export interface MaTestResult {
+  passed?: boolean;
+  unavailable?: boolean;   // 测试设施跑不起来（≠ 没有测试、≠ 测试失败）
+  detail?: string;
+}
+
+// 收尾验证里"语义验收"那一段（_loop_verify 的形状）。
+export interface MaVerdict {
+  done?: boolean;
+  available?: boolean;     // false = 验收不可用，不能当成"验收未过"
+  reason?: string;
+  source?: string;
+}
+
+// 工程协同的收尾验证摘要：tests / llm 两段证据各自可缺（没有就如实不显示）。
+// reason/rounds 是编排器对整轮验证的补充说明（第几轮、为什么要修）。
+export interface MaVerification {
+  done?: boolean;
+  tests?: MaTestResult | null;
+  llm?: MaVerdict | null;
+  reason?: string;
+  rounds?: number;
+}
+
+// 编排器聚合指标（engineering 返回的 metrics）。字段可能随后端增删，
+// 类型放宽 —— 前端只读自己要展示的那几个数字，不因多一个键报错。
+export type MaMetrics = Record<string, number | string | boolean | null>;
+
+// v1.11.22 工程协同：角色步骤从"纯文本流水线的一行"升级成 DAG 里的节点。
+// 新增字段**全部可选**：旧文本流水线只发 role/subtask/output，旧记录（localStorage
+// 里已落盘的 multi 卡片）没有它们，渲染时按原布局降级，不能凭空显示"依赖/预算/回炉"。
+export interface MaStep {
+  role: string; subtask: string;
+  // skip：依赖失败被跳过（不跑）；fail：跑了但失败 —— 两者在界面上必须能区分
+  state: 'pending' | 'run' | 'ok' | 'skip' | 'fail';
+  output?: string;
+  id?: string;                          // DAG 节点 id（新编排器用它定位步骤）
+  label?: string;                       // 后端给的中文标签（缺省用角色名映射）
+  dependsOn?: (string | number)[];      // 依赖的节点 id
+  writePaths?: string[];                // 该角色的写作用域（共享工作区内相对路径）
+  tokens?: number;                      // 本角色实际 token
+  steps?: number;                       // 本角色 ReAct 步数
+  llmCalls?: number;                    // 本角色 LLM 调用次数
+  rework?: number;                      // 审查不通过后的回炉次数
+  review?: MaReview | null;             // 只读 reviewer 的结论
+  error?: string;                       // 失败/跳过原因（悬停可见）
+  stopReason?: string;                  // 角色自己的停止原因（max_iterations 等）
+}
 export interface LoopIter { iter: number; max: number; action?: string; obs?: string; done?: boolean }
 
 // 中途插入的补充在各阶段的状态。injected 只是"这是一条补充"，与是否生效无关。
@@ -41,7 +100,12 @@ export type ChatItem =
   // traceDropped：轨迹是有上限的（见 ws.ts MAX_TRACES）。超出后丢最旧的，
   // 并把丢掉的条数记在这里明说 —— 悄悄少几步会让人误判 Agent 漏做了事。
   | { kind: 'exec'; id: string; traces: TraceItem[]; plan: PlanRow[]; done: boolean; traceDropped?: number }
-  | { kind: 'multi'; id: string; steps: MaStep[]; done: boolean }
+  // v1.11.22：工程协同卡片额外带 DAG 标记、收尾验证摘要与聚合指标；
+  // 旧文本流水线不写这些字段，卡片渲染保持原样。
+  | {
+      kind: 'multi'; id: string; steps: MaStep[]; done: boolean;
+      engineering?: boolean; verification?: MaVerification; metrics?: MaMetrics;
+    }
   | { kind: 'loop'; id: string; iters: LoopIter[]; stopReason?: string; done: boolean; traces: TraceItem[]; traceDropped?: number }
   | { kind: 'resume'; id: string; why: string }
   // v1.8.0 工作流运行卡片：只存 run_id，进度从 store/workflow 实时读取
@@ -62,10 +126,40 @@ export type ChatItem =
   // 任务失败/中断。**自带任务快照**（task/taskMode）而不是只指向易失的 lastTask：
   // 这样重启应用后历史里的失败卡片仍然能续跑，不会变成一个点了报
   // "没有可继续的任务"的死按钮。
+  // v1.11.21：服务端现在把结构化停因随 task_error / task_complete 下发，
+  // 卡片要能回答"为什么停 / 还有没有可续跑断点 / 这一轮花了多少次模型调用"。
+  // 全部可选：旧版本落盘的消息没有这些字段，缺失时按原来的布局渲染。
   | {
       kind: 'error'; id: string; why: '出错' | '中断'; error: string;
       task?: string; taskMode?: Mode; at?: string;
+      stopReason?: string; resumable?: boolean; budgetExhausted?: boolean; llmCalls?: number;
     };
+
+// 停止原因（后端 stop_reason 的英文枚举）→ 中文短标签。
+// 历史页徽标、失败卡片、任务结果 meta 三处共用一份映射，避免各写一套后
+// 口径慢慢分叉。未知值原样返回 —— 后端以后新增原因时至少不会显示成空白。
+export const STOP_REASON_ZH: Record<string, string> = {
+  completed: '已完成',
+  max_iterations: '步数上限',
+  task_budget: '预算耗尽',
+  budget_exhausted: '预算耗尽',
+  no_progress: '无进展',
+  llm_unavailable: '模型不可达',
+  partial: '部分交付',
+  interrupted: '已中断',
+  cancelled: '已取消',
+  // v1.11.22 工程协同：依赖失败的节点被跳过；收尾验证未过是任务级失败原因
+  skipped: '已跳过',
+  timeout: '超时',
+  verification_failed: '验证未通过',
+};
+
+/** 停止原因转中文；空值返回空串（缺失时调用方据此不渲染）。 */
+export function stopReasonZh(raw?: unknown): string {
+  const k = typeof raw === 'string' ? raw.trim() : '';
+  if (!k) return '';
+  return STOP_REASON_ZH[k] || k;
+}
 
 let seq = 0;
 export const uid = () => 'i' + (++seq) + '_' + Date.now().toString(36);

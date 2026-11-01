@@ -13,6 +13,9 @@
    看板是"同一台服务器、同一群人"的场景，本地时间最直观。日期字段统一
    ``YYYY-MM-DD``，逾期判断按本地日期比较。
 4. **摘要可测试**：:func:`summarize` 接受 ``today`` 参数，测试不必依赖系统时钟。
+5. **并发安全（v1.11.23 审计）**：``TeamStore`` 的写操作在进程内用模块级
+   ``RLock`` 串行化 ``load → 修改 → save``；``claim`` 对"已被他人认领"抛
+   :class:`TaskClaimed` 而不是静默覆盖（并发/多人场景下必须给确定性结果）。
 """
 
 from __future__ import annotations
@@ -56,6 +59,23 @@ class TeamError(ValueError):
 
 class TaskNotFound(TeamError):
     """按 id 找不到任务（API 层映射为 404）。"""
+
+
+class TaskClaimed(TeamError):
+    """任务已被**其他成员**认领（v1.11.23）。
+
+    并发/多人看板下，后到的认领不能再"静默覆盖"前一个负责人的成果 —— 必须
+    给出确定性结果。API 层按 ``TeamError`` 映射为 400 并在消息里点名当前
+    负责人；AI 工具把消息连同重试提示一起回给模型。已完成（done）任务不在
+    此列：返工场景仍允许重新认领（见 :func:`claim`）。
+    """
+
+    def __init__(self, assignee: str, task_id: str = "") -> None:
+        self.assignee = assignee
+        self.task_id = task_id
+        super().__init__(
+            f"任务已被「{assignee}」认领，不能重复认领（不会静默覆盖已有负责人）；"
+            f"如需转派，请让「{assignee}」先改负责人，或使用 update 修改 assignee。")
 
 
 # ── 时间助手 ──────────────────────────────────────────────
@@ -333,13 +353,30 @@ def add_comment(task: dict, text: Any, author: Any = "", now: str | None = None)
 
 
 def claim(task: dict, member: Any, now: str | None = None) -> dict:
-    """认领任务：负责人设为 member、状态置为 doing（已完成任务也可重新认领）。"""
+    """认领任务：负责人设为 member、状态置为 doing（已完成任务也可重新认领）。
+
+    v1.11.23（并发审计）：**已被其他成员认领、且尚未完成**的任务不再被静默
+    覆盖 —— 抛 :class:`TaskClaimed`，由 API 层（400）/ AI 工具（可读错误）
+    给出确定性结果。规则：
+
+      · 同一人重复认领：幂等返回（不刷活动流，旧行为不变）；
+      · 任务已有**其他**负责人且状态不是 done：拒绝（避免多人并发抢同一任务
+        时"最后写入者赢"，且输家毫不知情）；
+      · 已完成（done）任务：保留旧语义，允许他人重新认领（返工/接手）；
+      · 无负责人（含 todo/doing/blocked）：正常认领。
+
+    需要强制转派时走 :func:`update_task` 的 assignee 白名单字段（显式操作）。
+    """
     who = _text(member, MAX_NAME)
     if not who:
         raise TeamError("member 必填")
     t = normalize_task(task, now=now)
-    if t["status"] == "doing" and t["assignee"] == who:
+    current = _text(t.get("assignee"), MAX_NAME)
+    if t["status"] == "doing" and current == who:
         return t                                # 幂等：重复认领不刷活动流
+    task_id = _text(t.get("id"), 64)
+    if current and current != who and t["status"] != "done":
+        raise TaskClaimed(current, task_id)
     t["assignee"] = who
     t["status"] = "doing"
     _append_activity(t, "claim", who, f"{who} 认领了任务")
@@ -524,11 +561,38 @@ def _default_save(tasks: list[dict]) -> None:
     get_db().team_replace(list(tasks)[-MAX_TASKS:])
 
 
+#: 看板存储的**进程内**互斥锁（v1.11.23 并发审计修复）。
+#:
+#: 为什么必须模块级、而不是每个 TeamStore 一个实例锁：server 每个请求都新建
+#: 一个 ``TeamStore``（``automind/server.py::_team_store``），AI 工具每次操作
+#: 也会新建默认 store —— 实例级锁保护不了"多个实例共享同一份存储"的
+#: load→改→save。模块级 RLock 让本进程内所有看板写序列化；团队看板写操作
+#: 低频，这个代价远小于"并发丢任务 / 认领被覆盖"。
+#:
+#: 为什么是 RLock：写方法内部会调用 ``self.load()`` / ``self.save()``，而这两个
+#: 公开方法自身也持锁（让单次读/写不暴露中间态），同一线程需要可重入。
+#:
+#: 边界（如实说明）：
+#:   · 这是**进程内**锁，不跨进程；多 worker 部署的跨进程写仍依赖数据库层
+#:     事务（当前产品是单进程，见 v1.11.23 审计报告）；
+#:   · server 的 POST /api/team/tasks（新建）与 POST /api/team/tasks/{tid}
+#:     （更新）仍在 store 方法之外做 ``load→改→save``。这两个 async 端点里
+#:     load 与 save 之间没有 await，单事件循环下不会交错（实测并发 30 个 REST
+#:     建任务无丢失），但那只是**隐式契约** —— 以后中间插入任何 await 就会
+#:     重新丢更新。建议后续改为一次 ``store.create`` / ``store.update`` 调用。
+_STORE_LOCK = threading.RLock()
+
+
 class TeamStore:
     """任务清单读写 + 纯逻辑操作的薄包装。
 
     ``loader`` / ``saver`` 可注入：server 端注入带旧 JSON 迁移的 SQLite 读写，
     测试注入内存列表即可完全不碰磁盘。
+
+    v1.11.23：所有写方法（create/update/delete/comment/claim）的
+    ``load → 修改 → save`` 整段由模块级 :data:`_STORE_LOCK` 保护 —— 此前并发
+    Agent / 看板请求各自读到同一份旧快照，后写者整表覆盖前写者（注入 2ms
+    读写延迟的压测下：100 并发建任务只剩 11 条、8 人抢认领最后一人静默覆盖）。
     """
 
     def __init__(
@@ -540,11 +604,13 @@ class TeamStore:
         self.saver = saver or _default_save
 
     def load(self) -> list[dict]:
-        raw = self.loader() or []
-        return [normalize_task(t) for t in raw if isinstance(t, dict)]
+        with _STORE_LOCK:
+            raw = self.loader() or []
+            return [normalize_task(t) for t in raw if isinstance(t, dict)]
 
     def save(self, tasks: list[dict]) -> None:
-        self.saver(list(tasks)[-MAX_TASKS:])
+        with _STORE_LOCK:
+            self.saver(list(tasks)[-MAX_TASKS:])
 
     def _find(self, tasks: list[dict], tid: str) -> int:
         target = _text(tid, 64)
@@ -554,41 +620,47 @@ class TeamStore:
         raise TaskNotFound(f"任务不存在: {target}")
 
     def create(self, **fields: Any) -> dict:
+        # 纯逻辑先算好，缩短临界区（create_task 不碰存储）
         task = create_task(**fields)
-        tasks = self.load()
-        tasks.append(task)
-        self.save(tasks)
+        with _STORE_LOCK:
+            tasks = self.load()
+            tasks.append(task)
+            self.save(tasks)
         return task
 
     def update(self, tid: str, patch: dict, actor: Any = "") -> dict:
-        tasks = self.load()
-        idx = self._find(tasks, tid)
-        updated = update_task(tasks[idx], patch, actor=actor)
-        tasks[idx] = updated
-        self.save(tasks)
-        return updated
+        with _STORE_LOCK:
+            tasks = self.load()
+            idx = self._find(tasks, tid)
+            updated = update_task(tasks[idx], patch, actor=actor)
+            tasks[idx] = updated
+            self.save(tasks)
+            return updated
 
     def delete(self, tid: str) -> dict:
-        tasks = self.load()
-        kept, removed = delete_task(tasks, tid)
-        if removed is None:
-            raise TaskNotFound(f"任务不存在: {_text(tid, 64)}")
-        self.save(kept)
-        return normalize_task(removed)
+        with _STORE_LOCK:
+            tasks = self.load()
+            kept, removed = delete_task(tasks, tid)
+            if removed is None:
+                raise TaskNotFound(f"任务不存在: {_text(tid, 64)}")
+            self.save(kept)
+            return normalize_task(removed)
 
     def comment(self, tid: str, text: Any, author: Any = "") -> dict:
-        tasks = self.load()
-        idx = self._find(tasks, tid)
-        tasks[idx] = add_comment(tasks[idx], text, author)
-        self.save(tasks)
-        return tasks[idx]
+        with _STORE_LOCK:
+            tasks = self.load()
+            idx = self._find(tasks, tid)
+            tasks[idx] = add_comment(tasks[idx], text, author)
+            self.save(tasks)
+            return tasks[idx]
 
     def claim(self, tid: str, member: Any) -> dict:
-        tasks = self.load()
-        idx = self._find(tasks, tid)
-        tasks[idx] = claim(tasks[idx], member)
-        self.save(tasks)
-        return tasks[idx]
+        with _STORE_LOCK:
+            tasks = self.load()
+            idx = self._find(tasks, tid)
+            tasks[idx] = claim(tasks[idx], member)
+            self.save(tasks)
+            return tasks[idx]
 
 
 # ── 成员昵称持久化（.automind/team_members.json）──────────

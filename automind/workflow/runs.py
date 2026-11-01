@@ -117,6 +117,11 @@ class WorkflowRunStore:
             tmp.write_text(json.dumps(record, ensure_ascii=False, default=str),
                            encoding="utf-8")
             tmp.replace(path)
+            # v1.11.23 审计：写入后必须显式失效摘要缓存。此前只依赖 mtime 变化；
+            # Windows/快速连续写时 start→finish 可能落在同一 mtime 粒度内，
+            # summaries() 会拿 start 时的 run_status="" 当最新摘要（test_summary_
+            # cache_tracks_file_changes 偶发失败），看板显示空状态。
+            self._summary_cache.pop(path.name, None)
 
     def update(self, run_id: str, **fields: Any) -> dict[str, Any] | None:
         record = self.load(run_id)

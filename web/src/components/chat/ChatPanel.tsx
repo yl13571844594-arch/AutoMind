@@ -2,7 +2,7 @@
 // 首次进入对话模式时从服务端恢复历史；其它模式恢复本地持久化内容。
 import { App, type MenuProps } from 'antd';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { apiGet, apiPost } from '../../api/client';
+import { apiGet, apiPost, errText } from '../../api/client';
 import {
   describeResumable, dismissResumable, EMPTY_OVERRIDES, fetchResumable, hasOverrides,
   isTextFile, MAX_ATTACH_BYTES, MODE_ICON, pendingChips, stripResumePrefix,
@@ -12,6 +12,7 @@ import {
 } from '../../lib/overrides';
 import { buildCommands } from '../../lib/commands';
 import { wireModelOverrides } from '../../lib/modelChoice';
+import { looksVague, optimizePrompt, type OptimizeResult } from '../../lib/promptOptimize';
 import { useConv } from '../../store/conv';
 import { useRefs } from '../../store/refs';
 import { useModelChoice } from '../../store/modelChoice';
@@ -28,6 +29,7 @@ import { TEMPLATES } from '../../lib/templates';
 import TaskProgress from './TaskProgress';
 import SafeDropdown from '../ui/SafeDropdown';
 import ModelPicker from './ModelPicker';
+import OptimizeModal from './OptimizeModal';
 import ComposerSuggest, {
   detectTrigger, type SuggestHandle, type SuggestItem, type Trigger,
 } from './ComposerSuggest';
@@ -80,6 +82,17 @@ export default function ChatPanel() {
   // 每次按键都会重渲整个消息列表，长会话下打字会明显卡顿。
   const draft0 = useRef(useChat.getState().inputDraft).current;
 
+  // v1.11.20 「✨ 优化问题」：弹窗 + 模糊提示。
+  // optVague / optHasText 只在输入停顿 500ms 后更新（见 scheduleOptProbe）——
+  // 每个按键 setState 都会重渲整个消息列表，长会话下打字会卡。
+  const [optOpen, setOptOpen] = useState(false);
+  const [optLoading, setOptLoading] = useState(false);
+  const [optResult, setOptResult] = useState<OptimizeResult | null>(null);
+  const [optError, setOptError] = useState('');
+  const [optVague, setOptVague] = useState(() => looksVague(draft0));
+  const [optHasText, setOptHasText] = useState(() => !!draft0.trim());
+  const optTimer = useRef<number | undefined>(undefined);
+
   // 纯视觉：输入框为空且没有附件/图片时把发送键调暗（点击行为不变）。
   // 文本框是非受控的（见 draft0 的说明），这里直接写 data 属性而不是走 state，
   // 避免每个按键都重渲整个消息列表。
@@ -98,6 +111,79 @@ export default function ChatPanel() {
     if (immediate) flush();
     else saveTimer.current = window.setTimeout(flush, 400);
   };
+
+  // ── v1.11.20 ✨ 优化问题 ─────────────────────────────────
+  // 500ms 防抖：判断"这句话是否模糊"要跑正则，但真正要避免的是"每次按键都
+  // setState 重渲整个消息列表"（与 markEmpty 用 DOM 属性绕开 state 同一原因）。
+  const scheduleOptProbe = (value: string) => {
+    window.clearTimeout(optTimer.current);
+    optTimer.current = window.setTimeout(() => {
+      setOptVague(looksVague(value));
+      setOptHasText(!!value.trim());
+    }, 500);
+  };
+
+  /**
+   * 请求一次优化。
+   *
+   * @param fromModal 从弹窗里点「再优化一次」时为 true：请求失败要把错误留在
+   *                  弹窗里展示（用户还在编辑）；首次点击失败则只 toast，不开空壳弹窗。
+   * @param textArg   显式文本（弹窗里编辑后的内容）；省略时取输入框当前值。
+   *
+   * 执行中同样可用 —— 它只改输入框，不影响正在跑的任务。
+   */
+  const requestOptimize = async (fromModal = false, textArg?: string) => {
+    const text = (textArg ?? taRef.current?.value ?? '').trim();
+    if (!text) { message.info('先输入要优化的内容'); return; }
+    if (optLoading) return;                    // 连点两次只发一次请求
+    setOptError('');
+    setOptLoading(true);
+    try {
+      const r = await optimizePrompt(text, useApp.getState().mode);
+      setOptResult(r);
+      setOptOpen(true);
+    } catch (e) {
+      const msg = errText(e);
+      setOptError(msg);
+      if (fromModal) setOptOpen(true);
+      else message.error(`问题优化失败：${msg}`);
+    } finally {
+      setOptLoading(false);
+    }
+  };
+
+  /** 采用优化结果：替换正文 / 草稿 / 高度并交还焦点，但**不发送**。 */
+  const adoptOptimized = (optimized: string) => {
+    const text = (optimized || '').trim();
+    if (!text) { message.error('优化结果为空，无法填入输入框'); return; }
+    const el = taRef.current;
+    if (el) {
+      el.value = text;
+      el.style.height = 'auto';
+      el.style.height = Math.min(el.scrollHeight, 180) + 'px';
+      el.focus({ preventScroll: true });
+    }
+    // 撤掉两个待触发的防抖任务：它们读的是旧文本 / 旧状态，会在采用后把界面写回去。
+    window.clearTimeout(saveTimer.current);
+    window.clearTimeout(optTimer.current);
+    useChat.getState().setInputDraft(text);
+    setOptVague(looksVague(text));
+    setOptHasText(true);
+    markEmpty();
+    setOptOpen(false);
+    setOptResult(null);
+    setOptError('');
+    message.success('已填入输入框，可继续修改后发送');
+  };
+
+  const closeOptimize = () => {
+    setOptOpen(false);
+    setOptResult(null);
+    setOptError('');
+  };
+
+  // 卸载时清掉待触发的模糊探测（定时器里持有 setState，留着会白跑一次）。
+  useEffect(() => () => window.clearTimeout(optTimer.current), []);
 
   // 关窗/切标签/组件卸载时立刻补存一次 —— 否则最后 400ms 内敲的字会丢，
   // 而"最后敲的那几个字"恰恰是用户最在意的部分。
@@ -122,22 +208,28 @@ export default function ChatPanel() {
 
   useEffect(() => {
     window.clearTimeout(saveTimer.current);
+    const draft = useChat.getState().inputDraft;
     if (taRef.current) {
-      taRef.current.value = useChat.getState().inputDraft;
+      taRef.current.value = draft;
       taRef.current.style.height = 'auto';
     }
+    // 优化按钮的模糊提示/可用态跟着换过来的草稿走，否则会沿用上一个工作区的判断。
+    window.clearTimeout(optTimer.current);
+    setOptVague(looksVague(draft));
+    setOptHasText(!!draft.trim());
     markEmpty();
   }, [wsSuffix, convSuffix]);
 
   useEffect(() => { markEmpty(); }, [pendingImages, ov]);
 
   // 打开即聚焦，省掉"先点一下输入框"这一步；任务跑完后也自动交还焦点。
-  // 有弹窗时不抢焦点（否则弹窗里的输入框会被顶掉）。
+  // 有弹窗时不抢焦点（否则弹窗里的输入框会被顶掉）。优化弹窗也计入：
+  // 它可能在任务结束的瞬间开着，此时把焦点抢回输入框会让用户没法接着改。
   useEffect(() => {
-    if (modalOpen || running) return;
+    if (modalOpen || optOpen || running) return;
     const t = window.setTimeout(() => taRef.current?.focus({ preventScroll: true }), 60);
     return () => window.clearTimeout(t);
-  }, [mode, running, modalOpen]);
+  }, [mode, running, modalOpen, optOpen]);
 
   // 对话模式且本地无记录 → 从服务端恢复历史
   useEffect(() => {
@@ -199,6 +291,10 @@ export default function ChatPanel() {
     if (override === undefined && taRef.current) {
       taRef.current.value = '';
       taRef.current.style.height = 'auto';
+      // 输入框已清空：优化按钮回到禁用态（不必等防抖探测那 500ms）。
+      window.clearTimeout(optTimer.current);
+      setOptHasText(false);
+      setOptVague(false);
     }
     window.clearTimeout(saveTimer.current);   // 别让待触发的保存把草稿又写回来
     st.setInputDraft('');
@@ -277,6 +373,9 @@ export default function ChatPanel() {
     if (taRef.current) {
       taRef.current.value = '';
       taRef.current.style.height = 'auto';
+      window.clearTimeout(optTimer.current);
+      setOptHasText(false);
+      setOptVague(false);
     }
     window.clearTimeout(saveTimer.current);   // 别让待触发的保存把草稿又写回来
     st.setInputDraft('');
@@ -420,6 +519,7 @@ export default function ChatPanel() {
     el.style.height = Math.min(el.scrollHeight, 180) + 'px';
     saveDraft();
     markEmpty();
+    scheduleOptProbe(el.value);
   };
 
   const commandItems = buildCommands({
@@ -677,6 +777,8 @@ export default function ChatPanel() {
     if (!t) return;
     if (t.mode !== mode) await useApp.getState().setMode(t.mode as Mode);
     if (taRef.current) { taRef.current.value = t.prompt; taRef.current.focus(); saveDraft(true); }
+    scheduleOptProbe(t.prompt);
+    markEmpty();
     message.info('模板已填入，补充细节后按 Enter 发送');
   };
 
@@ -883,6 +985,7 @@ export default function ChatPanel() {
             el.style.height = Math.min(el.scrollHeight, 180) + 'px';
             saveDraft();
             markEmpty();
+            scheduleOptProbe(el.value);
             updateTrigger();
           }}
           onKeyUp={(e) => {
@@ -900,6 +1003,22 @@ export default function ChatPanel() {
           </SafeDropdown>
           {/* v1.11.15 本条消息使用的模型（默认 / 已配置模型 / 专业·企业版自动路由） */}
           <ModelPicker />
+          {/* v1.11.20 ✨ 优化：把模糊问题改写成"目标 → 必需信息 → 产出与验收"的执行请求。
+              只改输入框、不发送；执行中也可用。optVague 时轻微高亮提示，但不自动改写。 */}
+          <button
+            type="button"
+            className={'composer-opt' + (optVague && optHasText ? ' hint' : '')}
+            disabled={!optHasText || optLoading}
+            aria-disabled={!optHasText || optLoading}
+            onClick={() => { void requestOptimize(); }}
+            title={!optHasText
+              ? '先输入要优化的内容'
+              : optVague
+                ? '这句话可能不够具体：点一下补成更清楚的执行请求（先预览，可编辑后再采用）'
+                : '把问题改写成更清楚的执行请求：先预览、可编辑，采用后才替换输入框（不会自动发送）'}
+          >
+            {optLoading ? '优化中…' : <><span className="opt-ico">✨</span><span className="opt-full">优化</span></>}
+          </button>
           {recognizing && (
             <button className="composer-pill listening" title="停止语音输入" onClick={toggleVoice}>
               <span className="rec-dot" />聆听中 · 点击停止
@@ -963,6 +1082,17 @@ export default function ChatPanel() {
         </div>
        </div>
       </div>
+
+      {/* v1.11.20 问题优化弹窗：预览 / 编辑 / 再优化，确认后才替换输入框 */}
+      <OptimizeModal
+        open={optOpen}
+        loading={optLoading}
+        result={optResult}
+        error={optError}
+        onClose={closeOptimize}
+        onAdopt={adoptOptimized}
+        onRetry={(text) => { void requestOptimize(true, text); }}
+      />
     </div>
   );
 }

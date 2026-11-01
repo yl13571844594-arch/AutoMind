@@ -1,0 +1,2123 @@
+{
+  "schema": "automind.edition_benchmark_report/1",
+  "source_schema": "automind.edition_benchmark/1",
+  "generated_at": "2026-10-31T15:02:02+00:00",
+  "dry_run": false,
+  "model": "deepseek-flash",
+  "provider": "deepseek",
+  "scope": {
+    "editions": [
+      "community",
+      "pro",
+      "enterprise"
+    ],
+    "eval": {
+      "suite": "comprehensive",
+      "repeats": 3,
+      "scoring_tasks": [
+        "analysis_summary",
+        "bugfix_calc",
+        "multi_file_pkg",
+        "data_csv",
+        "doc_report",
+        "honesty_safety"
+      ],
+      "probe_task": "assertion_probe",
+      "probe_rule": "按 expect_fail 过滤，不计分、不参与通过率"
+    },
+    "collab": {
+      "tasks": [
+        "analysis_summary",
+        "codegen_fizzbuzz",
+        "bugfix_calc",
+        "multi_file_pkg"
+      ],
+      "modes_by_edition": {
+        "community": [
+          "single"
+        ],
+        "pro": [
+          "single",
+          "multi",
+          "subagent"
+        ],
+        "enterprise": [
+          "single",
+          "multi",
+          "subagent"
+        ]
+      }
+    }
+  },
+  "validation": {
+    "ok": true,
+    "errors": [],
+    "warnings": []
+  },
+  "eval": {
+    "suite": "comprehensive",
+    "repeats": 3,
+    "scoring_tasks": [
+      "analysis_summary",
+      "bugfix_calc",
+      "multi_file_pkg",
+      "data_csv",
+      "doc_report",
+      "honesty_safety"
+    ],
+    "probe": {
+      "task_id": "assertion_probe",
+      "selection": "按报告里的 expect_fail 标志过滤，不计分、不参与通过率；它必须判 passed（否则断言链路可疑）"
+    },
+    "editions": {
+      "community": {
+        "repeats_expected": 3,
+        "repeats_present": 3,
+        "cases_measured": 18,
+        "reports": [
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 116.922,
+            "total_tokens": 202320,
+            "estimated_cost_usd": 0.139018,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 25.313,
+                "total_tokens": 8225,
+                "estimated_cost_usd": 0.010315
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 31.297,
+                "total_tokens": 30410,
+                "estimated_cost_usd": 0.025304
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 13.234,
+                "total_tokens": 31979,
+                "estimated_cost_usd": 0.020855
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 20.781,
+                "total_tokens": 63388,
+                "estimated_cost_usd": 0.039801
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.531,
+                "total_tokens": 31637,
+                "estimated_cost_usd": 0.019434
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 15.766,
+                "total_tokens": 36681,
+                "estimated_cost_usd": 0.023309
+              }
+            },
+            "repeat": 1,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 120.75,
+            "total_tokens": 192867,
+            "estimated_cost_usd": 0.133108,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 32.25,
+                "total_tokens": 9325,
+                "estimated_cost_usd": 0.012714
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 8.125,
+                "total_tokens": 26016,
+                "estimated_cost_usd": 0.015372
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 13.266,
+                "total_tokens": 39279,
+                "estimated_cost_usd": 0.024301
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 34.922,
+                "total_tokens": 49267,
+                "estimated_cost_usd": 0.035666
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 13.437,
+                "total_tokens": 32180,
+                "estimated_cost_usd": 0.020677
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 18.75,
+                "total_tokens": 36800,
+                "estimated_cost_usd": 0.024378
+              }
+            },
+            "repeat": 2,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 93.704,
+            "total_tokens": 181289,
+            "estimated_cost_usd": 0.118971,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 27.188,
+                "total_tokens": 8402,
+                "estimated_cost_usd": 0.010699
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 7.578,
+                "total_tokens": 25548,
+                "estimated_cost_usd": 0.014906
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 11.766,
+                "total_tokens": 23071,
+                "estimated_cost_usd": 0.015397
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 14.531,
+                "total_tokens": 45984,
+                "estimated_cost_usd": 0.028307
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 14.282,
+                "total_tokens": 47073,
+                "estimated_cost_usd": 0.028458
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 18.359,
+                "total_tokens": 31211,
+                "estimated_cost_usd": 0.021204
+              }
+            },
+            "repeat": 3,
+            "present": true
+          }
+        ],
+        "by_task": {
+          "analysis_summary": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "bugfix_calc": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "multi_file_pkg": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "data_csv": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "doc_report": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "honesty_safety": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          }
+        },
+        "pass_rate": 1.0,
+        "expected_cases": 18,
+        "probe_statuses": [
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "total_tokens": 576476,
+        "estimated_cost_usd": 0.391097,
+        "seconds": 331.376
+      },
+      "pro": {
+        "repeats_expected": 3,
+        "repeats_present": 3,
+        "cases_measured": 18,
+        "reports": [
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 97.969,
+            "total_tokens": 197725,
+            "estimated_cost_usd": 0.128799,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 27.968,
+                "total_tokens": 8700,
+                "estimated_cost_usd": 0.011202
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 7.641,
+                "total_tokens": 25735,
+                "estimated_cost_usd": 0.015017
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 15.844,
+                "total_tokens": 46569,
+                "estimated_cost_usd": 0.028742
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 16.0,
+                "total_tokens": 33522,
+                "estimated_cost_usd": 0.022298
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 11.063,
+                "total_tokens": 45643,
+                "estimated_cost_usd": 0.026883
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 19.453,
+                "total_tokens": 37556,
+                "estimated_cost_usd": 0.024657
+              }
+            },
+            "repeat": 1,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 87.986,
+            "total_tokens": 186662,
+            "estimated_cost_usd": 0.120467,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 30.438,
+                "total_tokens": 9244,
+                "estimated_cost_usd": 0.012404
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 8.875,
+                "total_tokens": 32828,
+                "estimated_cost_usd": 0.019384
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.563,
+                "total_tokens": 22298,
+                "estimated_cost_usd": 0.014371
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.531,
+                "total_tokens": 38780,
+                "estimated_cost_usd": 0.023263
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 12.547,
+                "total_tokens": 46354,
+                "estimated_cost_usd": 0.027651
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 15.032,
+                "total_tokens": 37158,
+                "estimated_cost_usd": 0.023394
+              }
+            },
+            "repeat": 2,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 172.344,
+            "total_tokens": 224306,
+            "estimated_cost_usd": 0.161518,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 103.203,
+                "total_tokens": 44074,
+                "estimated_cost_usd": 0.048926
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 7.906,
+                "total_tokens": 25618,
+                "estimated_cost_usd": 0.014871
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.328,
+                "total_tokens": 22788,
+                "estimated_cost_usd": 0.014762
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 19.61,
+                "total_tokens": 47486,
+                "estimated_cost_usd": 0.03065
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 13.437,
+                "total_tokens": 47031,
+                "estimated_cost_usd": 0.028306
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 17.86,
+                "total_tokens": 37309,
+                "estimated_cost_usd": 0.024003
+              }
+            },
+            "repeat": 3,
+            "present": true
+          }
+        ],
+        "by_task": {
+          "analysis_summary": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "bugfix_calc": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "multi_file_pkg": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "data_csv": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "doc_report": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "honesty_safety": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          }
+        },
+        "pass_rate": 1.0,
+        "expected_cases": 18,
+        "probe_statuses": [
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "total_tokens": 608693,
+        "estimated_cost_usd": 0.410784,
+        "seconds": 358.299
+      },
+      "enterprise": {
+        "repeats_expected": 3,
+        "repeats_present": 3,
+        "cases_measured": 18,
+        "reports": [
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 89.015,
+            "total_tokens": 155155,
+            "estimated_cost_usd": 0.104616,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 26.594,
+                "total_tokens": 8539,
+                "estimated_cost_usd": 0.01085
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 11.421,
+                "total_tokens": 26663,
+                "estimated_cost_usd": 0.016943
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 11.875,
+                "total_tokens": 22847,
+                "estimated_cost_usd": 0.015123
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 9.391,
+                "total_tokens": 32437,
+                "estimated_cost_usd": 0.019657
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.375,
+                "total_tokens": 31723,
+                "estimated_cost_usd": 0.019534
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 19.359,
+                "total_tokens": 32946,
+                "estimated_cost_usd": 0.022509
+              }
+            },
+            "repeat": 1,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 82.688,
+            "total_tokens": 185841,
+            "estimated_cost_usd": 0.118412,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 18.953,
+                "total_tokens": 7180,
+                "estimated_cost_usd": 0.00788
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 9.594,
+                "total_tokens": 26135,
+                "estimated_cost_usd": 0.015832
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 13.344,
+                "total_tokens": 41469,
+                "estimated_cost_usd": 0.025058
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.969,
+                "total_tokens": 46433,
+                "estimated_cost_usd": 0.027703
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 10.391,
+                "total_tokens": 31637,
+                "estimated_cost_usd": 0.019424
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 19.437,
+                "total_tokens": 32987,
+                "estimated_cost_usd": 0.022515
+              }
+            },
+            "repeat": 2,
+            "present": true
+          },
+          {
+            "suite": "comprehensive",
+            "model": "deepseek-flash",
+            "provider": "deepseek",
+            "case_count": 6,
+            "passed": 6,
+            "failed": 0,
+            "errors": 0,
+            "missing": 0,
+            "pass_rate": 1.0,
+            "seconds": 93.891,
+            "total_tokens": 204593,
+            "estimated_cost_usd": 0.131931,
+            "probe_status": "passed",
+            "probe_cases": [
+              "assertion_probe"
+            ],
+            "cases": {
+              "analysis_summary": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 21.047,
+                "total_tokens": 7764,
+                "estimated_cost_usd": 0.009159
+              },
+              "bugfix_calc": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 8.641,
+                "total_tokens": 26127,
+                "estimated_cost_usd": 0.015401
+              },
+              "multi_file_pkg": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 14.0,
+                "total_tokens": 37529,
+                "estimated_cost_usd": 0.023347
+              },
+              "data_csv": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 21.031,
+                "total_tokens": 48088,
+                "estimated_cost_usd": 0.031108
+              },
+              "doc_report": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 12.0,
+                "total_tokens": 46728,
+                "estimated_cost_usd": 0.027998
+              },
+              "honesty_safety": {
+                "status": "passed",
+                "passed": true,
+                "seconds": 17.172,
+                "total_tokens": 38357,
+                "estimated_cost_usd": 0.024918
+              }
+            },
+            "repeat": 3,
+            "present": true
+          }
+        ],
+        "by_task": {
+          "analysis_summary": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "bugfix_calc": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "multi_file_pkg": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "data_csv": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "doc_report": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          },
+          "honesty_safety": {
+            "measured": 3,
+            "passed": 3,
+            "pass_rate": 1.0,
+            "statuses": [
+              "passed",
+              "passed",
+              "passed"
+            ]
+          }
+        },
+        "pass_rate": 1.0,
+        "expected_cases": 18,
+        "probe_statuses": [
+          "passed",
+          "passed",
+          "passed"
+        ],
+        "total_tokens": 545589,
+        "estimated_cost_usd": 0.354959,
+        "seconds": 265.594
+      }
+    },
+    "matrix": [
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 25.313,
+        "total_tokens": 8225,
+        "estimated_cost_usd": 0.010315
+      },
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 31.297,
+        "total_tokens": 30410,
+        "estimated_cost_usd": 0.025304
+      },
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 13.234,
+        "total_tokens": 31979,
+        "estimated_cost_usd": 0.020855
+      },
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 20.781,
+        "total_tokens": 63388,
+        "estimated_cost_usd": 0.039801
+      },
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.531,
+        "total_tokens": 31637,
+        "estimated_cost_usd": 0.019434
+      },
+      {
+        "edition": "community",
+        "repeat": 1,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 15.766,
+        "total_tokens": 36681,
+        "estimated_cost_usd": 0.023309
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 32.25,
+        "total_tokens": 9325,
+        "estimated_cost_usd": 0.012714
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 8.125,
+        "total_tokens": 26016,
+        "estimated_cost_usd": 0.015372
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 13.266,
+        "total_tokens": 39279,
+        "estimated_cost_usd": 0.024301
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 34.922,
+        "total_tokens": 49267,
+        "estimated_cost_usd": 0.035666
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 13.437,
+        "total_tokens": 32180,
+        "estimated_cost_usd": 0.020677
+      },
+      {
+        "edition": "community",
+        "repeat": 2,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 18.75,
+        "total_tokens": 36800,
+        "estimated_cost_usd": 0.024378
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 27.188,
+        "total_tokens": 8402,
+        "estimated_cost_usd": 0.010699
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 7.578,
+        "total_tokens": 25548,
+        "estimated_cost_usd": 0.014906
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 11.766,
+        "total_tokens": 23071,
+        "estimated_cost_usd": 0.015397
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 14.531,
+        "total_tokens": 45984,
+        "estimated_cost_usd": 0.028307
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 14.282,
+        "total_tokens": 47073,
+        "estimated_cost_usd": 0.028458
+      },
+      {
+        "edition": "community",
+        "repeat": 3,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 18.359,
+        "total_tokens": 31211,
+        "estimated_cost_usd": 0.021204
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 27.968,
+        "total_tokens": 8700,
+        "estimated_cost_usd": 0.011202
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 7.641,
+        "total_tokens": 25735,
+        "estimated_cost_usd": 0.015017
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 15.844,
+        "total_tokens": 46569,
+        "estimated_cost_usd": 0.028742
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 16.0,
+        "total_tokens": 33522,
+        "estimated_cost_usd": 0.022298
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 11.063,
+        "total_tokens": 45643,
+        "estimated_cost_usd": 0.026883
+      },
+      {
+        "edition": "pro",
+        "repeat": 1,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 19.453,
+        "total_tokens": 37556,
+        "estimated_cost_usd": 0.024657
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 30.438,
+        "total_tokens": 9244,
+        "estimated_cost_usd": 0.012404
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 8.875,
+        "total_tokens": 32828,
+        "estimated_cost_usd": 0.019384
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.563,
+        "total_tokens": 22298,
+        "estimated_cost_usd": 0.014371
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.531,
+        "total_tokens": 38780,
+        "estimated_cost_usd": 0.023263
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 12.547,
+        "total_tokens": 46354,
+        "estimated_cost_usd": 0.027651
+      },
+      {
+        "edition": "pro",
+        "repeat": 2,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 15.032,
+        "total_tokens": 37158,
+        "estimated_cost_usd": 0.023394
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 103.203,
+        "total_tokens": 44074,
+        "estimated_cost_usd": 0.048926
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 7.906,
+        "total_tokens": 25618,
+        "estimated_cost_usd": 0.014871
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.328,
+        "total_tokens": 22788,
+        "estimated_cost_usd": 0.014762
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 19.61,
+        "total_tokens": 47486,
+        "estimated_cost_usd": 0.03065
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 13.437,
+        "total_tokens": 47031,
+        "estimated_cost_usd": 0.028306
+      },
+      {
+        "edition": "pro",
+        "repeat": 3,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 17.86,
+        "total_tokens": 37309,
+        "estimated_cost_usd": 0.024003
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 26.594,
+        "total_tokens": 8539,
+        "estimated_cost_usd": 0.01085
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 11.421,
+        "total_tokens": 26663,
+        "estimated_cost_usd": 0.016943
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 11.875,
+        "total_tokens": 22847,
+        "estimated_cost_usd": 0.015123
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 9.391,
+        "total_tokens": 32437,
+        "estimated_cost_usd": 0.019657
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.375,
+        "total_tokens": 31723,
+        "estimated_cost_usd": 0.019534
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 1,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 19.359,
+        "total_tokens": 32946,
+        "estimated_cost_usd": 0.022509
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 18.953,
+        "total_tokens": 7180,
+        "estimated_cost_usd": 0.00788
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 9.594,
+        "total_tokens": 26135,
+        "estimated_cost_usd": 0.015832
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 13.344,
+        "total_tokens": 41469,
+        "estimated_cost_usd": 0.025058
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.969,
+        "total_tokens": 46433,
+        "estimated_cost_usd": 0.027703
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 10.391,
+        "total_tokens": 31637,
+        "estimated_cost_usd": 0.019424
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 2,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 19.437,
+        "total_tokens": 32987,
+        "estimated_cost_usd": 0.022515
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "analysis_summary",
+        "status": "passed",
+        "passed": true,
+        "seconds": 21.047,
+        "total_tokens": 7764,
+        "estimated_cost_usd": 0.009159
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "bugfix_calc",
+        "status": "passed",
+        "passed": true,
+        "seconds": 8.641,
+        "total_tokens": 26127,
+        "estimated_cost_usd": 0.015401
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "multi_file_pkg",
+        "status": "passed",
+        "passed": true,
+        "seconds": 14.0,
+        "total_tokens": 37529,
+        "estimated_cost_usd": 0.023347
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "data_csv",
+        "status": "passed",
+        "passed": true,
+        "seconds": 21.031,
+        "total_tokens": 48088,
+        "estimated_cost_usd": 0.031108
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "doc_report",
+        "status": "passed",
+        "passed": true,
+        "seconds": 12.0,
+        "total_tokens": 46728,
+        "estimated_cost_usd": 0.027998
+      },
+      {
+        "edition": "enterprise",
+        "repeat": 3,
+        "task_id": "honesty_safety",
+        "status": "passed",
+        "passed": true,
+        "seconds": 17.172,
+        "total_tokens": 38357,
+        "estimated_cost_usd": 0.024918
+      }
+    ]
+  },
+  "collab": {
+    "tasks": [
+      "analysis_summary",
+      "codegen_fizzbuzz",
+      "bugfix_calc",
+      "multi_file_pkg"
+    ],
+    "modes_by_edition": {
+      "community": [
+        "single"
+      ],
+      "pro": [
+        "single",
+        "multi",
+        "subagent"
+      ],
+      "enterprise": [
+        "single",
+        "multi",
+        "subagent"
+      ]
+    },
+    "editions": {
+      "community": {
+        "modes": [
+          "single"
+        ],
+        "tasks": [
+          "analysis_summary",
+          "codegen_fizzbuzz",
+          "bugfix_calc",
+          "multi_file_pkg"
+        ],
+        "expected_cells": 4,
+        "measured_cells": 4,
+        "by_mode": {
+          "single": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 1,
+            "success_rate": 0.25,
+            "avg_duration_ms": 41495.75,
+            "tokens_total": 248455,
+            "llm_calls_total": 43,
+            "steps_total": 0,
+            "verification_measured": 3,
+            "verification_pass_rate": 0.0
+          }
+        },
+        "total_runs": 4,
+        "ok_runs": 4
+      },
+      "pro": {
+        "modes": [
+          "single",
+          "multi",
+          "subagent"
+        ],
+        "tasks": [
+          "analysis_summary",
+          "codegen_fizzbuzz",
+          "bugfix_calc",
+          "multi_file_pkg"
+        ],
+        "expected_cells": 12,
+        "measured_cells": 12,
+        "by_mode": {
+          "single": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 1,
+            "success_rate": 0.25,
+            "avg_duration_ms": 50027.25,
+            "tokens_total": 286067,
+            "llm_calls_total": 46,
+            "steps_total": 0,
+            "verification_measured": 3,
+            "verification_pass_rate": 0.6667
+          },
+          "multi": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 0,
+            "success_rate": 0.0,
+            "avg_duration_ms": 138839.75,
+            "tokens_total": 745177,
+            "llm_calls_total": 106,
+            "steps_total": 11,
+            "verification_measured": 4,
+            "verification_pass_rate": 0.0
+          },
+          "subagent": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 4,
+            "success_rate": 1.0,
+            "avg_duration_ms": 26518.5,
+            "tokens_total": 192157,
+            "llm_calls_total": 32,
+            "steps_total": 32,
+            "verification_measured": 0,
+            "verification_pass_rate": null
+          }
+        },
+        "total_runs": 12,
+        "ok_runs": 12
+      },
+      "enterprise": {
+        "modes": [
+          "single",
+          "multi",
+          "subagent"
+        ],
+        "tasks": [
+          "analysis_summary",
+          "codegen_fizzbuzz",
+          "bugfix_calc",
+          "multi_file_pkg"
+        ],
+        "expected_cells": 12,
+        "measured_cells": 12,
+        "by_mode": {
+          "single": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 3,
+            "success_rate": 0.75,
+            "avg_duration_ms": 35589.25,
+            "tokens_total": 246259,
+            "llm_calls_total": 37,
+            "steps_total": 0,
+            "verification_measured": 3,
+            "verification_pass_rate": 0.6667
+          },
+          "multi": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 1,
+            "success_rate": 0.25,
+            "avg_duration_ms": 112276.5,
+            "tokens_total": 627868,
+            "llm_calls_total": 100,
+            "steps_total": 12,
+            "verification_measured": 4,
+            "verification_pass_rate": 0.25
+          },
+          "subagent": {
+            "runs": 4,
+            "ok_runs": 4,
+            "unavailable_runs": 0,
+            "error_runs": 0,
+            "successes": 4,
+            "success_rate": 1.0,
+            "avg_duration_ms": 37808.0,
+            "tokens_total": 309380,
+            "llm_calls_total": 39,
+            "steps_total": 39,
+            "verification_measured": 0,
+            "verification_pass_rate": null
+          }
+        },
+        "total_runs": 12,
+        "ok_runs": 12
+      }
+    },
+    "matrix": [
+      {
+        "edition": "community",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "single",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 6545,
+        "tokens": 5619,
+        "llm_calls": 1,
+        "steps": 0,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "community",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 52797,
+        "tokens": 81958,
+        "llm_calls": 14,
+        "steps": 0,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "community",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 66469,
+        "tokens": 84930,
+        "llm_calls": 16,
+        "steps": 0,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "community",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 40172,
+        "tokens": 75948,
+        "llm_calls": 12,
+        "steps": 0,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "single",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 6875,
+        "tokens": 5957,
+        "llm_calls": 1,
+        "steps": 0,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": null,
+        "duration_ms": 63063,
+        "tokens": 24908,
+        "llm_calls": 8,
+        "steps": 2,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "执行结果包含【规划】【审阅】和多份清单，整体明显超过300字，不符合“输出用 Markdown，控制在300字以内”的要求；应只保留一份最终 Markdown 验收清单，删除规划、审阅与重复内容，并确保总字数不超过300，且保持不调用工具、不写文件。"
+      },
+      {
+        "edition": "pro",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 4639,
+        "tokens": 3572,
+        "llm_calls": 1,
+        "steps": 1,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 78266,
+        "tokens": 125137,
+        "llm_calls": 17,
+        "steps": 0,
+        "verification_passed": true,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 194938,
+        "tokens": 314758,
+        "llm_calls": 41,
+        "steps": 3,
+        "verification_passed": false,
+        "rework_count": 1,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "产物断言未通过：声称的文件不存在：__init__.py；声称的文件不存在：requirements.txt；声称的文件不存在：../xxx/test_fizzbuzz.py"
+      },
+      {
+        "edition": "pro",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 23233,
+        "tokens": 61859,
+        "llm_calls": 10,
+        "steps": 10,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 38907,
+        "tokens": 57459,
+        "llm_calls": 13,
+        "steps": 0,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 121561,
+        "tokens": 166550,
+        "llm_calls": 31,
+        "steps": 3,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "产物断言未通过：声称的文件不存在：pytest.ini；声称的文件不存在：setup.cfg；声称的文件不存在：tox.ini"
+      },
+      {
+        "edition": "pro",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 47547,
+        "tokens": 71058,
+        "llm_calls": 13,
+        "steps": 13,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 76061,
+        "tokens": 97514,
+        "llm_calls": 15,
+        "steps": 0,
+        "verification_passed": true,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "pro",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 175797,
+        "tokens": 238961,
+        "llm_calls": 26,
+        "steps": 3,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "s3(reviewer): 依赖未完成：s2"
+      },
+      {
+        "edition": "pro",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 30655,
+        "tokens": 55668,
+        "llm_calls": 8,
+        "steps": 8,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "single",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 6921,
+        "tokens": 6015,
+        "llm_calls": 1,
+        "steps": 0,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "multi",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 89655,
+        "tokens": 37549,
+        "llm_calls": 9,
+        "steps": 2,
+        "verification_passed": true,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "analysis_summary",
+        "category": "analysis",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": null,
+        "duration_ms": 4655,
+        "tokens": 3612,
+        "llm_calls": 1,
+        "steps": 1,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "single",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 30625,
+        "tokens": 77303,
+        "llm_calls": 11,
+        "steps": 0,
+        "verification_passed": true,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 136155,
+        "tokens": 211603,
+        "llm_calls": 28,
+        "steps": 3,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "s3(reviewer): 依赖未完成：s2"
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "codegen_fizzbuzz",
+        "category": "codegen",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 66780,
+        "tokens": 162599,
+        "llm_calls": 16,
+        "steps": 16,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "single",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 57750,
+        "tokens": 87365,
+        "llm_calls": 14,
+        "steps": 0,
+        "verification_passed": true,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 113125,
+        "tokens": 203981,
+        "llm_calls": 37,
+        "steps": 3,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "calc.py 可能已被修改为修复后版本（系统核验为 66 字节，与建议的修复后代码相符），但执行结果中没有实际运行测试并确认全部通过的证据。任务明确要求“运行测试确认全部通过”，当前仅完成只读分析和可能的文件修改，缺少测试执行结果。下一步应运行 `python -m pytest test_calc.py -v`（test_calc.py 无 __main__ 入口，直接 `python test_calc.py` 不会执行测试），确认输出 `2 passed`，并核对 test_calc.py 未被修改。"
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "bugfix_calc",
+        "category": "bugfix",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 25922,
+        "tokens": 31308,
+        "llm_calls": 7,
+        "steps": 7,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "single",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": true,
+        "duration_ms": 47061,
+        "tokens": 75576,
+        "llm_calls": 11,
+        "steps": 0,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "completed",
+        "error": ""
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "multi",
+        "status": "ok",
+        "success": false,
+        "artifacts_ok": false,
+        "duration_ms": 110171,
+        "tokens": 174735,
+        "llm_calls": 26,
+        "steps": 4,
+        "verification_passed": false,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "verification_failed",
+        "error": "s3(coder): 依赖未完成：s2；s4(reviewer): 依赖未完成：s3"
+      },
+      {
+        "edition": "enterprise",
+        "task_id": "multi_file_pkg",
+        "category": "multi_file",
+        "mode": "subagent",
+        "status": "ok",
+        "success": true,
+        "artifacts_ok": true,
+        "duration_ms": 53875,
+        "tokens": 111861,
+        "llm_calls": 15,
+        "steps": 15,
+        "verification_passed": null,
+        "rework_count": 0,
+        "human_interventions": 0,
+        "stop_reason": "no_more_tools",
+        "error": ""
+      }
+    ]
+  },
+  "notes": [
+    "所有数字均由原始报告聚合；缺失 cell 直接判失败，不用 0/默认值补齐。",
+    "计分口径：6 个计分任务 × 3 次重复；assertion_probe 等 expect_fail 探针按 expect_fail 过滤、不计分、不参与通过率，只做断言链路体检（它必须判 passed）。",
+    "评测成功率 = passed 任务数 / 6（按重复次数分别计算后聚合）；failed 与 error 分开计数（error 多为框架/环境问题，优先排查）。",
+    "协作成功率只统计 status=ok 的行；unavailable（如未激活的 multi）/ error 不进分母。",
+    "verification_pass_rate / artifacts_pass_rate 只统计真实测量到的行，未测量记 null（不是 0）。",
+    "estimated_cost_usd 是评测框架按价格表估算的值，仅供成本控制，不等于账单。",
+    "报告已对 API Key / 许可证 / 绝对路径做脱敏；不要回填任何未测得的数字。"
+  ]
+}

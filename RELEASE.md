@@ -1,4 +1,4 @@
-# 发布流程（当前版本 v1.11.18）
+# 发布流程（当前版本 v1.11.25）
 
 > 各版本变更明细见 [CHANGELOG.md](CHANGELOG.md)。本文档为**发布操作手册**，
 > 与具体版本号解耦 —— 下文 `<ver>` 以 `automind/__init__.py` 的
@@ -80,6 +80,11 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > 后续 tag 发布由仓库 Secret `PYPI_API_TOKEN` 自动完成；也可继续按「上传 PyPI」
 > 一节改用 Trusted Publisher（更推荐，零令牌）。
 
+> **v1.11.19 为源码级版本（2026-10-25）**：版本号、前端产物、文档与全量验收已完成；
+> PyPI 与三平台安装包**本次未发布**，按本文「构建社区版发布物」「构建桌面三平台安装包」
+> 「上传 PyPI」流程执行后即可发布。本版商业扩展包无功能变更（仅版本号同步），
+> 已换发过旧版 `.ampkg` 的客户可继续使用（公钥未轮换，旧许可证仍有效）。
+
 > **v1.11.18 已发布（2026-10-25）**：PyPI `automind_agent-1.11.18` 已上传；
 > GitHub Release 已包含 Windows 签名安装包 / 便携版、macOS 通用 DMG、Linux deb、
 > wheel/sdist、社区源码包与 `SHA256SUMS`。后续 tag 发布由仓库 Secret
@@ -131,6 +136,136 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > `/api/health` 返回 version=1.11.13、edition=community；macOS CI 已做
 > universal 合并校验；Linux 包冒烟测试通过；PyPI 1.11.13 已上传并可通过
 > `pip install "automind-agent[web]==1.11.13"` 安装。
+
+> **v1.11.25 为多智能体协同修复与体验修复版本（2026-11-01）**：修复多智能体协同执行链路
+> （`single` / `multi` / `subagent`）与“任务已交付后仍提示续跑”的体验问题，并沿用 v1.11.24 的
+> Web 评测取当前模型 / Key 修复。**实测（单轮 n=1，不构成统计显著结论）**：**PRO 与 ENTERPRISE
+> 各自完整 4×multi 均 4/4（两个独立完整 run，未拼接）**；v1.11.24 基线 PRO 0/4 / ENT 1/4；
+> PRO run `20261101-0830-final-pro`（512.69s / 648,081 tok / 97 次 LLM 调用）、
+> ENTERPRISE run `20261101-0840-final-real`（本机真实许可证；757.94s / 1,069,092 tok / 133 次调用；
+> verification 4/4、artifacts 3/3）；角色预算迭代 12/120k→3/4、20/200k→3/4、30/300k→4/4（失败轨迹保留）；
+> 已交付不提示续跑 **12 个离线用例通过**。**本版仅做社区版发布准备，商业版不发布**
+> （`pro` 仅版本号同步、无功能变更，不重建 / 不发布 Pro wheel 与 `.ampkg`）。
+
+**v1.11.25 当前状态（2026-11-01，多智能体协同修复 + 社区版发布准备）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.25`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 本版**无前端源码变更** → 沿用上一版产物，**无需重建**（若最终验收前有前端改动再重建） |
+| 社区版发布物（wheel / sdist / PyPI / 三平台安装包） | **已构建（待发布）**：wheel `dist/automind_agent-1.11.25-py3-none-any.whl` **1,972,619 B**，sha256 `1a11241b…6406b9d`；sdist `dist/automind_agent-1.11.25.tar.gz` **1,962,058 B**，sha256 `e36e90e6…cb1ec73`；源码包 `dist/automind-community-1.11.25-src.zip` **6,706,498 B**，sha256 `be8415d0…8b7b083`；`build_community` 审计通过、`twine check` **PASSED**；**PyPI / 三平台安装包是否发布由发布负责人决定**，发布后 PyPI 最新版为 `1.11.25` |
+| 商业扩展包 / `.ampkg` | **商业版不发布**：`pro` 仅版本号同步、无功能变更，**不重建 / 不发布** Pro wheel 与 `.ampkg`（公钥未轮换，旧许可证与旧 `.ampkg` 继续有效） |
+| 多智能体协同修复（已实测） | **PRO 完整 4×multi 4/4**（v1.11.24 基线 0/4；run `20261101-0830-final-pro`；512.69s / 648,081 tok / 97 次 LLM 调用；全部 completed + artifacts/verification 通过）；**ENTERPRISE 完整 4×multi 4/4**（**独立 run** `20261101-0840-final-real`，本机真实许可证；757.94s / 1,069,092 tok / 133 次调用；verification 4/4、artifacts 3/3；逐任务 analysis 206,078ms/78,241 tok、codegen 186,250/378,034、bugfix 101,734/135,182、multi_file 263,359/477,635）；targeted 2/2（`20261101-082717-real`）与旧 full 2/2（`20261101-080559-real`）仅作补充证据、**不拼接**；**单轮 n=1、单模型单机，不构成统计显著结论** |
+| 已交付不提示续跑（已验收） | **已修复并通过 12 个离线用例**（`tests/planning/test_artifact_scope_and_post_budget.py`，12 passed）：主任务 / 收尾预算分离，主交付完成后收尾预算耗尽不再 partial / 续跑（`resumable=false`、checkpoint completed）；真正 partial 仍可续跑；实际界面交互建议发版前人工复核 |
+| 残余风险（诚实记录） | ① 30 步 / 300k 仍偏紧（额外样本 **305,845 / 300,000**）；② 预算耗尽路径行级 token / LLM 调用**疑似少记**；③ Windows multi 检查点文件名含 `:` 保存失败 → **benchmark 会话续跑不可用**（不影响 8765 正常会话）；④ 单模型 / 单机 / n=1，不构成统计显著结论 |
+| 本轮变更 | 多智能体协同执行链路 7 项修复；已交付后不再提示续跑；Web 评测取当前模型 / Key（沿用 v1.11.24，无新增改动）；CHANGELOG / README / README.en / 使用手册（MD + 两份逐字节 HTML）/ RELEASE / docs/ACCEPTANCE.md 同步 |
+| 本轮验证 | 文档侧自检：`tests/test_version_consistency.py` **10 passed**、两份手册 HTML 逐字节一致（**311,079 B**，sha256 `A27D2569…455B9FBA`）、六处版本探针均为 `1.11.25`；`git diff --check` 通过（仅 CRLF 提示，无空白错误）。**最终 full acceptance：OK exit 0**（社区 **3529 passed / 6 skipped**、商业激活链路 15 passed、**pro 326 passed**、web/static 通过；hygiene 仅 warn 未跟踪私钥/缓存）；发布物 `build_community` 审计通过、`twine check` PASSED；新增离线回归 12 passed / 14 passed；实测证据在 `.automind/multi_v11125/raw/`（gitignored），`--live` 不接入 CI / 定时任务 |
+
+> **v1.11.24 为真实能力测评与社区版发布准备版本（2026-10-31）**：本版新增核心综合能力测评套件、
+> 版本隔离测评编排（社区 / 专业 / 企业）与报告聚合，并修复 Web `/api/eval` 未取当前已接入模型 / Key。
+> **本版仅做社区版发布准备**：社区 wheel / sdist 与三平台安装包按本文「构建社区版发布物」
+> 「构建桌面三平台安装包」「上传 PyPI」流程构建与验收；**商业版不发布**（`pro` 仅版本号同步、
+> 无功能变更，不重建 / 不发布 Pro wheel 与 `.ampkg`）。
+> **真实能力测评已完成并回填（v1.11.24b，82/82 cell 完整、`validation.ok=true`）**：
+> 核心 54/54 全通过（每版 18/18）；协作矩阵如实披露失败（pro `multi` 0/4、enterprise `multi` 1/4 等）；
+> 结论为**可发版（带条件）**，条件与全部失败案例见
+> [docs/BENCHMARK_v1.11.24.md](docs/BENCHMARK_v1.11.24.md) 与 [CHANGELOG.md](CHANGELOG.md) §四。
+
+**v1.11.24 当前状态（2026-10-31，真实能力测评 + 社区版发布准备）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.24`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 本版**无前端源码变更** → 沿用上一版产物，**无需重建**（若最终验收前有前端改动再重建） |
+| 社区版发布物（wheel / sdist / PyPI / 三平台安装包） | **社区版发布准备**：已构建并审计 `dist/automind_agent-1.11.24-py3-none-any.whl`（1,964,452 B，sha256 `650541e570140a2d34ad9c9c2bfe28e38023201470ecfdd440f530619ef5c761`）、`dist/automind_agent-1.11.24.tar.gz`（1,950,753 B，sha256 `433174365e444d5f7e9fb488b4f0dfdcee4c4487a38dd54f8a7aeb207c0d6e87`）、`dist/automind-community-1.11.24-src.zip`（6,665,076 B，sha256 `367b9575a1ce19d64c223c43af26302f7b1e214ec319e65817520c8cb271685d`）；`scripts/build_community.py` 审计通过，`twine check` 通过；**PyPI / 三平台安装包未上传/未发布**，是否发布由发布负责人决定 |
+| 商业扩展包 / `.ampkg` | **商业版不发布**：`pro` 版本号同步；为隔离测评已本地重建 staging `pro/dist/automind_pro-1.11.24-py3-none-any.whl`（139,964 B，sha256 `202ed5696250b059f24f5c8fff49d0e52d966a58210eb3cc057da3a2a02bbe1c`）与两份测试 `.ampkg`（`AutoMind-PRO-benchmark-20271231.ampkg` 138,656 B，sha256 `68697c453f31cf931287418177a674482b2ce5a181a47a6f146bf3edc4641563`；`AutoMind-ENT-benchmark-00000000.ampkg` 138,667 B，sha256 `3e0c60fab802f1215409ff51b9d06c13903be068f6393e5f2bd8bc1bca5a06e4`），**不发布、不分发、不进入社区包**；旧产物归档在 `pro/dist/archive-1.11.23/`、`dist/upgrades/archive-1.11.23/` |
+| 测评结果（已完成） | **v1.11.24b 实测**：核心 6 任务 × 3 版本 × 3 轮 **54/54**（每版 18/18，100%）；耗时 / Token / 估算成本：社区 331.38s / 576,476 / $0.391097、专业 358.30s / 608,693 / $0.410784、企业 265.59s / 545,589 / $0.354959；探针三版本各 3/3 `passed`；协作矩阵：community single 1/4、pro single 1/4、**pro multi 0/4**、pro subagent 4/4、enterprise single 3/4、enterprise multi 1/4、enterprise subagent 4/4；隔离矩阵：社区 0/27、专业 19/27、企业 27/27 商业 feature；数据完整性 82/82、`validation.ok=true`。**整体结论：可发版（带条件）** —— 协作矩阵真实失败须如实披露；n=1 协作 / 单模型 / 单机，不构成统计显著结论。详见 `docs/BENCHMARK_v1.11.24.md`、`docs/benchmark/v1.11.24/` |
+| 本轮变更 | 综合测评套件 `automind/eval/suites/comprehensive.yml`（6 评分任务 + expect_fail 探针）；版本隔离 `scripts/edition_benchmark.py`（dry-run 默认 / `--live` 三隔离 server）+ `scripts/benchmark_report.py`（完整性校验 / 聚合 / 脱敏）；Web `/api/eval` 取当前模型与已保存 Key（无 Key 409、响应不含 Key；CLI 默认不变）；离线测试 `tests/eval/test_comprehensive_suite.py`、`tests/eval/test_eval_key_target.py`、`tests/server/test_eval_api.py`、`tests/planning/test_edition_benchmark.py`；文档与手册同步 |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）**：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）；`tests/` **3517 passed / 6 skipped**、`pro/tests` **312 passed**、`tsc --noEmit` 通过、dist 引用完整；社区 `scripts/build_community.py` 审计通过、`twine check` 通过；`issue_license.py doctor` **12/12 全绿（exit 0）**；两份手册 HTML 逐字节一致（297,788 B，sha256 `1ebf7f30ce56b99d7eb26deb63b34ba3e04527b7e87ee321e6fe38b475bf00b1`）；`tests/test_version_consistency.py` 10 passed。真实测评 `v1.11.24b` 已完成（82/82 cell，`validation.ok=true`；核心 54/54），原始数据见 `docs/benchmark/v1.11.24/` |
+
+> **v1.11.23 为源码级审计版本（2026-10-31）**：本版做四类并发 / 生命周期链路审计与压力测试
+> （团队看板 / 多智能体工程协同 / 子智能体委派 / WebSocket 与团队在线），除审计确认的真实缺陷做**最小修复**
+> 外不改产品功能。审计修复触及 `automind/` 多个链路与 `pro/` 版本号，**Pro 同号 wheel 与两份 `.ampkg` 已重建**
+> （社区源码随仓库；社区 wheel / sdist 与 PyPI / 三平台安装包**本次未构建、未发布**）—— 按本文
+> 「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」流程执行后即可发布。
+
+**v1.11.23 当前状态（2026-10-31，源码级审计发版）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.23`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 本版**无前端源码变更**（审计轮），沿用 v1.11.22 产物：`index.html`（21,524 B，sha256 `e63b3bd0…cfa183`）、`assets/index-B2hJf0GU.js`（1,803,184 B，sha256 `3a5a3005…815757`）、`assets/index-B2al-U9D.css`（126,624 B，sha256 `22f6ac5c…fae61e`）；`tsc --noEmit` 与 dist 引用检查通过 |
+| 社区 / 商业扩展包产物 | 审计修复触及 `automind/`（团队看板、子智能体、WS、工作流摘要缓存、治理账本轮转）与 `pro/` 版本号，已重建同号 Pro wheel `pro/dist/automind_pro-1.11.23-py3-none-any.whl`（139,968 B，sha256 `92d3c2e2a7029a10a15d8b5b72f0841c113e387679946e2f2a7c945de1f5329d`）与两份 `.ampkg`（旧产物归档：`pro/dist/archive-1.11.22/`、`dist/upgrades/archive-1.11.22/`）；`AutoMind-PRO-acme-20271231.ampkg`（138,656 B，sha256 `2f77de8dcbfe28fcaf23e148f9c6b317da41a6fe98c3ad8347993110ed190d62`）、`AutoMind-ENT-bigcorp-00000000.ampkg`（138,672 B，sha256 `6a4be4c213ca1faac93fcfcd638f7a3f48655301ae31d5d5f297dedafb04efd7`）；`issue_license.py doctor` **12/12 全绿（exit 0）** |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建 / 未发布**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 老客户升级 | 无功能变更 → **无需换发**；若本轮产物重建，按同号包可选换发（公钥未轮换，旧许可证继续有效） |
+| 本轮变更 | 审计与压力测试：团队任务看板并发（create/claim/update/comment + SQLite 整表替换）、多智能体工程协同压力、子智能体委派生命周期、WebSocket / 团队在线并发；新增 `tests/audit/test_team_flow.py`、`pro/tests/test_engineering_stress.py`、`tests/planning/test_subagent_stress_audit.py`、`tests/server/test_ws_stress_audit.py` 与 `docs/AUDIT_v1.11.23.md`（方法论 / 矩阵 / 结果与发现）；真实缺陷做最小修复（发现与修复项由审计负责人回填） |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）**：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）；`tests/` **3426 passed / 6 skipped**、`pro/tests` **312 passed**、`issue_license.py doctor` **12/12 全绿（exit 0）**；四个审计文件 **89/89** 通过（A1 16 / A2 29 / A3 30 / A4 14）；`tsc --noEmit` 通过、dist 引用完整；两份手册 HTML 逐字节一致（282,761 B，sha256 `81db8edd…f344f4615`）；`tests/test_version_consistency.py` 10 passed |
+| 审计结论 | 见 `docs/AUDIT_v1.11.23.md`：P0=0，P1 三组 8 处 + P2 三组全部修复；可发版（带条件），残余边界（跨进程锁、目录 scope 精确键、审查预算语义、skip 下游、stop 超时）已如实列出 |
+
+> **v1.11.22 为源码级版本（2026-10-31）**：本版改核心执行接口（协同角色预算 / 聚合用量 /
+> `run_subtask` 扩展）、商业扩展包（新增工程协同编排器）、Web 前端（协同卡片 DAG / 预算 / 验证摘要）
+> 与文档。**本版商业扩展包有功能变更，同号 wheel 与两份 `.ampkg` 已重建**（旧产物归档，`doctor` 12/12；
+> 公钥未轮换，旧许可证继续有效）；前端已用本版源码重建 `automind/static/dist/`；**未发布 PyPI 与
+> 三平台安装包** —— 按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」流程执行后即可发布。
+
+**v1.11.22 当前状态（2026-10-31，源码级功能发版）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.22`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 已用 v1.11.22 前端源码重建：`index.html`（21,524 B，sha256 `e63b3bd0d5b6e073e502cfa95d9be2f5d5145858a51db76d00547b740bcfa183`）、`assets/index-B2hJf0GU.js`（1,803,184 B，sha256 `3a5a3005a252d0aa6ad6115109112025c3e7a788a9f0be06155020a622815757`）、`assets/index-B2al-U9D.css`（126,624 B，sha256 `22f6ac5c9f3c538f614d96eaf4b25267bbbd4b9638d3eed52908133b34fae61e`） |
+| 商业扩展包 / 一键升级包 `.ampkg` | 已重建同号 wheel `pro/dist/automind_pro-1.11.22-py3-none-any.whl`（139,968 B，sha256 `e61922e45923ae85a7a6a27f07206a8dd8ed36fda157a9568155f715147468a2`，含新增 `automind_pro/multiagent/engineering.py`），旧 1.11.21 wheel 归档到 `pro/dist/archive-1.11.21/`；两份 `.ampkg` 用 1.11.22 wheel 重建（旧包归档到 `dist/upgrades/archive-1.11.21/`）：`AutoMind-PRO-acme-20271231.ampkg`（138,654 B，sha256 `93bd8e06f9fdbdcd73ba9a52d245b4fb774b2dd99fa79b089382292a1688c081`）、`AutoMind-ENT-bigcorp-00000000.ampkg`（138,670 B，sha256 `ee84412d400c5dfe09f5f30b21b86a01ace049383b72b5e2e7422bf373910793`）；`issue_license.py doctor` **12/12 全绿（exit 0）**；本机 `.automind/extensions` 已装 1.11.22（运行中的旧进程需重启加载） |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建 / 未发布**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 老客户升级 | **需要换发**：本版 Pro 有功能变更（工程协同），旧 `.ampkg` 仍可激活但不含新能力；公钥未轮换，旧许可证继续有效 |
+| 本轮变更 | 多智能体工程团队（pro 新增 `EngineeringOrchestrator`：DAG 拆解 / 工具角色 `clone_for_session` + `run_subtask` / 共享工作区 `write_paths` + `path_lock` 写锁 / 角色级预算 / reviewer 有界回炉 / 测试 + 语义验证闭环 / 聚合 metrics + token_usage）；社区接线（`run_multi` 传父 Agent、`_finish_run_mode` 保留聚合用量与 verification/metrics、`run_subtask` 的 `max_iteration_extensions` 与 usage/llm_calls、`ExecutionConfig` 7 个 `multi_agent_*` 参数、server 记录 verification/metrics）；前端协同展示；协同质量评测脚本 + 指标测试 + `docs/COLLABORATION.md`；版本与文档同步 |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）**：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）；`tests/` **3364 passed / 6 skipped**、`pro/tests` **283 passed**、`issue_license.py doctor` **12/12 全绿（exit 0）**；`tsc --noEmit` 通过、`automind/static/dist` 产物引用完整；两份手册 HTML 逐字节一致（271,611 B，sha256 `bdddc843…a30b22e63`）；`tests/test_version_consistency.py` 10 passed |
+
+> **v1.11.21 为源码级版本（2026-10-29）**：本版只改核心 agent（自主闭环修复轮预算 / AgentResult 结构化状态 /
+> token 优化）、Web 前端（历史 / 失败卡片诊断、修复轮设置项）与文档。**商业包同号 wheel 与两份 `.ampkg` 已重建**
+> （`issue_license.py doctor` 12/12 全绿，旧产物归档）；**未发布 PyPI 与三平台安装包** —— 按本文
+> 「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」流程执行后即可发布。
+> 商业扩展包无功能变更、公钥未轮换，旧许可证与旧 `.ampkg` 继续有效。
+
+**v1.11.21 当前状态（2026-10-29，源码级补丁发版）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.21`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 已用 v1.11.21 前端源码重建：`index.html`（21,524 B，sha256 `7641fe947dee9d3d7407fad7dacc71fdaf8ed4cd97920e27be936e1f4cd85850`）、`assets/index-BjfNitEq.js`（1,793,831 B，sha256 `e3f8cbf5587ddb066ca38f5448661133c5413da905fb6399a1f47defde7a5c43`）、`assets/index-B2al-U9D.css`（126,624 B，sha256 `22f6ac5c9f3c538f614d96eaf4b25267bbbd4b9638d3eed52908133b34fae61e`） |
+| 商业扩展包 / 一键升级包 `.ampkg` | 本版**商业扩展包无功能变更**（`pro` 仅版本号同步）：已重建同号 wheel `pro/dist/automind_pro-1.11.21-py3-none-any.whl`（119,603 B，sha256 `ebe0f7d80a8e2792d8fc0852c17a7ae9bccbae11cb0ad7e195b0604e13dda3e1`），旧 1.11.20 wheel 归档到 `pro/dist/archive-1.11.20/`；两份 `.ampkg` 用 1.11.21 wheel 重建（旧包归档到 `dist/upgrades/archive-1.11.20/`）：`AutoMind-PRO-acme-20271231.ampkg`（118,299 B，sha256 `7326c5283953665edd47463f29f16d12db0822616afc37c9ccb9a1862d1601a2`）、`AutoMind-ENT-bigcorp-00000000.ampkg`（118,311 B，sha256 `4380329430c54c165f2152cf0b693035f41b35908fc9534886c758b10f995e48`）；`issue_license.py doctor` **12/12 全绿（exit 0）** |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建 / 未发布**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 老客户升级 | 无需换发：本版无 Pro 功能变更，公钥未轮换，旧许可证与旧 `.ampkg` 继续有效 |
+| 本轮变更 | 自主闭环修复轮独立预算（`auto_verify_fix_max_iterations` 默认 1，每轮最多 1 步、不续窗、只继承剩余 deadline）+ 主任务部分交付跳过 LLM 审查 / 验收 / 修复轮；`AgentResult` 新增 `stop_reason` / `error` / `resumable` / `budget_exhausted` / `llm_calls` 并落库、在前端历史 / 失败卡片展示；复用验收结论、简单任务与干净成功跳过昂贵闭环、保持前缀缓存以省 token；2 个脚本化长任务回归用例；版本与文档同步 |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）**：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）；`tests/` **3324 passed / 6 skipped**、`pro/tests` **256 passed**、`issue_license.py doctor` **12/12 全绿（exit 0）**；`tsc --noEmit` 通过、`automind/static/dist` 产物引用完整；两份手册 HTML 逐字节一致（257,801 B，sha256 `16dfcd84…ad26b9`）；`tests/test_version_consistency.py` 10 passed |
+
+> **v1.11.20 为源码级版本（2026-10-28）**：版本号、前端产物、文档与定向/全量验收完成后，
+> PyPI 与三平台安装包**本次未发布**，按本文「构建社区版发布物」「构建桌面三平台安装包」
+> 「上传 PyPI」流程执行后即可发布。本版商业扩展包无功能变更（仅版本号同步），
+> 已换发过旧版 `.ampkg` 的客户可继续使用（公钥未轮换，旧许可证仍有效）。
+
+**v1.11.20 当前状态（2026-10-28，源码级补丁发版）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.20`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 已用 v1.11.20 前端源码重建（新增「✨ 优化」按钮与问题优化弹窗、断线重连状态）：`index.html`（21,524 B，sha256 `95e5f4e6…58029f7`）、`assets/index-B9ltGihC.js`（1,790,559 B，sha256 `117ba679…9575cb`）、`assets/index-B2al-U9D.css`（126,624 B，sha256 `22f6ac5c…aae61e`）；`tsc --noEmit` 通过、产物引用完整性校验通过（旧哈希产物已由 Vite emptyOutDir 清理） |
+| 商业扩展包 / 一键升级包 `.ampkg` | 本版**商业扩展包无功能变更**（仅版本号同步，src 已对齐）：已重建同号 wheel `pro/dist/automind_pro-1.11.20-py3-none-any.whl`（119,603 B，sha256 `e54be28c21888cc19ee9d959ff2f9dcbb3c410854fdab9f31342ae2053f22d18`），旧 1.11.19 wheel 归档到 `pro/dist/archive-1.11.19/`；`.ampkg` 两份均用 1.11.20 wheel 重建（旧包归档到 `dist/upgrades/archive-1.11.19/`）：`dist/upgrades/AutoMind-PRO-acme-20271231.ampkg`（118,308 B，sha256 `0adb12a9fbda150d33207500b998856dd7760cb53faaf4e502a5e1e0d101f258`）与 `AutoMind-ENT-bigcorp-00000000.ampkg`（118,321 B，sha256 `019ae211258cfec3fed15759137584c2eb82b07a2b45f2731b8c8f206bb33ecb`）；`issue_license.py doctor` **12/12 全绿（exit 0）** |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建 / 未发布**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 老客户升级 | 无需换发：本版无 Pro 功能变更，公钥未轮换，旧许可证与旧 `.ampkg` 继续有效 |
+| 本轮变更 | 桌面版静默子进程（`CREATE_NO_WINDOW` 统一层 + 全局 Popen 补丁，修复不定期空终端窗口）；长任务韧性（WS 断线 120s 保活 / 重连接管或回放、慢客户端 5s 推送超时、工具开始与每 5s 进度事件、读目标守卫、续步上限 2→1）；外层工具超时 +10% 留给工具内部回执；输入框「✨ 优化问题」（`POST /api/prompt/optimize`，模型改写 + 本地兜底）；版本与文档同步 |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）**：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）；`tests/` **3287 passed / 6 skipped**、`pro/tests` **256 passed**、`issue_license.py doctor` **12/12 全绿（exit 0）**；`tsc --noEmit` 通过、前端产物引用完整；`tests/test_version_consistency.py` 10 passed；两份手册 HTML 哈希一致（`3801c063…75db76`） |
+
+**v1.11.19 当前状态（2026-10-25，源码级发版）**：
+
+| 项目 | 状态 |
+|---|---|
+| 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.19`，`tests/test_version_consistency.py` 全绿 |
+| 前端 `automind/static/dist/` | 已用 v1.11.19 前端源码重建：`index.html`（21,524 B，sha256 `9f094299…ba78d`）、`assets/index-CIvBveJx.js`（1,782,807 B，sha256 `10056f72…72f4f`）、`assets/index-D8djCJr0.css`（124,785 B，sha256 `5a8ec39b…f6057e`）；tsc --noEmit 通过、产物引用完整性校验通过（治理中心卡片 + 交付图片预览弹窗已随界面生效） |
+| 商业扩展包 / 一键升级包 `.ampkg` | 本版**商业扩展包无功能变更**（仅版本号同步，仍重建了同号产物以保证 `doctor` / 版本一致性测试全绿）：`pro/dist/automind_pro-1.11.19-py3-none-any.whl`（119,600 B，sha256 `a5fe9039d8d6ce074995a1266a76d21776d032e932bb783c011c56789261ca3e`），旧 1.11.18 wheel 归档到 `pro/dist/archive-1.11.18/`；`.ampkg` 两份均用 1.11.19 wheel 重新签发：`dist/upgrades/AutoMind-PRO-acme-20271231.ampkg`（118,304 B，sha256 `03dbfdf96ae00a41c0401626ab05a58b278b61622f3e5f4445e7479f055c61f1`）与 `AutoMind-ENT-bigcorp-00000000.ampkg`（118,315 B，sha256 `0a027eca99a7aa02edd396a9eddcc06f26fedc396bb08f1e1f04c10fa09768e4`），旧包归档到 `dist/upgrades/archive-1.11.18/`；`issue_license.py doctor` **12/12 全绿（exit 0）** |
+| 社区 wheel / sdist / PyPI / 三平台安装包 | **本次未构建 / 未发布**；发布时按本文「构建社区版发布物」「构建桌面三平台安装包」「上传 PyPI」执行 |
+| 老客户升级 | 无需换发：本版无 Pro 功能变更，公钥未轮换，旧许可证与旧 `.ampkg` 继续有效 |
+| 本轮变更 | 运行底座治理审计账本（哈希链 / 脱敏 / fail-open）+ 分派级治理闸门（堵 workflow / skill / direct 审批旁路）+ 治理中心 4 个只读接口与 Web 卡片；`scripts/acceptance.py` 发布门禁 + `AUTOMIND_FORCE_COMMUNITY=1` 社区版强制模式 + 残留清理安全策略；修复交付图片无法预览（二进制直出 + `<img>` 弹窗） |
+| 本轮验证 | `python scripts/acceptance.py --profile full` → **OK（exit 0）：version / lint / tests / pro / web 全绿，hygiene 仅提示本机未提交的签发私钥（预期）**；`tests/` **3185 passed / 4 skipped** + 二趟商业激活 **15 passed**；`pro/tests` **256 passed**；`ruff check .`、`tsc --noEmit`、前端产物完整性、`tests/test_version_consistency.py` 均通过；`issue_license.py doctor` **12/12 全绿** |
 
 **v1.11.18 当前状态（2026-10-25，源码级补丁发版）**：
 
@@ -478,6 +613,198 @@ python -m pytest pro/tests/test_commercial_activation_pro.py \
 python -m pytest tests/test_version_consistency.py tests/test_commercial_activation.py -q
 python -m ruff check pro automind/core/edition.py tests
 ```
+
+### v1.11.24 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（static / fast 先跑；发布前 full）
+python scripts/acceptance.py --profile static
+python scripts/acceptance.py --profile fast --json acceptance.json --report acceptance.md
+
+# 1) 综合测评套件（离线：可加载 / 任务数 / 断言 / 反向断言）
+python -m pytest tests/eval/test_comprehensive_suite.py -q
+
+# 2) Web 评测取当前模型（离线：Key 传递 / 无 Key 409 / 覆盖 / 响应不含 Key）
+python -m pytest tests/eval/test_eval_key_target.py tests/server/test_eval_api.py -q
+
+# 3) 版本隔离测评编排（离线：dry-run / 矩阵 / 聚合 / 脱敏 / 缺失 cell 失败）
+python -m pytest tests/planning/test_edition_benchmark.py -q
+python scripts/edition_benchmark.py --dry-run        # 只校验矩阵，不联网、不启动 server
+
+# 4) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 5) 前端（仅当本轮有前端改动时才需要重建）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.24 为**真实能力测评 + 社区版发布准备**：离线测试不调用真实模型；
+> `scripts/edition_benchmark.py --live` 会启动真实 server、调用真实模型并产生费用，
+> **只由发布负责人在受控环境执行**，不得接入 CI / 定时任务。**真实测评已完成（v1.11.24b，82/82 cell，
+> `validation.ok=true`）**，结果与失败案例已回填 `docs/BENCHMARK_v1.11.24.md`、`CHANGELOG.md` §四与上方状态表；
+> 对外文案必须保留失败案例与"不构成统计显著结论"边界。商业版本版不发布，无需重建 Pro wheel / `.ampkg`。
+
+### v1.11.23 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（static / fast 先跑；发布前 full）
+python scripts/acceptance.py --profile static
+python scripts/acceptance.py --profile fast --json acceptance.json --report acceptance.md
+
+# 1) A1 团队任务看板并发与流程
+python -m pytest tests/audit/test_team_flow.py -q
+
+# 2) A2 多智能体工程协同压力（需 PYTHONPATH 含 pro）
+$env:PYTHONPATH='pro'
+python -m pytest pro/tests/test_engineering_stress.py -q
+
+# 3) A3 子智能体委派压力与生命周期
+python -m pytest tests/planning/test_subagent_stress_audit.py -q
+
+# 4) A4 WebSocket / 团队在线与并发
+python -m pytest tests/server/test_ws_stress_audit.py -q
+
+# 5) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 6) 前端（仅当本轮有前端改动时才需要重建）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.23 为**审计 / 压力测试轮**：审计用例全部 fake / scripted，**不需要真实 API Key**，也不接真实模型；
+> 若审计确认了真实缺陷，修复必须**最小化并带回归测试**（保留旧 API / 测试）。社区 / Pro 产物按修复是否
+> 触及对应目录决定是否重建（重建后 `issue_license.py doctor` 需 12/12 全绿）；本版不发布 PyPI / 三平台安装包。
+> 审计数字（用例数 / 耗时 / 发现 / 修复）与手册哈希请回填 `docs/AUDIT_v1.11.23.md` 与上方状态表。
+
+### v1.11.22 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（static / fast 先跑；发布前 full）
+python scripts/acceptance.py --profile static
+python scripts/acceptance.py --profile fast --json acceptance.json --report acceptance.md
+
+# 1) 核心执行接口接线（run_multi 传父 Agent / run_subtask 扩展 / 聚合用量保留）
+python -m pytest tests/core/test_multi_agent_engineering_wiring.py -q
+
+# 2) 工程协同编排器（DAG / 写锁 / 角色预算 / 回炉 / 验证闭环；需 PYTHONPATH 含 pro）
+$env:PYTHONPATH='pro'
+python -m pytest pro/tests/test_engineering_multi_agent.py pro/tests/test_multi_loop_budget_resume.py -q
+python -m ruff check pro/automind_pro/multiagent
+
+# 3) 协同质量评测脚本（矩阵 / 指标聚合 / CSV / dry-run，无需真实模型）
+python -m pytest tests/planning/test_collab_benchmark_metrics.py -q
+python scripts/collab_benchmark.py --dry-run
+
+# 4) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 5) 前端（本轮改了 web/src/**，发布前必须重建 automind/static/dist）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.22 为**协同能力功能发版**：商业扩展包有功能变更（工程协同编排器），**必须重建同号 wheel 与
+> 两份 `.ampkg`**（`issue_license.py doctor` 12/12 全绿后再出包）；前端有源码变更，**发布前必须重建
+> `automind/static/dist`**；本版不发布 PyPI / 三平台安装包。评测脚本默认 dry-run，**不要**把
+> `collab_benchmark.py --live` 接进 CI（真实模型 + 计费）。验证完成后把 `tests` / `pro` / `ruff` /
+> 前端产物 / 手册哈希 / pro 产物哈希回填到上方状态表。
+
+### v1.11.21 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（static / fast 先跑；发布前 full）
+python scripts/acceptance.py --profile static
+python scripts/acceptance.py --profile fast --json acceptance.json --report acceptance.md
+
+# 1) 修复轮预算与主任务部分交付短路
+python -m pytest tests/planning/test_autonomy_budget.py -q
+
+# 2) AgentResult 结构化状态 + server 落库字段映射（脱敏 / 截断）
+python -m pytest tests/core/test_agent_result_fields.py -q
+
+# 3) 长任务回归（计划完成 + 验收未过；反复验证无新产物）
+python -m pytest tests/planning/test_long_task_regressions.py -q
+
+# 4) 既有长任务护栏不回归
+python -m pytest tests/planning/test_long_task_guards.py tests/planning/test_react_no_progress.py \
+    tests/core/test_v164_reliability.py -q
+
+# 5) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 6) 前端（本轮改了 web/src/**，发布前必须重建 automind/static/dist）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.21 为**长任务预算治理与可诊断性修复轮**：商业扩展包无功能变更（`pro` 版本号随核心到 1.11.21，
+> 同号 wheel 与两份 `.ampkg` 已重建，旧产物归档）；前端已用本版源码重建 `automind/static/dist`；
+> 本版不发布 PyPI / 三平台安装包。验证完成后把 `tests` / `ruff` / 前端产物的实际数字与哈希回填到上方状态表。
+
+### v1.11.20 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（static / fast 先跑；发布前 full）
+python scripts/acceptance.py --profile static
+python scripts/acceptance.py --profile fast --json acceptance.json --report acceptance.md
+
+# 1) 静默子进程（Windows 真行为：子进程 GetConsoleWindow()==0）
+python -m pytest tests/core/test_silent_subprocess.py -q
+
+# 2) WS 断线保活 / run_state / 终态回放
+python -m pytest tests/server/test_ws_run_reattach.py -q
+python -m pytest tests/server/test_ws_interject.py tests/server/test_approval_flow.py \
+    tests/test_checkpoint_resume_e2e.py -q
+
+# 3) 工具执行可见 / 读目标守卫 / 续步上限 / 超时让位
+python -m pytest tests/planning/test_tool_liveness.py tests/planning/test_read_target_guard.py \
+    tests/planning/test_long_task_guards.py tests/core/test_v164_reliability.py \
+    tests/planning/test_react_no_progress.py -q
+
+# 4) 输入框问题优化（后端模块 + REST 端点 + 路由快照）
+python -m pytest tests/core/test_prompt_optimizer.py tests/server/test_prompt_optimize_api.py \
+    tests/server/test_route_inventory.py -q
+
+# 5) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 6) 前端（本轮改了 web/src/**，必须重建）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.20 为**体验与稳定性修复轮**：商业扩展包无功能变更（`pro` 版本号随核心到 1.11.20），
+> 前端有源码变更（✨ 优化按钮 / 弹窗、重连状态），**必须重建 `automind/static/dist`**；
+> 桌面版建议在 Windows 实机复验一次“启动 + 跑一条命令不弹空终端窗口”。
+> 验证完成后把 `tests` / `pro` / `ruff` / 前端产物的实际数字与哈希回填到上方状态表。
+
+### v1.11.19 新增验证项（发版前逐条跑）
+
+```bash
+# 0) 一条命令的总门禁（六类门禁 + JSON/Markdown 报告；失败给可复现命令）
+python scripts/acceptance.py --profile full --json acceptance.json --report acceptance.md
+
+# 1) 治理账本 / 分派级闸门 / 治理中心
+python -m pytest tests/core/test_governance.py tests/tools/test_dispatch_governance.py \
+    tests/server/test_governance_api.py -q
+
+# 2) 交付图片预览（核心断言：响应体与磁盘逐字节相等）
+python -m pytest tests/server/test_preview_image.py -q
+
+# 3) 验收门禁自身 + 社区版强制模式
+python -m pytest tests/test_acceptance_gate.py tests/core/test_edition_force_community.py -q
+
+# 4) 社区版全量（本机有商业许可证时必须带 AUTOMIND_FORCE_COMMUNITY=1，
+#    否则社区门控类用例会因许可证而大面积失败 —— 这是环境效应，不是代码回归）
+AUTOMIND_FORCE_COMMUNITY=1 python -m pytest tests/ -q
+
+# 5) 版本一致性（六处同号 + 手册含本版条目）
+python -m pytest tests/test_version_consistency.py -q
+
+# 6) 前端（改过 web/src/** 时）
+cd web && node node_modules/typescript/bin/tsc --noEmit && node node_modules/vite/bin/vite.js build
+```
+
+> ⚠️ v1.11.19 为**治理与修复轮**：商业扩展包无功能变更（`pro` 版本号随核心到 1.11.19；
+> 是否重建同号 wheel 与 `.ampkg` 见上方状态表回填）。前端有源码变更（治理中心 + 图片预览），
+> **必须重建 `automind/static/dist`**，否则界面仍是旧版。
 
 ### v1.11.18 新增验证项（发版前逐条跑）
 

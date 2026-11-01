@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from automind.core.logging import get_logger
+from automind.core.proc import silent_process_kwargs
 
 logger = get_logger("automind.tools.background")
 
@@ -208,6 +209,8 @@ async def start(command: str, workdir: str, env: dict[str, str],
             stderr=asyncio.subprocess.PIPE,
             cwd=workdir,
             env=env,
+            # v1.11.20：后台任务同样不该在桌面上闪一个黑框
+            **silent_process_kwargs(),
         ),
         timeout,
     )
@@ -249,6 +252,7 @@ async def start_argv(argv: list[str], workdir: str,
             stderr=asyncio.subprocess.PIPE,
             cwd=workdir,
             env=env,
+            **silent_process_kwargs(),
         ),
         timeout,
     )

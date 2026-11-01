@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from automind.core.proc import silent_process_kwargs
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools._toolkit import bad, err, need, ok, run_blocking
 from automind.tools.base import AbstractTool
@@ -97,7 +98,9 @@ class GitTool(AbstractTool):
             # 会把整个事件循环一起占住（其它会话、审批弹窗、心跳全部冻住）。
             proc = await run_blocking(subprocess.run, cmd, capture_output=True,
                                       timeout=180, check=False,
-                                      encoding="utf-8", errors="replace")
+                                      encoding="utf-8", errors="replace",
+                                      # v1.11.20：git 探活/操作也不能闪黑框
+                                      **silent_process_kwargs())
             output = (proc.stdout or "") + (proc.stderr or "")
             return ok(self.name, action=action, exit_code=proc.returncode,
                       output=output.strip()[:8000],

@@ -283,11 +283,46 @@ class TestReactPartialDelivery:
                              tool_budget=0)
 
     def test_iterations_extended_while_progressing(self):
-        """v1.11.7：步数用完但每步都在成功推进 → 自动续加步数窗口（最多 2 次）。"""
+        """v1.11.7：步数用完但每步都在成功推进 → 自动续加步数窗口。
+
+        v1.11.20：最多续加 **1** 次（原来 2 次）。读目标守卫堵住了"换参数反复
+        读同一目标"这条最常见的绕法，第二次续步几乎总是纯预算消耗。
+        所以 3 步窗口 × (1+1) = 6 步、extensions=1。
+        """
         ex = self._executor(max_iter=3)
         out = asyncio.run(ex.run("做事"))
-        assert ex.iterations_used == 9 and ex.iteration_extensions_used == 2
-        assert ex.stop_reason == "max_iterations" and "out9.txt" in out
+        assert ex.iterations_used == 6 and ex.iteration_extensions_used == 1
+        assert ex.stop_reason == "max_iterations" and "out6.txt" in out
+
+    def test_iteration_extension_is_reported(self):
+        """v1.11.20：续步不再"悄悄"发生 —— 必须推 react_iterations_extended。
+
+        既支持专用 ``on_extension`` 回调（agent 走这条），也在只提供
+        ``on_no_progress`` 的旧调用方上回退复用同一通道。
+        """
+        events: list[dict] = []
+
+        async def on_ext(ev):
+            events.append(ev)
+
+        ex = self._executor(max_iter=3)
+        asyncio.run(ex.run("做事", on_extension=on_ext))
+        ext = [e for e in events if e.get("type") == "react_iterations_extended"]
+        assert len(ext) == 1, [e.get("type") for e in events]
+        assert ext[0]["used"] == 1
+        assert ext[0]["max"] == 1
+        assert ext[0]["new_limit"] == 6
+
+        # 旧通道回退：只给 on_no_progress 也能收到续步事件
+        fallback: list[dict] = []
+
+        async def on_np(ev):
+            fallback.append(ev)
+
+        ex2 = self._executor(max_iter=3)
+        asyncio.run(ex2.run("做事", on_no_progress=on_np))
+        assert any(e.get("type") == "react_iterations_extended" for e in fallback), \
+            "on_extension 缺省时应复用 on_no_progress 通道"
 
     def test_manifest_lists_artifacts_and_progress(self):
         ex = self._executor(max_iter=3)

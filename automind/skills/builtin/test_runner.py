@@ -11,6 +11,7 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from automind.core.proc import silent_process_kwargs
 from automind.skills.skill_base import AbstractSkill, SkillResult
 
 # pattern 由模型填写，此前被直接拼进 shell 字符串并以 shell=True 执行 ——
@@ -82,6 +83,8 @@ class TestRunnerSkill(AbstractSkill):
                     argv, shell=False, cwd=inp.directory,
                     capture_output=True, text=True, timeout=120,
                     encoding="utf-8", errors="replace",
+                    # v1.11.20：跑测试是长命令，桌面版上不该有一个黑框一直亮着
+                    **silent_process_kwargs(),
                 )
                 return SkillResult(
                     success=proc.returncode == 0,

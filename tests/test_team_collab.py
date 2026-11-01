@@ -199,6 +199,22 @@ class TestTeamStore:
         with pytest.raises(team.TaskNotFound):
             store.delete("nope")
 
+    def test_claim_conflict_is_explicit_not_silent(self):
+        """v1.11.23：已被他人认领的任务不能被静默覆盖（并发审计修复）。"""
+        box: list[dict] = []
+        store = team.TeamStore(loader=lambda: list(box),
+                               saver=lambda items: box.__setitem__(slice(None), items))
+        t = store.create(title="只能一个人认领")
+        store.claim(t["id"], "小王")
+        with pytest.raises(team.TaskClaimed) as ei:
+            store.claim(t["id"], "小李")
+        assert ei.value.assignee == "小王" and "小王" in str(ei.value)
+        assert store.load()[0]["assignee"] == "小王"
+        # 同一人重复认领仍幂等；已完成任务仍允许重新认领（旧语义）
+        assert store.claim(t["id"], "小王")["assignee"] == "小王"
+        store.update(t["id"], {"status": "done"})
+        assert store.claim(t["id"], "小李")["assignee"] == "小李"
+
 
 class TestMemberNameFile:
     def test_save_and_load(self, tmp_path):
@@ -402,6 +418,27 @@ class TestTeamApi:
                            json={"text": "x"}).status_code == 404
         assert client.post("/api/team/tasks/nope/claim",
                            json={"member": "x"}).status_code == 404
+
+    def test_claim_conflict_returns_400_and_keeps_owner(self, api):
+        """v1.11.23：并发/多人认领冲突走 400 + 可读消息，且不覆盖已有负责人。"""
+        client, _, events = api
+        task = _create(client, assignee="")
+        tid = task["id"]
+
+        first = client.post(f"/api/team/tasks/{tid}/claim",
+                            json={"member": "小王", "session_id": "s_me"})
+        assert first.status_code == 200
+        claimed_events = [e for e in events if e["kind"] == "task_claimed"]
+        assert len(claimed_events) == 1
+
+        conflict = client.post(f"/api/team/tasks/{tid}/claim",
+                               json={"member": "小李", "session_id": "s_other"})
+        assert conflict.status_code == 400, "冲突不能返回成功（静默覆盖）"
+        assert "小王" in conflict.json()["error"]
+        assert len([e for e in events if e["kind"] == "task_claimed"]) == 1, \
+            "被拒绝的认领不应广播 task_claimed"
+        board = client.get("/api/team/tasks").json()["tasks"]
+        assert board[0]["assignee"] == "小王" and board[0]["status"] == "doing"
 
     def test_members_and_name_endpoint(self, api, tmp_path):
         client, _, events = api

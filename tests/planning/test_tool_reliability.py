@@ -356,10 +356,14 @@ def _count_marker_processes(marker: str) -> int:
 
     if sys.platform == "win32":
         try:
-            out = subprocess.run(
+            raw = subprocess.run(
                 ["wmic", "process", "where", "name='python.exe'",
                  "get", "CommandLine"],
-                capture_output=True, text=True, timeout=20, check=False).stdout
+                capture_output=True, timeout=20, check=False).stdout
+            # v1.11.25：中文 Windows 的 wmic 输出可能是本地代码页（GBK），
+            # text=True 的 UTF-8 reader 线程会抛 UnicodeDecodeError 导致
+            # stdout=None、误报“取消后仍有残留进程”；按 bytes 取回并替换解码。
+            out = (raw or b"").decode("utf-8", errors="replace")
         except Exception:
             return 0                      # 取不到就不误报失败
     else:

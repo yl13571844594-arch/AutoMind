@@ -459,3 +459,48 @@ jobs:
           assert "PUBLIC_KEY_HEX" in key_src
           print("付费墙自检通过：能验签、不能签发、伪造必败")
           EOF
+
+  # ── 6. 验收门禁（static profile）────────────────────────
+  #
+  # 本地与 CI 共用的「发布前最后一道门」：版本一致性 / ruff / 前端产物完整性 /
+  # git 卫生（空白错误、私钥泄漏、残留临时产物）。测什么、退出码、清理策略见
+  # docs/ACCEPTANCE.md。
+  #
+  # 为什么单独一个轻量作业：既有 test 作业是跨平台全量矩阵（重）；这里只跑秒级
+  # static 档，把「版本号没对齐」「dist 引用了不存在的产物」「私钥被 add 进来」
+  # 这类**每次提交都该发现**的问题在最便宜的地方拦住。社区仓没有 pro/ 与
+  # web/node_modules 时对应子项自动 skip，因此不需要 pnpm/node、也不需要装项目依赖。
+  acceptance-static:
+    name: 验收门禁（static）
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: 安装 ruff
+        # static 档只有 lint 门禁需要外部工具；版本/前端产物/卫生门禁只读文件
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      - name: 执行 static 验收门禁
+        env:
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: "utf-8"
+        run: python scripts/acceptance.py --profile static --json acceptance-static.json --report acceptance-static.md
+
+      - name: 上传验收报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acceptance-static
+          path: |
+            acceptance-static.json
+            acceptance-static.md
+          retention-days: 14

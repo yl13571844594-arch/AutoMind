@@ -21,6 +21,7 @@ def srv(tmp_path, monkeypatch):
     反面教材；分权本身由 tests/server/test_admin_privileges.py 专门覆盖。
     """
     import automind.server as server
+    from automind.core import team as team_mod
     from automind.tools.file_editor import JOURNAL
     monkeypatch.setattr(server, "_AUTH_TOKEN", "")
     monkeypatch.setenv("AUTOMIND_ADMIN_TOKEN", "test-admin-token")
@@ -28,6 +29,15 @@ def srv(tmp_path, monkeypatch):
                         raising=False)
     monkeypatch.setattr(server._experts, "_path", tmp_path / "experts.json")
     monkeypatch.setattr(server, "_TEAM_FILE", tmp_path / "team.json")
+    # v1.11.23 审计：团队任务已迁移到 SQLite，只 patch _TEAM_FILE 不再隔离；
+    # 这里直接把 server 的 TeamStore 换成内存 store，避免读到/写入真实工作区看板
+    # （否则测试会在用户数据里留下“重构登录”等记录，还会因非空列表误断言失败）。
+    team_state: dict[str, list] = {"tasks": []}
+    memory_store = team_mod.TeamStore(
+        loader=lambda: list(team_state["tasks"]),
+        saver=lambda tasks: team_state.update(tasks=list(tasks)),
+    )
+    monkeypatch.setattr(server, "_team_store", lambda: memory_store)
     # 项目根 → tmp 沙箱
     proj = tmp_path / "proj"
     proj.mkdir()

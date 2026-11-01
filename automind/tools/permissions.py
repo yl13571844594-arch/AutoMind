@@ -205,6 +205,29 @@ class PermissionEngine:
         self.audit_log.append(entry)
         return decision, reason
 
+    def assess_risk(
+        self,
+        tool_name: str,
+        tool_tier: PermissionTier,
+        params: dict[str, Any] | None = None,
+    ) -> int:
+        """**公开**风险评估入口（v1.11.19）。
+
+        治理闸门（``core/governance.make_unattended_governor``）需要在不触发
+        ``check()`` 的审批副作用的前提下拿到同一个风险分。这里只是给既有的
+        ``_assess_risk`` 加一层公开包装 —— **判定逻辑一行未改**，避免"两套风险
+        标准"这种最难排查的不一致。
+        """
+        return self._assess_risk(tool_name, tool_tier, params or {})
+
+    def effective_tier(self, risk: int) -> PermissionTier:
+        """**公开**有效等级换算（v1.11.19）：风险分 → SAFE/SENSITIVE/DANGEROUS。
+
+        同样只是 ``_effective_tier`` 的公开包装：命令/路径把风险抬到 80 以上时，
+        工具声明的安全等级会被"有效等级"盖过 —— 治理闸门必须看后者。
+        """
+        return self._effective_tier(int(risk))
+
     def preflight(self, command: str) -> PermissionTier:
         """对命令做预检，返回**整串**的风险等级。
 

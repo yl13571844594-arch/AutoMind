@@ -1,0 +1,361 @@
+{
+  "schema": "automind.edition_benchmark/1",
+  "generated_at": "2026-10-31T14:05:34+00:00",
+  "dry_run": false,
+  "core_version": "1.11.24",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "api_key_source": "env:DEEPSEEK_API_KEY",
+  "eval_suite": {
+    "name": "comprehensive",
+    "repeats": 3,
+    "scoring_tasks": [
+      "analysis_summary",
+      "bugfix_calc",
+      "multi_file_pkg",
+      "data_csv",
+      "doc_report",
+      "honesty_safety"
+    ],
+    "probe_cases": [
+      "assertion_probe"
+    ],
+    "probe_rule": "按 expect_fail 过滤，不计分、不参与通过率"
+  },
+  "collab": {
+    "tasks": [
+      "analysis_summary",
+      "codegen_fizzbuzz",
+      "bugfix_calc",
+      "multi_file_pkg"
+    ],
+    "modes_by_edition": {
+      "community": [
+        "single"
+      ],
+      "pro": [
+        "single",
+        "multi",
+        "subagent"
+      ],
+      "enterprise": [
+        "single",
+        "multi",
+        "subagent"
+      ]
+    }
+  },
+  "editions": {
+    "community": {
+      "edition": "community",
+      "status": "ok",
+      "expected_edition": "community",
+      "errors": [],
+      "timings": {
+        "ready_seconds": 4.08,
+        "total_seconds": 524.53
+      },
+      "eval": {
+        "jobs": [
+          {
+            "repeat": 1,
+            "job_id": "4ad57c30fe51",
+            "status": "done",
+            "seconds": 123.81
+          },
+          {
+            "repeat": 2,
+            "job_id": "f75cc555fed4",
+            "status": "done",
+            "seconds": 127.36
+          },
+          {
+            "repeat": 3,
+            "job_id": "a9d11c3c6f13",
+            "status": "done",
+            "seconds": 102.39
+          }
+        ],
+        "preflight": {
+          "cases": [
+            "analysis_summary",
+            "bugfix_calc",
+            "multi_file_pkg",
+            "data_csv",
+            "doc_report",
+            "honesty_safety",
+            "assertion_probe"
+          ],
+          "scoring_present": true,
+          "target": {
+            "provider": "deepseek",
+            "model": "deepseek-flash",
+            "api_key_source": "web:agent",
+            "available": true,
+            "reason": ""
+          },
+          "extra_cases": [
+            "assertion_probe"
+          ]
+        }
+      },
+      "collab": {
+        "returncode": 0,
+        "seconds": 166.51,
+        "modes": [
+          "single"
+        ],
+        "log": "run/<edition>/logs/collab.log（默认运行结束清理）",
+        "saved": "raw/community/collab_benchmark.json"
+      },
+      "license_diagnosis": {
+        "edition": "community",
+        "step": "need_package",
+        "reason_text": "",
+        "version_match": false,
+        "version_reason": "",
+        "package": {
+          "installed": false,
+          "version": "",
+          "compatible": false,
+          "path": "",
+          "api_version": null,
+          "core_version": "1.11.24",
+          "version_match": false,
+          "version_detail": ""
+        }
+      },
+      "observed_edition": "community",
+      "model_status": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "has_api_key": true,
+        "llm_ready": true
+      },
+      "isolation": {
+        "home": "<RUN>/community/home",
+        "data_dir": "<RUN>/community/data",
+        "project": "<RUN>/community/project",
+        "logs": "<RUN>/community/logs",
+        "force_community": true,
+        "pro_wheel": {
+          "file": "automind_pro-1.11.24-py3-none-any.whl",
+          "version": "1.11.24",
+          "core_version": "1.11.24",
+          "version_match": true
+        }
+      }
+    },
+    "pro": {
+      "edition": "pro",
+      "status": "ok",
+      "expected_edition": "pro",
+      "errors": [],
+      "timings": {
+        "ready_seconds": 3.08,
+        "total_seconds": 1247.67
+      },
+      "eval": {
+        "jobs": [
+          {
+            "repeat": 1,
+            "job_id": "22a2aaaaf3be",
+            "status": "done",
+            "seconds": 107.23
+          },
+          {
+            "repeat": 2,
+            "job_id": "6ac7e094f09e",
+            "status": "done",
+            "seconds": 95.26
+          },
+          {
+            "repeat": 3,
+            "job_id": "9eeb9d6ce977",
+            "status": "done",
+            "seconds": 179.53
+          }
+        ],
+        "preflight": {
+          "cases": [
+            "analysis_summary",
+            "bugfix_calc",
+            "multi_file_pkg",
+            "data_csv",
+            "doc_report",
+            "honesty_safety",
+            "assertion_probe"
+          ],
+          "scoring_present": true,
+          "target": {
+            "provider": "deepseek",
+            "model": "deepseek-flash",
+            "api_key_source": "web:agent",
+            "available": true,
+            "reason": ""
+          },
+          "extra_cases": [
+            "assertion_probe"
+          ]
+        }
+      },
+      "collab": {
+        "returncode": 0,
+        "seconds": 862.14,
+        "modes": [
+          "single",
+          "multi",
+          "subagent"
+        ],
+        "log": "run/<edition>/logs/collab.log（默认运行结束清理）",
+        "saved": "raw/pro/collab_benchmark.json"
+      },
+      "license_diagnosis": {
+        "edition": "pro",
+        "step": "active",
+        "reason_text": "找到了许可证，但校验未通过（签名不符 / 已过期 / 格式错误）",
+        "version_match": true,
+        "version_reason": "",
+        "package": {
+          "installed": true,
+          "version": "1.11.24",
+          "api_version": 1,
+          "compatible": true,
+          "path": "<REPO>\\.automind\\edition_benchmark\\v1.11.24b\\run\\pro\\data\\extensions\\automind_pro",
+          "core_version": "1.11.24",
+          "version_match": true,
+          "version_detail": ""
+        }
+      },
+      "observed_edition": "pro",
+      "model_status": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "has_api_key": true,
+        "llm_ready": true
+      },
+      "isolation": {
+        "home": "<RUN>/pro/home",
+        "data_dir": "<RUN>/pro/data",
+        "project": "<RUN>/pro/project",
+        "logs": "<RUN>/pro/logs",
+        "force_community": false,
+        "pro_wheel": {
+          "file": "automind_pro-1.11.24-py3-none-any.whl",
+          "version": "1.11.24",
+          "core_version": "",
+          "version_match": false
+        }
+      }
+    },
+    "enterprise": {
+      "edition": "enterprise",
+      "status": "ok",
+      "expected_edition": "enterprise",
+      "errors": [],
+      "timings": {
+        "ready_seconds": 3.05,
+        "total_seconds": 1080.77
+      },
+      "eval": {
+        "jobs": [
+          {
+            "repeat": 1,
+            "job_id": "25154ff770b5",
+            "status": "done",
+            "seconds": 94.23
+          },
+          {
+            "repeat": 2,
+            "job_id": "6785d94426e3",
+            "status": "done",
+            "seconds": 120.86
+          },
+          {
+            "repeat": 3,
+            "job_id": "6a6718c7cc5f",
+            "status": "done",
+            "seconds": 118.97
+          }
+        ],
+        "preflight": {
+          "cases": [
+            "analysis_summary",
+            "bugfix_calc",
+            "multi_file_pkg",
+            "data_csv",
+            "doc_report",
+            "honesty_safety",
+            "assertion_probe"
+          ],
+          "scoring_present": true,
+          "target": {
+            "provider": "deepseek",
+            "model": "deepseek-flash",
+            "api_key_source": "web:agent",
+            "available": true,
+            "reason": ""
+          },
+          "extra_cases": [
+            "assertion_probe"
+          ]
+        }
+      },
+      "collab": {
+        "returncode": 0,
+        "seconds": 743.27,
+        "modes": [
+          "single",
+          "multi",
+          "subagent"
+        ],
+        "log": "run/<edition>/logs/collab.log（默认运行结束清理）",
+        "saved": "raw/enterprise/collab_benchmark.json"
+      },
+      "license_diagnosis": {
+        "edition": "enterprise",
+        "step": "active",
+        "reason_text": "找到了许可证，但校验未通过（签名不符 / 已过期 / 格式错误）",
+        "version_match": true,
+        "version_reason": "",
+        "package": {
+          "installed": true,
+          "version": "1.11.24",
+          "api_version": 1,
+          "compatible": true,
+          "path": "<REPO>\\.automind\\edition_benchmark\\v1.11.24b\\run\\enterprise\\data\\extensions\\automind_pro",
+          "core_version": "1.11.24",
+          "version_match": true,
+          "version_detail": ""
+        }
+      },
+      "observed_edition": "enterprise",
+      "model_status": {
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "has_api_key": true,
+        "llm_ready": true
+      },
+      "isolation": {
+        "home": "<RUN>/enterprise/home",
+        "data_dir": "<RUN>/enterprise/data",
+        "project": "<RUN>/enterprise/project",
+        "logs": "<RUN>/enterprise/logs",
+        "force_community": false,
+        "pro_wheel": {
+          "file": "automind_pro-1.11.24-py3-none-any.whl",
+          "version": "1.11.24",
+          "core_version": "",
+          "version_match": false
+        }
+      }
+    }
+  },
+  "warnings": [],
+  "notes": [
+    "数字只来自本次真实运行的原始报告；失败/缺失由报告侧判失败。",
+    "API Key 只经 HTTP /api/config 传递，不打印、不落盘。",
+    "临时许可证仅存在于子进程环境变量，结束即清理。"
+  ],
+  "finished_at": "2026-10-31T14:14:27+00:00"
+}

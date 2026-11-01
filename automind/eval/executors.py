@@ -143,31 +143,55 @@ def list_artifacts(root: Path, ignore_dirs: tuple[str, ...] = ()) -> list[str]:
 # ═══════════════════════════════════════════════════════════════
 
 
-def _llm_config_kwargs(provider: str, model: str) -> dict[str, Any]:
+def _llm_config_kwargs(provider: str, model: str, *, api_key: str = "",
+                       api_base: str = "", temperature: Any = None,
+                       max_tokens: Any = None) -> dict[str, Any]:
     """构造 ``AgentConfig`` 的 LLM 覆盖项。
 
     注意嵌套结构：``AgentConfig`` 里 provider/model 位于 ``llm`` 子模型下，
     直接平铺传参会被 pydantic 以 ``extra_forbidden`` 拒掉（评测最不该出现的
     失败形态就是"连 agent 都没建起来"）。
+
+    v1.11.24：新增 ``api_key`` / ``api_base`` / ``temperature`` / ``max_tokens``
+    四个可选覆盖。Web 工作台发起评测时，"当前已接入的模型与凭据"只存在于
+    服务的 Agent 配置里，不显式带进来，评测 Agent 就会退回代码默认的
+    ``openai/gpt-4o``（没 Key）—— 这正是"工作台能对话、评测却报未配置"的根因。
+    全部缺省时行为与旧版完全一致（CLI 默认路径不受影响）。
     """
     llm: dict[str, Any] = {}
     if provider:
         llm["provider"] = provider
     if model:
         llm["model"] = model
+    if api_key:
+        llm["api_key"] = api_key
+    if api_base:
+        llm["api_base"] = api_base
+    if temperature is not None:
+        llm["temperature"] = float(temperature)
+    if max_tokens is not None:
+        llm["max_tokens"] = int(max_tokens)
     return {"llm": llm} if llm else {}
 
 
-def detect_llm_target(provider: str = "", model: str = "") -> LLMTarget:
+def detect_llm_target(provider: str = "", model: str = "", *,
+                      api_key: str = "", api_key_source: str = "") -> LLMTarget:
     """判断"能不能真跑"：有没有凭据、用哪个模型（**不做任何网络请求**）。
 
     与"跑起来才发现 401"相比，提前判断的价值在于：CI 上"没配 Key"必须报成
     配置问题（退出码 2），而不是"全部任务失败"（退出码 1）—— 后者会让人去查
     模型退化，方向完全错了。
+
+    v1.11.24：支持**显式 api_key**（以及来源标签 ``api_key_source``）。
+    Web 工作台的 Key 只在服务端内存/已保存配置里，本函数此前只会去翻
+    ``AgentConfig`` 默认值与环境变量，于是工作台明明用 deepseek 在对话，
+    dry-run 仍报 ``openai/gpt-4o`` 没有凭据。显式 Key 只用于回答"能不能跑"，
+    **绝不会**出现在返回值里 —— 来源只用 ``api_key_source`` 标签表达。
     """
     from automind.core.config import AgentConfig
     from automind.core.provider_resolver import ENV_KEY_MAP
 
+    explicit_key = str(api_key or "").strip()
     target = LLMTarget(provider=provider, model=model)
     try:
         cfg = AgentConfig()
@@ -184,6 +208,12 @@ def detect_llm_target(provider: str = "", model: str = "") -> LLMTarget:
         # 本地模型没有也不需要 Key —— 要求它有，会把"完全离线跑评测"这条最有
         # 价值的路误判成配置缺失
         target.api_key_source = "local (ollama)"
+        target.available = True
+        return target
+
+    # 调用方已解析出的 Key 优先（Web 从当前 Agent / 已保存配置取；CLI 不传）
+    if explicit_key:
+        target.api_key_source = str(api_key_source or "explicit")
         target.available = True
         return target
 
@@ -217,9 +247,26 @@ def detect_llm_target(provider: str = "", model: str = "") -> LLMTarget:
 EVAL_APPROVAL_MODES = ("approve_all", "auto", "ask")
 DEFAULT_EVAL_APPROVAL_MODE = "approve_all"
 
+#: 评测执行器支持的执行模式（``ExecutionMode`` 里与"单任务跑完给最终输出"
+#: 语义相符的两种；``multi_agent`` 是编排模式，不适合单任务评测）。
+EVAL_EXECUTION_MODES = ("react", "plan_and_execute")
+
+#: v1.11.24：评测**默认走 ReAct**，与 Web 工作台用户的默认使用方式一致。
+#:
+#: 为什么必须显式指定：``AgentConfig`` 的代码默认值是 ``plan_and_execute``，
+#: 而该模式的返回值是 ``_build_result_text`` 生成的步骤摘要（"Task: … /
+#: Status: completed / Completed steps…"），**不是**任务的最终输出。评测断言
+#: 里的 ``contains``（例如"文件里读到 ZEBRA-42"）会因此系统性误判为失败 ——
+#: 实测：隔离 community server 上 file_read 明明成功读到 ZEBRA-42，AgentResult
+#: 却只有摘要。ReAct 返回的是模型最终回答，与工作台对话一致，才是可断言的输出。
+DEFAULT_EVAL_EXECUTION_MODE = "react"
+
 
 def make_agent_config(workspace: Path, provider: str = "", model: str = "",
-                      approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE) -> Any:
+                      approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE, *,
+                      api_key: str = "", api_base: str = "",
+                      temperature: Any = None, max_tokens: Any = None,
+                      execution_mode: str = DEFAULT_EVAL_EXECUTION_MODE) -> Any:
     """按任务工作区构造 AgentConfig（不读用户仓库里的 automind.yaml）。
 
     刻意不用 ``AgentConfig.auto_load``：评测要求**可复现** —— 结果不应随
@@ -229,6 +276,14 @@ def make_agent_config(workspace: Path, provider: str = "", model: str = "",
     无人值守评测没有审批通道，需要人工确认的调用会被 fail-closed 拒绝，进而
     触发模型的反复重试。``auto`` / ``ask`` 只建议用于"对比审批模式影响"的实验
      —— 它们在这个环境里跑出来的耗时/token 会被"审批被拒"放大。
+
+    v1.11.24：``api_key`` / ``api_base`` / ``temperature`` / ``max_tokens`` 为
+    可选的显式覆盖（Web 评测把工作台当前接入的模型与凭据带进来）。全部缺省时
+    与旧行为一致 —— CLI 仍只认显式 provider/model + 环境变量/默认配置。
+
+    ``execution_mode`` 默认 ``"react"``（理由见 ``DEFAULT_EVAL_EXECUTION_MODE``），
+    也可显式传 ``"plan_and_execute"`` 用于对比评测 —— 注意该模式的输出是
+    步骤摘要而非最终回答，``contains`` 一类断言会因此失真。
     """
     from automind.core.config import AgentConfig
 
@@ -238,12 +293,22 @@ def make_agent_config(workspace: Path, provider: str = "", model: str = "",
         raise ValueError(
             f"未知的 approval_mode={approval_mode!r}；"
             f"可选：{', '.join(EVAL_APPROVAL_MODES)}")
+    if execution_mode not in EVAL_EXECUTION_MODES:
+        # 同上：拼错的模式名不能被 pydantic / 后续 ExecutionMode() 悄悄吞掉
+        raise ValueError(
+            f"未知的 execution_mode={execution_mode!r}；"
+            f"可选：{', '.join(EVAL_EXECUTION_MODES)}")
 
     cfg = AgentConfig(project_root=str(workspace),
-                      **_llm_config_kwargs(provider, model))
+                      **_llm_config_kwargs(provider, model,
+                                           api_key=api_key, api_base=api_base,
+                                           temperature=temperature,
+                                           max_tokens=max_tokens))
     # 轨迹落盘默认就会被 AUTOMIND_DATA_DIR 隔离到临时目录（见 runner），
     # 这里不需要也不应该改其它 ExecutionConfig 字段。
     cfg.execution.approval_mode = approval_mode
+    # v1.11.24：默认 ReAct（评测断言要看最终输出，而不是 plan 的步骤摘要）
+    cfg.execution.mode = execution_mode
     return cfg
 
 
@@ -275,7 +340,10 @@ class AutoMindExecutor:
 
     def __init__(self, provider: str = "", model: str = "",
                  keep_workspace: bool = False, agent_factory: Any = None,
-                 approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE) -> None:
+                 approval_mode: str = DEFAULT_EVAL_APPROVAL_MODE, *,
+                 api_key: str = "", api_base: str = "",
+                 temperature: Any = None, max_tokens: Any = None,
+                 execution_mode: str = DEFAULT_EVAL_EXECUTION_MODE) -> None:
         self.provider = provider
         self.model = model
         self.keep_workspace = keep_workspace
@@ -284,6 +352,15 @@ class AutoMindExecutor:
         #: 无人值守审批模式（默认 approve_all，理由见 make_agent_config）。
         #: runner 通过 ``--approval-mode`` 覆盖它，并写进报告 notes。
         self.approval_mode = approval_mode
+        #: v1.11.24：可选的模型凭据/采样覆盖（Web 评测用；CLI 不传 = 旧行为）。
+        #: 这些值只会被写进评测 Agent 的 config，**不进入报告**。
+        self.api_key = api_key
+        self.api_base = api_base
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        #: 执行模式（默认 react，理由见 DEFAULT_EVAL_EXECUTION_MODE）。
+        #: 这是**评测 Agent 内部**的执行方式，不改变工作台服务的运行模式。
+        self.execution_mode = execution_mode
 
     def _build_agent(self, config: Any) -> Any:
         if self.agent_factory is not None:
@@ -300,7 +377,12 @@ class AutoMindExecutor:
         agent = None
         try:
             config = make_agent_config(ctx.workspace, self.provider, self.model,
-                                       self.approval_mode)
+                                       self.approval_mode,
+                                       api_key=self.api_key,
+                                       api_base=self.api_base,
+                                       temperature=self.temperature,
+                                       max_tokens=self.max_tokens,
+                                       execution_mode=self.execution_mode)
             align_task_budget(config, ctx.timeout_seconds)
             agent = self._build_agent(config)
             if getattr(agent, "llm", None) is None:

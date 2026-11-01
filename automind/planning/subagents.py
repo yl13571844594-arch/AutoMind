@@ -287,6 +287,10 @@ class SubagentRecord:
     sink: Any = None
     approval_callback: Any = None
     task_obj: asyncio.Task | None = None
+    #: 终态事件是否已发出（v1.11.23）—— 会话收尾时任务可能"先被补结算、
+    #: 之后才真正返回"，两条路径都调 _emit_done 会重复推 subagent_done，
+    #: 界面上会出现同一结果的重复卡片。
+    done_emitted: bool = False
 
     @property
     def elapsed_s(self) -> float:
@@ -493,13 +497,25 @@ class SubagentManager:
         self._index[agent_id] = record
 
         # 先发 started 再创建任务：保证界面看到的事件顺序是
-        # "started → update → done"，不会出现先收进度后收派发的情况
-        await self._emit(record, "subagent_started", {
-            "agent_id": agent_id,
-            "title": record.title,
-            "task": _clip(record.task, EVENT_TASK_CHARS),
-            "status": record.status,
-        })
+        # "started → update → done"，不会出现先收进度后收派发的情况。
+        #
+        # v1.11.23 审计修复：这次 emit 是登记记录之后**唯一**的 await 点。
+        # 若父任务在派发途中被取消（用户停止 / 服务关闭），CancelledError 会从
+        # 这里抛出 —— 此时后台 task 还没创建，记录却已经落表。不清掉就留下一个
+        # "运行中但没有任何执行体"的孤儿，界面永远转圈，还白占一个并发名额。
+        try:
+            await self._emit(record, "subagent_started", {
+                "agent_id": agent_id,
+                "title": record.title,
+                "task": _clip(record.task, EVENT_TASK_CHARS),
+                "status": record.status,
+            })
+        except BaseException:
+            records.pop(agent_id, None)
+            self._index.pop(agent_id, None)
+            if not records:
+                self._by_session.pop(sid, None)
+            raise
         record.task_obj = asyncio.create_task(
             self._run(record), name=f"automind-subagent-{agent_id}")
         logger.info("subagent_started", agent_id=agent_id, session=sid,
@@ -559,6 +575,9 @@ class SubagentManager:
             # （否则用户会以为没停掉）。已产出的内容仍然保留，如实告知是部分结果。
             record.status = "cancelled"
             record.error = record.error or "子智能体已被用户停止"
+            # v1.11.23 审计修复：终态原因也要如实（否则 done 事件的 stop_reason
+            # 是空串，上层无从判断"这是自己停的还是失败/完成"）。
+            record.stop_reason = record.stop_reason or "cancelled"
             if isinstance(result, dict):
                 record.output = _clip(_as_text(result.get("output")), OUTPUT_KEEP_CHARS)
                 record.output_tail = _tail(record.output, OUTPUT_TAIL_CHARS)
@@ -786,6 +805,11 @@ class SubagentManager:
         if record is None:
             return {"ok": False, "error": self._not_found(agent_id, session_id)}
         task = record.task_obj
+        if record.running and task is not None and task.done():
+            # v1.11.23 审计修复：任务已经结束、记录却还停在 running（取消落在
+            # 协程体入口之前，或后台任务被外部取消）。先补结算再返回 —— 否则
+            # 这里会把"运行中"原样报给调用方，记录也永远不再有人收尾。
+            await self._settle_if_stuck(record)
         if not record.running or task is None or task.done():
             return {"ok": True, "agent_id": record.agent_id, "status": record.status,
                     "already_finished": True,
@@ -863,6 +887,9 @@ class SubagentManager:
             return
         record.status = "cancelled"
         record.error = record.error or "子智能体已被用户停止"
+        # v1.11.23 审计修复：补结算同样要给停止原因 —— done 事件里 stop_reason
+        # 为空会让"用户停的"与"进程异常"在上层看起来一模一样。
+        record.stop_reason = record.stop_reason or "cancelled"
         record.finished_at = record.finished_at or time.time()
         await self._emit_done(record)
         self._prune(record.session_id)
@@ -888,6 +915,13 @@ class SubagentManager:
                            event_type=event_type, error=f"{type(e).__name__}: {e}")
 
     async def _emit_done(self, record: SubagentRecord) -> None:
+        if record.done_emitted:
+            # v1.11.23：终态事件只发一次。会话收尾的"补结算"与 _run 的正常收尾
+            # 可能先后到达（任务吞掉取消 2 秒后才真正返回），重复事件会让界面
+            # 出现重复的结果卡片/重复的 webhook。
+            logger.info("subagent_done_already_emitted", agent_id=record.agent_id)
+            return
+        record.done_emitted = True
         await self._emit(record, "subagent_done", {
             "agent_id": record.agent_id,
             "title": record.title,

@@ -1,0 +1,238 @@
+{
+  "schema": "automind.collab_benchmark/1",
+  "generated_at": "2026-10-31T14:14:18+00:00",
+  "dry_run": false,
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "modes": [
+    "single"
+  ],
+  "tasks": [
+    {
+      "id": "analysis_summary",
+      "category": "analysis",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）"
+    },
+    {
+      "id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "description": "小代码生成：要求产出实现 + 测试并跑通"
+    },
+    {
+      "id": "bugfix_calc",
+      "category": "bugfix",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现"
+    },
+    {
+      "id": "multi_file_pkg",
+      "category": "multi_file",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口"
+    }
+  ],
+  "matrix": [
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "single",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）",
+      "expect_files": [],
+      "expect_tests": false
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "single",
+      "description": "小代码生成：要求产出实现 + 测试并跑通",
+      "expect_files": [
+        "fizzbuzz.py",
+        "test_fizzbuzz.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "single",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现",
+      "expect_files": [
+        "calc.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "single",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口",
+      "expect_files": [
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "pkg/cli.py",
+        "pkg/__main__.py",
+        "tests/test_pkg.py"
+      ],
+      "expect_tests": true
+    }
+  ],
+  "results": [
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "single",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": null,
+      "duration_ms": 6545,
+      "tokens": 5619,
+      "llm_calls": 1,
+      "steps": 0,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\analysis_summary-single"
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "single",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 52797,
+      "tokens": 81958,
+      "llm_calls": 14,
+      "steps": 0,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\codegen_fizzbuzz-single"
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "single",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 66469,
+      "tokens": 84930,
+      "llm_calls": 16,
+      "steps": 0,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\bugfix_calc-single"
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "single",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 40172,
+      "tokens": 75948,
+      "llm_calls": 12,
+      "steps": 0,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\multi_file_pkg-single"
+    }
+  ],
+  "summary": {
+    "total_runs": 4,
+    "ok_runs": 4,
+    "unavailable_runs": 0,
+    "error_runs": 0,
+    "overall": {
+      "runs": 4,
+      "successes": 1,
+      "success_rate": 0.25,
+      "avg_duration_ms": 41495.75,
+      "tokens_total": 248455,
+      "tokens_avg": 62113.75,
+      "llm_calls_total": 43,
+      "steps_total": 0,
+      "steps_avg": 0.0,
+      "verification_measured": 3,
+      "verification_pass_rate": 0.0,
+      "artifacts_measured": 3,
+      "artifacts_pass_rate": 1.0,
+      "rework_total": 0,
+      "human_interventions_total": 0
+    },
+    "by_mode": {
+      "single": {
+        "runs": 4,
+        "successes": 1,
+        "success_rate": 0.25,
+        "avg_duration_ms": 41495.75,
+        "tokens_total": 248455,
+        "tokens_avg": 62113.75,
+        "llm_calls_total": 43,
+        "steps_total": 0,
+        "steps_avg": 0.0,
+        "verification_measured": 3,
+        "verification_pass_rate": 0.0,
+        "artifacts_measured": 3,
+        "artifacts_pass_rate": 1.0,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      },
+      "multi": {
+        "runs": 0,
+        "successes": 0,
+        "success_rate": null,
+        "avg_duration_ms": null,
+        "tokens_total": 0,
+        "tokens_avg": null,
+        "llm_calls_total": 0,
+        "steps_total": 0,
+        "steps_avg": null,
+        "verification_measured": 0,
+        "verification_pass_rate": null,
+        "artifacts_measured": 0,
+        "artifacts_pass_rate": null,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      },
+      "subagent": {
+        "runs": 0,
+        "successes": 0,
+        "success_rate": null,
+        "avg_duration_ms": null,
+        "tokens_total": 0,
+        "tokens_avg": null,
+        "llm_calls_total": 0,
+        "steps_total": 0,
+        "steps_avg": null,
+        "verification_measured": 0,
+        "verification_pass_rate": null,
+        "artifacts_measured": 0,
+        "artifacts_pass_rate": null,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      }
+    },
+    "notes": [
+      "成功率/平均耗时只统计 status=ok 的执行；unavailable/error 单独计数。",
+      "verification_pass_rate / artifacts_pass_rate 只统计真实测量的行，未测量记为 null（不是 0）。",
+      "manual_rework 由人工回填 CSV 后自行统计；脚本不推断。",
+      "human_interventions=0 表示本次无人介入（无人值守审批），不是统计缺失。"
+    ]
+  },
+  "notes": [
+    "本文件不含任何预置/示例指标；dry_run=true 时 results 为空。",
+    "真实结果只在 --live 跑出来，未提交进仓库；不要把 API Key 或结果提交到版本库。",
+    "CSV 的 manual_rework 列由人工填写（是否手工返工 + 原因），脚本不代填。"
+  ]
+}

@@ -13,6 +13,7 @@ Chat, get work done, write code — a local agent workbench that plans, calls to
 [![Downloads](https://static.pepy.tech/badge/automind-agent)](https://pepy.tech/project/automind-agent)
 [![Release](https://img.shields.io/github/v/release/yl13571844594-arch/AutoMind?logo=github)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
+[![Benchmark](https://img.shields.io/badge/benchmark-100%25%20(18%2F18)-brightgreen)](docs/BENCHMARK_v1.11.24.md)
 
 [中文](README.md) · [User Manual (zh)](使用手册.md) · [Changelog](CHANGELOG.md) · [Download installers](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 
@@ -31,28 +32,103 @@ it works out of the box) — for chatting, working, and coding, plus a
 > task history in a local SQLite database, knowledge-base vectors in a local directory.
 > Nothing is sent anywhere except the model provider you configured yourself.
 
-## ✨ What's new in v1.11.18
+## 📊 Real capability benchmark: Community 100% passed (reproducible, failures published)
 
-- 🛡 **Unattended evaluation approvals**: the eval executor used to configure approval mode `auto`, so sensitive
-  `terminal` calls were rejected in an eval process with **no approval channel** and the model simply retried —
-  the standard-tools `smoke_run_command` case timed out at **237.2s** and burned **436,698** tokens. The eval
-  executor now defaults to **`approve_all`** unattended approval (`--approval-mode` can override it and the
-  choice is recorded in `report.notes`), and the executor enforces the per-task `timeout_seconds` **hard limit**,
-  so a run can no longer hang for 237s.
-- 🪙 **Chinese writes complete in one shot**: after a successful `file_write` the tool now **reads the file back
-  from disk** and returns `size_bytes` / `chars` / `encoding` / `verified` / `readback_matches` — the model no
-  longer needs a follow-up `file_read` or terminal check (the main cause of the `smoke_chinese_content`
-  token overrun: 180,170 / 139,053 tokens). Tool descriptions and the coding prompt explicitly support
-  Chinese file names / content (UTF-8) and add a "verify once, then finish" discipline for simple tasks.
-- 🧰 **Multi-task & collaboration**: `pwsh` gains a native background channel (`background=true` returns a
-  `task_id` immediately; poll / output / list / kill via `terminal_background`); `subagent_list` accepts an
-  `agent_id` to return one sub-agent's **full output** (with an explicit truncation marker); the new
-  **`team_task`** tool (list / summary / create / update / claim / comment) plugs into the team task board's
-  SQLite store and broadcasts changes to the Web board in real time — agents can dedupe, claim, update and
-  comment alongside humans.
-- 🚀 **v1.11.18 release**: core / Pro extension / web / Windows installer / manual are unified at **1.11.18**.
-  This is a patch release with no commercial-extension or frontend feature changes;
-  `tests/test_version_consistency.py` keeps all six version declarations identical.
+> No cherry-picked demo. Since v1.11.24 we run a fixed task set with fixed assertions in isolated
+> environments: 6 engineering tasks (requirements analysis / bug fix / multi-file Python package /
+> data aggregation / document output / honesty & safety) × 3 repeats. **Community core benchmark:
+> 18/18 passed (100%)**, 3-repeat total **331.38 s**, **576,476 tokens**, **$0.391 estimated**
+> (estimate, not a bill). Data integrity **82/82 cells**, `validation.ok=true`; the deliberately
+> unsatisfiable probe failed honestly **3/3**, proving the assertion chain really runs.
+
+| Community result (v1.11.24b, 2026-10-31) | Result |
+|---|---|
+| 6 scored tasks × 3 repeats pass rate | **100.0% (18/18)** |
+| 3-repeat duration / tokens / estimated cost | **331.38 s** / **576,476** / **$0.391097** (estimate) |
+| Data integrity | **82/82 cells**, `validation.ok=true` |
+| Reverse probe | **3/3 passed** (honest failure = assertions active) |
+| Model / environment | deepseek/deepseek-flash (temperature 0.7, not pinned to 0) · Windows 10 19045 · Python 3.12 · single machine |
+
+**Honest limits (read together with the numbers):** one model / one machine, 3 repeats for the core
+suite, collaboration matrix n=1 per task×mode — **not statistically significant**, no edition/model
+ranking. Real failures in the collaboration matrix (e.g. community `single` 1/4, pro `multi` 0/4,
+enterprise `multi` 1/4) are **published as-is**, not removed or softened. Full methodology, every
+failure case, sanitized raw data and rerun commands: [benchmark report](docs/BENCHMARK_v1.11.24.md)
+and [docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md). Commercial capabilities require a
+separate `automind-pro` extension and a valid license and are **not distributed with Community**.
+
+## ✨ What's new in v1.11.25
+
+- 🤝 **Multi-agent collaboration fixes (PRO and ENTERPRISE full 4×multi both 4/4)**: fixes in the
+  collaboration execution path — artifact hard assertions only cover paths explicitly required by the task
+  (incidentally claimed `requirements.txt` / `pytest.ini` become warnings), final delivery integrates only
+  coder/writer output (planner/reviewer process excluded and length limits enforced), evidence-first
+  verification (tests/artifacts/length over model self-report), bounded one-shot self-heal for writing
+  roles, role budget raised from 12 steps / 120k to **30 steps / 300k tokens**, `max_iterations` reclaimed
+  when all write_paths landed and verification passed, and per-node explainable failure reasons.
+  **Measured (single run n=1 — not statistically significant)**: v1.11.24 baseline PRO **0/4**, ENT
+  **1/4**; v1.11.25 PRO full 4×multi **4/4** (run `20261101-0830-final-pro`) and ENTERPRISE full 4×multi
+  **4/4** (**independent run** `20261101-0840-final-real`, not stitched); role-budget iterations
+  12/120k→3/4, 20/200k→3/4, 30/300k→4/4 (failure traces kept). **Residual risks**: 30 steps / 300k is
+  still tight (extra sample 305,845 / 300,000), row-level token/call counts on the budget-exhaustion path
+  are suspected to be under-counted, and Windows multi checkpoints with `:` in the filename fail to save,
+  so resume in benchmark sessions is unavailable (not the normal 8765 sessions).
+- 🧭 **No "continue" prompt after delivery (fix)**: main-task budget and post-delivery budget are separated —
+  once the main deliverable is complete, post-budget exhaustion no longer marks the task partial or prompts
+  to continue (`resumable=false`, checkpoint recorded as completed); a genuinely partial task (main budget
+  exhausted) remains resumable. **12 offline test cases** added in
+  `tests/planning/test_artifact_scope_and_post_budget.py` (12 passed locally).
+- 🌐 **Web evaluation uses the current model (carried over from v1.11.24)**: when provider/model are not
+  specified, `/api/eval/run` uses the currently configured provider / model / api_base and saved key;
+  no usable key returns 409 (a config problem, not a model failure); responses report the source only and
+  **never return the key**; CLI defaults are unchanged. No new changes in this release.
+- 📊 **Measured results (v1.11.25 real runs; single run n=1)**: PRO 4×multi **4/4** (total **512.69 s**,
+  **648,081** tokens, **97** LLM calls; analysis 66,952 ms/33,210 tokens, codegen 210,780/343,633,
+  bugfix 102,563/99,155, multi_file 131,984/172,083); ENTERPRISE 4×multi **4/4** (**independent run**
+  `20261101-0840-final-real`: **757.94 s**, **1,069,092** tokens, **133** LLM calls; verification 4/4,
+  artifacts 3/3). Two **independent complete runs, not stitched**; targeted 2/2 and the old full 2/2 are
+  supplementary evidence only. **Single model / single machine / n=1 per combination — not statistically
+  significant**, and no version or model ranking. Evidence lives in `.automind/multi_v11125/raw/`
+  (gitignored); failures and intermediate rounds are kept, not deleted.
+- 🚀 **v1.11.25 release preparation**: core / Pro extension / web / Windows installer / manual are unified
+  at **1.11.25**; **this round prepares the community release only** (community wheel / sdist / installers
+  are verified per the release process), and **the commercial edition is not released** (`pro` is
+  version-synced only; no Pro wheel or `.ampkg` rebuild/release); `tests/test_version_consistency.py`
+  keeps all six version declarations identical. **Community release artifacts built**: wheel
+  1,972,619 B / sdist 1,962,058 B / src.zip 6,706,498 B (sha256 in [RELEASE.md](RELEASE.md)),
+  `build_community` audit passed and `twine check` **PASSED**; final full acceptance **OK exit 0**
+  (community **3529 passed / 6 skipped**, **pro 326 passed**, web/static passed).
+
+## ✨ What's new in v1.11.24
+
+- 🧪 **Real-capability evaluation: a comprehensive core suite**: new `automind/eval/suites/comprehensive.yml`
+  with **6 scored tasks** (pure-text analysis / small bug fix / multi-file package / CSV data summary /
+  Markdown report / honesty & safety) plus **1 `expect_fail` probe** (a deliberately unsatisfiable assertion
+  must fail, proving assertions are not silently skipped). Tasks are self-contained, offline and never write
+  the repo; each has a 300 s cap, and assertions check real values/artefacts rather than "it looks done".
+- 🧬 **Edition-isolated evaluation (community / Pro / Enterprise)**: new `scripts/edition_benchmark.py` and
+  `scripts/benchmark_report.py` — dry-run by default (no network); `--live` starts **three isolated servers**
+  (community / pro / enterprise with separate data dir / HOME / project; community forces community mode,
+  pro/ent install a staging Pro wheel + temporary license), runs the comprehensive suite for **3 rounds** and
+  the collaboration matrix (`single` / `multi` / `subagent`), then cleans up processes and licenses. The report
+  validates **6 tasks × 3 editions × 3 repeats** plus collaboration-cell completeness (missing ⇒ fail),
+  aggregates JSON / CSV / Markdown and redacts keys, absolute paths and license data.
+- 🧭 **Web evaluation now uses the currently configured model (fix)**: previously the workbench was connected to
+  deepseek-flash while `/api/eval/run` dry-run still reported `openai/gpt-4o` unconfigured. It now takes the
+  current provider / model / api_base and the saved key (409 when no key is available — a config problem, not a
+  model failure); responses report the source only and **never return the key**; CLI defaults are unchanged.
+- 📊 **Real-capability evaluation completed (v1.11.24b, 2026-10-31)**: core 6 tasks × 3 editions × 3 repeats
+  **54/54 passed** (each edition 18/18, 100%); the isolation probe shows **community 0/27, Pro 19/27,
+  Enterprise 27/27** commercial features available, Pro package 1.11.24 installed and license `active`.
+  The collaboration matrix is disclosed as-is: `subagent` is 4/4 in Pro/Enterprise, but **Pro `multi` 0/4**
+  and **Enterprise `multi` 1/4** (real failures; not statistically significant), community `single` 1/4.
+  Data integrity **82/82 cells**, `validation.ok=true`; full report `docs/BENCHMARK_v1.11.24.md`,
+  sanitized data (isolation matrix / per-cell matrices / SHA256SUMS) in `docs/benchmark/v1.11.24/`.
+- 🚀 **v1.11.24 release preparation**: core / Pro extension / web / Windows installer / manual are unified at
+  **1.11.24**; **this round prepares the community release only** (community wheel / sdist / installers are
+  verified per the release process), and **the commercial edition is not released** (`pro` is version-synced
+  only; no Pro wheel or `.ampkg` rebuild/release); `tests/test_version_consistency.py` keeps all six version
+  declarations identical.
 
 ## Screenshots
 
@@ -84,6 +160,13 @@ license is configured — see [docs/EDITIONS.md](docs/EDITIONS.md).
 | Hierarchical planning · symbolic reasoning · self-correction · memory | ✅ | ✅ | ✅ |
 | Web workbench + CLI + autonomous task loop | ✅ | ✅ | ✅ |
 | Tool approval · security audit · auth / rate limiting / redaction | ✅ | ✅ | ✅ |
+| 🏛 Runtime governance ledger · dispatch governance gate · governance center (v1.11.19) | ✅ | ✅ | ✅ |
+| 🤝 Multi-agent collaboration fixes · no continue prompt after delivery (v1.11.25) | ✅ | ✅ | ✅ |
+| 🧪 Real-capability evaluation · edition isolation (community/Pro/Enterprise) · web eval uses current model (v1.11.24) | ✅ | ✅ | ✅ |
+| 🧪 Concurrency audit & stress tests · team board / engineering collaboration / sub-agents / WS, reproducible (v1.11.23) | ✅ | ✅ | ✅ |
+| 🤝 Multi-agent engineering team · DAG parallelism · shared-workspace write locks · per-role budgets · verification closure (v1.11.22) | — | ✅ | ✅ |
+| 🧯 Fix-round budget · structured failure reasons · token savings (v1.11.21) | ✅ | ✅ | ✅ |
+| ✨ Question optimizer · 🪟 silent desktop runtime · reconnect survival (v1.11.20) | ✅ | ✅ | ✅ |
 | Basic statistics (tasks / success rate / tokens / tool ranking) | ✅ | ✅ | ✅ |
 | 📚 RAG knowledge base (chunking / embedding / auto-retrieval) | 5 docs · 10 MB | unlimited · 200 MB | unlimited |
 | 📚 Multi-KB · reranker · citation tracing · scheduled re-embedding | — | ✅ | ✅ |
@@ -118,7 +201,7 @@ license is configured — see [docs/EDITIONS.md](docs/EDITIONS.md).
 > re-checks with grace periods and smooth key rotation**. Given the vendor's one-file `.ampkg` upgrade
 > (wheel + license), drag it into **Settings → ⭐ Upgrade Pro / Enterprise → ⚡ One-click upgrade** to
 > install *and* activate — no pip, no env vars, no admin rights.
-> **Upgrade with an `.ampkg` matching the core version (currently v1.11.18; this patch adds no commercial-extension changes, so a v1.11.17 package keeps working)** (the public key was not rotated, so existing
+> **Upgrade with an `.ampkg` matching the core version (currently v1.11.25; the commercial edition is not released this round — `pro` is version-synced only with no functional changes, so no reissue is needed)** (the public key was not rotated, so existing
 > licenses remain valid and old `.ampkg` files still activate; the current package also carries the v3
 > license / machine-binding / CRL / re-check capabilities, and v1.11.17 fixes commercial feature route
 > mounting for semantic cache / model routing / cost dashboard / Pro KB). On the release side, the 12-check
@@ -145,6 +228,28 @@ The dropdown at the top switches the approval policy for tool calls
 - ⚡ **Auto** (default) — low-risk tools are approved automatically; only dangerous
   operations need confirmation.
 - ✅ **Approve all** — skip approval entirely and run fully autonomously (use with care).
+
+## 🏛 Runtime Governance (v1.11.19, Community Edition)
+
+What the agent actually executed, who approved it, and whether anything bypassed approval — now answered with
+persistent, verifiable evidence.
+
+- **Governance audit ledger**: every governance decision and every tool execution is appended to
+  `<data dir>/governance/ledger-*.jsonl`. The hash chain lets `verify_chain()` pinpoint edited / deleted /
+  inserted records; params are redacted and truncated (file contents and secrets never land on disk); writes are
+  fail-open (a ledger failure never fails a task); `AUTOMIND_GOVERNANCE_AUDIT=0` disables it.
+- **Dispatch-level governance gate**: workflow `tool` steps, skill-internal calls and direct
+  `registry.dispatch` calls all pass through a gate on the shared tool registry. Effective tier DANGEROUS with
+  approval mode other than "approve all" **fails closed** and is recorded; ReAct / Plan approvals are not
+  duplicated; a bare `ToolRegistry` is unchanged.
+- **Governance center**: a "Runtime governance" card on the Security Audit page (policy snapshot, ledger status,
+  verify audit chain, export JSON) backed by `GET /api/governance/{summary,audit,verify,export}`
+  (admin-guarded, fail-closed). The ledger is evidence data: the UI never clears it; export JSON to keep it.
+- **Release acceptance gate**: `python scripts/acceptance.py --profile full` runs
+  version / lint / tests / pro / web / hygiene gates with JSON + Markdown reports; use
+  `AUTOMIND_FORCE_COMMUNITY=1` to reproduce Community-Edition verdicts on a licensed machine; residue cleanup
+  defaults to dry-run and only deletes whitelisted, untracked temp artifacts. See
+  [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md) and [docs/GOVERNANCE.md](docs/GOVERNANCE.md).
 
 ## Loop Engineering / Scheduling / Statistics
 
@@ -209,17 +314,28 @@ cd AutoMind
 pip install -e ".[web]"
 
 # Option C: install from PyPI
-pip install "automind-agent[web]==1.11.18"     # current version · Web + OpenAI-compatible backends
-# Upgrade: pip install -U "automind-agent[web]==1.11.18"; use [full] for every backend
+pip install "automind-agent[web]"               # latest PyPI release · Web + OpenAI-compatible backends
+# Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
 ```
 
-> ✅ **v1.11.18 is released**: PyPI is up to date, so `pip install -U "automind-agent[web]"` picks up
-> exactly this release. Desktop installers live on
+> ✅ **v1.11.25 is a community release-preparation version**: it fixes the multi-agent collaboration
+> execution path and the "continue" prompt shown after delivery, and carries over the v1.11.24 web-evaluation
+> current-model/key fix. **Measured (single run n=1 — not statistically significant)**: PRO full 4×multi
+> **4/4** (v1.11.24 baseline 0/4; 512.69 s / 648,081 tokens / 97 LLM calls) and ENTERPRISE full 4×multi
+> **4/4** (**independent run** `20261101-0840-final-real`; 757.94 s / 1,069,092 tokens / 133 LLM calls;
+> ENT baseline 1/4; role-budget iterations 12/120k→3/4, 20/200k→3/4, 30/300k→4/4; runs not stitched);
+> delivered-no-continue **12 offline cases passed**. Community artifacts are built and pass build_community
+> audit / twine check; final full acceptance **OK exit 0** (community 3529 passed / 6 skipped, pro 326
+> passed). The v1.11.24 real-capability run is complete: core 54/54, 82/82 cells, with real collaboration
+> failures disclosed as-is in the [benchmark report](docs/BENCHMARK_v1.11.24.md).
+> **The commercial edition is not released** (`pro` is version-synced only); community wheel / sdist and
+> desktop installers are verified per [RELEASE.md](RELEASE.md), after which PyPI's latest release is 1.11.25.
+> Desktop installers live on
 > [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`), and each release ships a
 > `SHA256SUMS` file you can check with `sha256sum -c`.
 >
-> For air-gapped machines, run `pip download "automind-agent[web]==1.11.18"` on a connected
+> For air-gapped machines, run `pip download "automind-agent[web]"` on a connected
 > host, copy the wheel directory over, and follow [docs/OFFLINE_OPS.md](docs/OFFLINE_OPS.md).
 
 ```bash

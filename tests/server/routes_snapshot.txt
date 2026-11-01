@@ -59,6 +59,10 @@ GET /api/gateway
 GET /api/gateway/check
 GET /api/goals
 GET /api/goals/{gid}
+GET /api/governance/audit
+GET /api/governance/export
+GET /api/governance/summary
+GET /api/governance/verify
 GET /api/health
 GET /api/health/ready
 GET /api/history
@@ -177,6 +181,7 @@ POST /api/models/remove
 POST /api/plugins/{name}/load
 POST /api/plugins/{name}/unload
 POST /api/preview/render
+POST /api/prompt/optimize
 POST /api/rbac/role
 POST /api/router
 POST /api/router/preview

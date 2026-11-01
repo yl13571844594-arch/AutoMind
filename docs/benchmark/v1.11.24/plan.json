@@ -1,0 +1,608 @@
+{
+  "schema": "automind.edition_benchmark/1",
+  "generated_at": "2026-10-31T14:05:34+00:00",
+  "dry_run": false,
+  "core_version": "1.11.24",
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "api_key_source": "env:DEEPSEEK_API_KEY",
+  "out_dir": ".automind/edition_benchmark/v1.11.24b",
+  "editions": [
+    {
+      "name": "community",
+      "port": 18865,
+      "expected_edition": "community",
+      "force_community": true,
+      "license_tier": null,
+      "collab_modes": [
+        "single"
+      ],
+      "eval": {
+        "suite": "comprehensive",
+        "repeats": 3,
+        "scoring_tasks": [
+          "analysis_summary",
+          "bugfix_calc",
+          "multi_file_pkg",
+          "data_csv",
+          "doc_report",
+          "honesty_safety"
+        ]
+      },
+      "isolation": {
+        "home": "<RUN>/community/home",
+        "data_dir": "<RUN>/community/data",
+        "project": "<RUN>/community/project",
+        "logs": "<RUN>/community/logs"
+      },
+      "extensions": "none（社区版不装扩展）",
+      "license": "none"
+    },
+    {
+      "name": "pro",
+      "port": 18866,
+      "expected_edition": "pro",
+      "force_community": false,
+      "license_tier": "PRO",
+      "collab_modes": [
+        "single",
+        "multi",
+        "subagent"
+      ],
+      "eval": {
+        "suite": "comprehensive",
+        "repeats": 3,
+        "scoring_tasks": [
+          "analysis_summary",
+          "bugfix_calc",
+          "multi_file_pkg",
+          "data_csv",
+          "doc_report",
+          "honesty_safety"
+        ]
+      },
+      "isolation": {
+        "home": "<RUN>/pro/home",
+        "data_dir": "<RUN>/pro/data",
+        "project": "<RUN>/pro/project",
+        "logs": "<RUN>/pro/logs"
+      },
+      "extensions": "staging Pro wheel 1.11.24",
+      "license": "临时 PRO 许可证（一次性密钥对，仅环境变量）"
+    },
+    {
+      "name": "enterprise",
+      "port": 18867,
+      "expected_edition": "enterprise",
+      "force_community": false,
+      "license_tier": "ENT",
+      "collab_modes": [
+        "single",
+        "multi",
+        "subagent"
+      ],
+      "eval": {
+        "suite": "comprehensive",
+        "repeats": 3,
+        "scoring_tasks": [
+          "analysis_summary",
+          "bugfix_calc",
+          "multi_file_pkg",
+          "data_csv",
+          "doc_report",
+          "honesty_safety"
+        ]
+      },
+      "isolation": {
+        "home": "<RUN>/enterprise/home",
+        "data_dir": "<RUN>/enterprise/data",
+        "project": "<RUN>/enterprise/project",
+        "logs": "<RUN>/enterprise/logs"
+      },
+      "extensions": "staging Pro wheel 1.11.24",
+      "license": "临时 ENT 许可证（一次性密钥对，仅环境变量）"
+    }
+  ],
+  "matrix": {
+    "eval": {
+      "suite": "comprehensive",
+      "repeats": 3,
+      "scoring_tasks": [
+        "analysis_summary",
+        "bugfix_calc",
+        "multi_file_pkg",
+        "data_csv",
+        "doc_report",
+        "honesty_safety"
+      ],
+      "probe_cases": [
+        "assertion_probe"
+      ],
+      "probe_rule": "按 expect_fail 过滤，不计分、不参与通过率",
+      "cells": 54,
+      "expected": [
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "community",
+          "repeat": 1,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "community",
+          "repeat": 2,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "community",
+          "repeat": 3,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "pro",
+          "repeat": 1,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "pro",
+          "repeat": 2,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "pro",
+          "repeat": 3,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 1,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 2,
+          "task_id": "honesty_safety"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "analysis_summary"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "bugfix_calc"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "multi_file_pkg"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "data_csv"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "doc_report"
+        },
+        {
+          "edition": "enterprise",
+          "repeat": 3,
+          "task_id": "honesty_safety"
+        }
+      ]
+    },
+    "collab": {
+      "tasks": [
+        "analysis_summary",
+        "codegen_fizzbuzz",
+        "bugfix_calc",
+        "multi_file_pkg"
+      ],
+      "cells": 28,
+      "expected": [
+        {
+          "edition": "community",
+          "task_id": "analysis_summary",
+          "mode": "single"
+        },
+        {
+          "edition": "community",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "single"
+        },
+        {
+          "edition": "community",
+          "task_id": "bugfix_calc",
+          "mode": "single"
+        },
+        {
+          "edition": "community",
+          "task_id": "multi_file_pkg",
+          "mode": "single"
+        },
+        {
+          "edition": "pro",
+          "task_id": "analysis_summary",
+          "mode": "single"
+        },
+        {
+          "edition": "pro",
+          "task_id": "analysis_summary",
+          "mode": "multi"
+        },
+        {
+          "edition": "pro",
+          "task_id": "analysis_summary",
+          "mode": "subagent"
+        },
+        {
+          "edition": "pro",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "single"
+        },
+        {
+          "edition": "pro",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "multi"
+        },
+        {
+          "edition": "pro",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "subagent"
+        },
+        {
+          "edition": "pro",
+          "task_id": "bugfix_calc",
+          "mode": "single"
+        },
+        {
+          "edition": "pro",
+          "task_id": "bugfix_calc",
+          "mode": "multi"
+        },
+        {
+          "edition": "pro",
+          "task_id": "bugfix_calc",
+          "mode": "subagent"
+        },
+        {
+          "edition": "pro",
+          "task_id": "multi_file_pkg",
+          "mode": "single"
+        },
+        {
+          "edition": "pro",
+          "task_id": "multi_file_pkg",
+          "mode": "multi"
+        },
+        {
+          "edition": "pro",
+          "task_id": "multi_file_pkg",
+          "mode": "subagent"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "analysis_summary",
+          "mode": "single"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "analysis_summary",
+          "mode": "multi"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "analysis_summary",
+          "mode": "subagent"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "single"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "multi"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "codegen_fizzbuzz",
+          "mode": "subagent"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "bugfix_calc",
+          "mode": "single"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "bugfix_calc",
+          "mode": "multi"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "bugfix_calc",
+          "mode": "subagent"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "multi_file_pkg",
+          "mode": "single"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "multi_file_pkg",
+          "mode": "multi"
+        },
+        {
+          "edition": "enterprise",
+          "task_id": "multi_file_pkg",
+          "mode": "subagent"
+        }
+      ]
+    }
+  },
+  "dependencies": {
+    "suite": {
+      "name": "comprehensive",
+      "path": "<REPO>/automind/eval/suites/comprehensive.yml",
+      "exists": true,
+      "cases": [
+        "analysis_summary",
+        "bugfix_calc",
+        "multi_file_pkg",
+        "data_csv",
+        "doc_report",
+        "honesty_safety",
+        "assertion_probe"
+      ],
+      "scoring_tasks": [
+        "analysis_summary",
+        "bugfix_calc",
+        "multi_file_pkg",
+        "data_csv",
+        "doc_report",
+        "honesty_safety"
+      ],
+      "probe_cases": [
+        "assertion_probe"
+      ],
+      "error": "",
+      "timeout_seconds": 300.0
+    },
+    "pro_wheel": {
+      "path": "<REPO>\\pro\\dist\\automind_pro-1.11.24-py3-none-any.whl",
+      "version": "1.11.24",
+      "core_version": "1.11.24",
+      "version_match": true,
+      "error": "",
+      "note": "使用与核心同版本的 staging wheel"
+    },
+    "credentials": {
+      "present": true,
+      "source": "env:DEEPSEEK_API_KEY",
+      "env_var": "DEEPSEEK_API_KEY"
+    },
+    "port_conflicts": [],
+    "warnings": [],
+    "errors": [],
+    "ready_for_live": true
+  },
+  "steps": [
+    "1) 预检：套件 / staging Pro wheel / API Key / 三个端口",
+    "2) 逐版本：准备隔离 HOME+DATA_DIR+project → 装 wheel（pro/ent）→ 生成临时许可证 → 启动 server → /api/status 校验版本",
+    "3) /api/config 配置模型（Key 只经 HTTP，不打印）",
+    "4) /api/eval/run 跑 comprehensive 3 轮（保存原始报告；6 个计分任务，expect_fail 探针不计分）",
+    "5) scripts/collab_benchmark.py --live 跑协作矩阵（保存原始报告）",
+    "6) 关服务、清临时许可证 → 写 manifest → 聚合报告"
+  ],
+  "notes": [
+    "dry-run 不启动服务、不联网、不需要 API Key；不代表任何实测结论。",
+    "计分口径：6 个计分任务 × 3 版本 × 3 重复 = 54 个 cell；assertion_probe 等 expect_fail 探针只做断言链路体检，不计分。",
+    "真实运行请加 --live；结果数字只来自真实运行，仓库不内置基准数据。",
+    "报告会脱敏 API Key / 许可证 / 绝对路径。"
+  ]
+}

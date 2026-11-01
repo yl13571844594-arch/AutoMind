@@ -30,6 +30,8 @@ import subprocess
 import sys
 from typing import Any
 
+from automind.core.proc import silent_process_kwargs
+
 #: 核心依赖（pyproject 的 [project].dependencies）—— 缺了进程都起不来
 CORE_DEPS: dict[str, tuple[str, str]] = {
     "pydantic": ("pydantic>=2.0", "配置与数据模型"),
@@ -186,7 +188,10 @@ def ensure_missing(results: list[dict[str, Any]] | None = None,
         if not quiet:
             print(f"  · 安装 {pkg}（{item['purpose']}）…")
         try:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600,
+                                  # v1.11.20：装包可能要好几分钟，别让它的窗口一直
+                                  # 挂在屏幕上（桌面版每次 doctor --fix 都会撞上）
+                                  **silent_process_kwargs())
         except (OSError, subprocess.TimeoutExpired) as e:
             if not quiet:
                 print(f"    ✗ {type(e).__name__}: {e}")

@@ -1,0 +1,470 @@
+{
+  "schema": "automind.collab_benchmark/1",
+  "generated_at": "2026-10-31T14:59:49+00:00",
+  "dry_run": false,
+  "provider": "deepseek",
+  "model": "deepseek-flash",
+  "modes": [
+    "single",
+    "multi",
+    "subagent"
+  ],
+  "tasks": [
+    {
+      "id": "analysis_summary",
+      "category": "analysis",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）"
+    },
+    {
+      "id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "description": "小代码生成：要求产出实现 + 测试并跑通"
+    },
+    {
+      "id": "bugfix_calc",
+      "category": "bugfix",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现"
+    },
+    {
+      "id": "multi_file_pkg",
+      "category": "multi_file",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口"
+    }
+  ],
+  "matrix": [
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "single",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）",
+      "expect_files": [],
+      "expect_tests": false
+    },
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "multi",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）",
+      "expect_files": [],
+      "expect_tests": false
+    },
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "subagent",
+      "description": "纯文本分析：比组织与取舍能力，不产生文件（不做 artifacts 检查）",
+      "expect_files": [],
+      "expect_tests": false
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "single",
+      "description": "小代码生成：要求产出实现 + 测试并跑通",
+      "expect_files": [
+        "fizzbuzz.py",
+        "test_fizzbuzz.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "multi",
+      "description": "小代码生成：要求产出实现 + 测试并跑通",
+      "expect_files": [
+        "fizzbuzz.py",
+        "test_fizzbuzz.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "subagent",
+      "description": "小代码生成：要求产出实现 + 测试并跑通",
+      "expect_files": [
+        "fizzbuzz.py",
+        "test_fizzbuzz.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "single",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现",
+      "expect_files": [
+        "calc.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "multi",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现",
+      "expect_files": [
+        "calc.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "subagent",
+      "description": "小 bug 修复：预置失败测试，要求定位并修复实现",
+      "expect_files": [
+        "calc.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "single",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口",
+      "expect_files": [
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "pkg/cli.py",
+        "pkg/__main__.py",
+        "tests/test_pkg.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "multi",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口",
+      "expect_files": [
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "pkg/cli.py",
+        "pkg/__main__.py",
+        "tests/test_pkg.py"
+      ],
+      "expect_tests": true
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "subagent",
+      "description": "多文件 + 验证：跨文件一致性、包结构与入口",
+      "expect_files": [
+        "pkg/__init__.py",
+        "pkg/core.py",
+        "pkg/cli.py",
+        "pkg/__main__.py",
+        "tests/test_pkg.py"
+      ],
+      "expect_tests": true
+    }
+  ],
+  "results": [
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "single",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": null,
+      "duration_ms": 6921,
+      "tokens": 6015,
+      "llm_calls": 1,
+      "steps": 0,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\analysis_summary-single"
+    },
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "multi",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": null,
+      "duration_ms": 89655,
+      "tokens": 37549,
+      "llm_calls": 9,
+      "steps": 2,
+      "verification_passed": true,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\analysis_summary-multi"
+    },
+    {
+      "task_id": "analysis_summary",
+      "category": "analysis",
+      "mode": "subagent",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": null,
+      "duration_ms": 4655,
+      "tokens": 3612,
+      "llm_calls": 1,
+      "steps": 1,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "no_more_tools",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\analysis_summary-subagent"
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "single",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": true,
+      "duration_ms": 30625,
+      "tokens": 77303,
+      "llm_calls": 11,
+      "steps": 0,
+      "verification_passed": true,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\codegen_fizzbuzz-single"
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "multi",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 136155,
+      "tokens": 211603,
+      "llm_calls": 28,
+      "steps": 3,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "verification_failed",
+      "error": "s3(reviewer): 依赖未完成：s2",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\codegen_fizzbuzz-multi"
+    },
+    {
+      "task_id": "codegen_fizzbuzz",
+      "category": "codegen",
+      "mode": "subagent",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": true,
+      "duration_ms": 66780,
+      "tokens": 162599,
+      "llm_calls": 16,
+      "steps": 16,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "no_more_tools",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\codegen_fizzbuzz-subagent"
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "single",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": true,
+      "duration_ms": 57750,
+      "tokens": 87365,
+      "llm_calls": 14,
+      "steps": 0,
+      "verification_passed": true,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\bugfix_calc-single"
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "multi",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 113125,
+      "tokens": 203981,
+      "llm_calls": 37,
+      "steps": 3,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "verification_failed",
+      "error": "calc.py 可能已被修改为修复后版本（系统核验为 66 字节，与建议的修复后代码相符），但执行结果中没有实际运行测试并确认全部通过的证据。任务明确要求“运行测试确认全部通过”，当前仅完成只读分析和可能的文件修改，缺少测试执行结果。下一步应运行 `python -m pytest test_calc.py -v`（test_calc.py 无 __main__ 入口，直接 `python test_calc.py` 不会执行测试），确认输出 `2 passed`，并核对 test_calc.py 未被修改。",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\bugfix_calc-multi"
+    },
+    {
+      "task_id": "bugfix_calc",
+      "category": "bugfix",
+      "mode": "subagent",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": true,
+      "duration_ms": 25922,
+      "tokens": 31308,
+      "llm_calls": 7,
+      "steps": 7,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "no_more_tools",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\bugfix_calc-subagent"
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "single",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": true,
+      "duration_ms": 47061,
+      "tokens": 75576,
+      "llm_calls": 11,
+      "steps": 0,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "completed",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\multi_file_pkg-single"
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "multi",
+      "status": "ok",
+      "success": false,
+      "artifacts_ok": false,
+      "duration_ms": 110171,
+      "tokens": 174735,
+      "llm_calls": 26,
+      "steps": 4,
+      "verification_passed": false,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "verification_failed",
+      "error": "s3(coder): 依赖未完成：s2；s4(reviewer): 依赖未完成：s3",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\multi_file_pkg-multi"
+    },
+    {
+      "task_id": "multi_file_pkg",
+      "category": "multi_file",
+      "mode": "subagent",
+      "status": "ok",
+      "success": true,
+      "artifacts_ok": true,
+      "duration_ms": 53875,
+      "tokens": 111861,
+      "llm_calls": 15,
+      "steps": 15,
+      "verification_passed": null,
+      "rework_count": 0,
+      "human_interventions": 0,
+      "stop_reason": "no_more_tools",
+      "error": "",
+      "notes": "workspace=<REPO>\\.automind\\collab_benchmark\\work\\multi_file_pkg-subagent"
+    }
+  ],
+  "summary": {
+    "total_runs": 12,
+    "ok_runs": 12,
+    "unavailable_runs": 0,
+    "error_runs": 0,
+    "overall": {
+      "runs": 12,
+      "successes": 8,
+      "success_rate": 0.6667,
+      "avg_duration_ms": 61891.25,
+      "tokens_total": 1183507,
+      "tokens_avg": 98625.58,
+      "llm_calls_total": 176,
+      "steps_total": 51,
+      "steps_avg": 4.25,
+      "verification_measured": 7,
+      "verification_pass_rate": 0.4286,
+      "artifacts_measured": 9,
+      "artifacts_pass_rate": 0.8889,
+      "rework_total": 0,
+      "human_interventions_total": 0
+    },
+    "by_mode": {
+      "single": {
+        "runs": 4,
+        "successes": 3,
+        "success_rate": 0.75,
+        "avg_duration_ms": 35589.25,
+        "tokens_total": 246259,
+        "tokens_avg": 61564.75,
+        "llm_calls_total": 37,
+        "steps_total": 0,
+        "steps_avg": 0.0,
+        "verification_measured": 3,
+        "verification_pass_rate": 0.6667,
+        "artifacts_measured": 3,
+        "artifacts_pass_rate": 1.0,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      },
+      "multi": {
+        "runs": 4,
+        "successes": 1,
+        "success_rate": 0.25,
+        "avg_duration_ms": 112276.5,
+        "tokens_total": 627868,
+        "tokens_avg": 156967.0,
+        "llm_calls_total": 100,
+        "steps_total": 12,
+        "steps_avg": 3.0,
+        "verification_measured": 4,
+        "verification_pass_rate": 0.25,
+        "artifacts_measured": 3,
+        "artifacts_pass_rate": 0.6667,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      },
+      "subagent": {
+        "runs": 4,
+        "successes": 4,
+        "success_rate": 1.0,
+        "avg_duration_ms": 37808.0,
+        "tokens_total": 309380,
+        "tokens_avg": 77345.0,
+        "llm_calls_total": 39,
+        "steps_total": 39,
+        "steps_avg": 9.75,
+        "verification_measured": 0,
+        "verification_pass_rate": null,
+        "artifacts_measured": 3,
+        "artifacts_pass_rate": 1.0,
+        "rework_total": 0,
+        "human_interventions_total": 0
+      }
+    },
+    "notes": [
+      "成功率/平均耗时只统计 status=ok 的执行；unavailable/error 单独计数。",
+      "verification_pass_rate / artifacts_pass_rate 只统计真实测量的行，未测量记为 null（不是 0）。",
+      "manual_rework 由人工回填 CSV 后自行统计；脚本不推断。",
+      "human_interventions=0 表示本次无人介入（无人值守审批），不是统计缺失。"
+    ]
+  },
+  "notes": [
+    "本文件不含任何预置/示例指标；dry_run=true 时 results 为空。",
+    "真实结果只在 --live 跑出来，未提交进仓库；不要把 API Key 或结果提交到版本库。",
+    "CSV 的 manual_rework 列由人工填写（是否手工返工 + 原因），脚本不代填。"
+  ]
+}

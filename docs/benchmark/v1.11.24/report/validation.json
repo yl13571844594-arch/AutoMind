@@ -1,0 +1,10 @@
+{
+  "schema": "automind.edition_benchmark_report/1",
+  "ok": true,
+  "errors": [],
+  "warnings": [],
+  "checked_eval_cells": 54,
+  "checked_collab_cells": 28,
+  "total_cells": 82,
+  "note": "最终 v1.11.24b 完整运行"
+}

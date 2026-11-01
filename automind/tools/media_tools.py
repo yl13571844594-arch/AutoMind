@@ -15,6 +15,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from automind.core.proc import silent_process_kwargs
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools._toolkit import (
     bad,
@@ -472,7 +473,9 @@ class VideoTool(AbstractTool):
                     [ffprobe, "-v", "quiet", "-print_format", "json",
                      "-show_format", "-show_streams", str(path)],
                     capture_output=True, text=True, timeout=60, check=False,
-                    encoding="utf-8", errors="replace")
+                    encoding="utf-8", errors="replace",
+                    # v1.11.20：外部程序同样别在桌面版上闪控制台窗口
+                    **silent_process_kwargs())
                 if probe.returncode != 0:
                     return bad(self.name, "ffprobe 解析失败：" + (probe.stderr or "")[:200])
                 data = json.loads(probe.stdout)
@@ -498,7 +501,8 @@ class VideoTool(AbstractTool):
                     [ffmpeg, "-y", "-ss", str(t), "-i", str(path),
                      "-frames:v", "1", "-q:v", "2", str(output)],
                     capture_output=True, text=True, timeout=120, check=False,
-                    encoding="utf-8", errors="replace")
+                    encoding="utf-8", errors="replace",
+                    **silent_process_kwargs())
                 if not output.exists():
                     return bad(self.name, "抽帧失败，请确认 time 未超出视频时长")
                 return ok(self.name, action=action, output=str(output),

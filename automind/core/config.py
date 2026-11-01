@@ -92,6 +92,11 @@ class ExecutionConfig(BaseModel):
     auto_verify: bool = True
     # 验证重试上限（auto_verify 触发的补充轮数）
     auto_verify_max_rounds: int = 2
+    #: 验收未过时，每个修复轮最多走多少步 ReAct；0 = 不自动修复。
+    #: 修复轮是"小修小补"，不是第二个完整任务：原先复用 ex.max_iterations（50 步，
+    #: v1.11.7 还会自动续步一次），一个验收失败的完成计划可以被重新跑成
+    #: 150 步 / 25 分钟 / 7.7M token —— 收尾修复本就该有独立的小预算。
+    auto_verify_fix_max_iterations: int = 1
     # TDD 闭环：编程模式每次代码修改后自动语法/测试验证并反馈给模型
     auto_test: bool = True
     # 并行执行：计划中互不依赖的目标用 asyncio.gather 并发执行
@@ -220,6 +225,30 @@ class ExecutionConfig(BaseModel):
     # 每开一个新窗口，整轮墙钟预算（max_task_seconds）同步顺延一份 ——
     # 否则续跑到第二个窗口就会撞上 30 分钟墙钟，换个名字再"中断"一次。
     budget_auto_continue: int = 10
+
+    # ── v1.11.22 多智能体工程协同（角色预算独立）──
+    # 为什么每个角色要有独立预算：协同 DAG 里一个"编码"角色可能连续读文件、
+    # 跑命令、改多份文件而烧掉整轮大部分 token，其它角色只能拿零头甚至开不了
+    # 工；而它们共用一个全局预算时，没有任何地方能说清"是谁把预算吃光的"。
+    # 这里给每个角色独立的步数 / token / 墙钟上限，互不挤占、可分别追责。
+    # 工程编排器用 getattr(execution, "multi_agent_*", 常量) 读取，
+    # 因此旧配置（缺这些字段）也能工作，不影响既有文本流水线。
+    #: 同时执行的角色数（写 scope 冲突或依赖未满足时自动降为串行）。
+    multi_agent_max_parallel: int = 2
+    #: 每个角色最多 ReAct 步数（含自动续步关闭后的硬上限）。
+    multi_agent_role_max_steps: int = 30
+    #: 每个角色独立 token 预算（0 = 只受全局任务预算约束）。
+    #: v1.11.25：真实 multi 的 codegen/bugfix/multi_file 角色在 200k 仍会在
+    #: 收尾前耗尽（实测 211,562/200,000）；给足中等工程任务余量，仍受墙钟/父预算约束。
+    multi_agent_role_max_tokens: int = 300_000
+    #: 单个角色的墙钟上限（秒）；超时标记失败并继续收尾，不无限等待。
+    multi_agent_role_timeout_seconds: int = 300
+    #: reviewer 不通过时最多回炉次数（0 = 只审一次，不自动回炉）。
+    multi_agent_max_rework: int = 1
+    #: 收尾跑测试 / 产物 / 语义验收闭环（不可用时不判失败、不伪造通过）。
+    multi_agent_verify: bool = True
+    #: 写角色完成后跑只读 reviewer（审查不可用时记录而不据此判失败）。
+    multi_agent_review_writes: bool = True
 
     # ── v1.6.4 目录级并发写冲突隔离 ──
     # 同进程内按路径加锁串行化写入；并对"别的会话刚写过、我没读过"的文件

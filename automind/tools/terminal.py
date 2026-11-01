@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from automind.core.logging import get_logger
+from automind.core.proc import silent_process_kwargs
 from automind.core.types import PermissionTier, ToolResult
 from automind.tools._toolkit import live_execution_config
 from automind.tools.base import AbstractTool
@@ -414,7 +415,9 @@ class TerminalTool(AbstractTool):
             try:
                 proc = await asyncio.create_subprocess_shell(
                     repaired, stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env)
+                    stderr=asyncio.subprocess.PIPE, cwd=workdir, env=env,
+                    # v1.11.20：Windows 无控制台时别为这条重跑命令再闪一个黑框
+                    **silent_process_kwargs())
                 so, se = await asyncio.wait_for(proc.communicate(), timeout=timeout)
             except (TimeoutError, OSError):
                 await self._kill_quietly(proc)
@@ -454,7 +457,7 @@ class TerminalTool(AbstractTool):
         try:
             process = await asyncio.create_subprocess_exec(
                 *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                cwd=workdir, env=env)
+                cwd=workdir, env=env, **silent_process_kwargs())
             so, se = await asyncio.wait_for(process.communicate(), timeout=timeout)
         except (TimeoutError, OSError):
             await self._kill_quietly(process)
@@ -576,6 +579,8 @@ class TerminalTool(AbstractTool):
                 stderr=asyncio.subprocess.PIPE,
                 cwd=workdir,
                 env=base_env,
+                # v1.11.20：桌面版无控制台，不给 CREATE_NO_WINDOW 就会每条命令闪黑框
+                **silent_process_kwargs(),
             )
             stdout_bytes, stderr_bytes = await asyncio.wait_for(
                 process.communicate(), timeout=timeout
@@ -675,7 +680,8 @@ class TerminalTool(AbstractTool):
                 with contextlib.suppress(Exception):
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
                                    stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, check=False, timeout=10)
+                                   stderr=subprocess.DEVNULL, check=False, timeout=10,
+                                   **silent_process_kwargs())
             else:
                 with contextlib.suppress(Exception):
                     os.killpg(os.getpgid(pid), signal.SIGKILL)

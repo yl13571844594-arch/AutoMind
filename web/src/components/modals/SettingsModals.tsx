@@ -651,6 +651,8 @@ const EFFECTIVE_FALLBACK: Record<string, [string, string]> = {
   approval_timeout_seconds: ['下次审批生效', '下一次审批等待时读取'],
   tool_output_max_chars: ['下次任务生效', 'ReAct 执行器按任务构造'],
   auto_verify_max_rounds: ['下次任务生效', '收尾验收时读取；已进入收尾的任务不追溯'],
+  // v1.11.21：修复轮独立预算 —— 修复轮在任务收尾时按任务构造，已进入收尾的不追溯
+  auto_verify_fix_max_iterations: ['下次任务生效', '收尾修复轮按任务构造；已进入收尾的任务不追溯'],
   trace_max_runs: ['即时生效', '下一次轮转按新上限淘汰'],
   goal_timeout_seconds: ['即时生效', '下一次调度生效；已开始的步骤不追溯'],
   react_tool_timeout_seconds: ['下次任务生效', 'ReAct 执行器按任务构造'],
@@ -704,6 +706,10 @@ const NUMERIC_KNOBS: Array<[string, string, number, number, number, string]> = [
   ['react_no_progress_limit', '无进展收尾阈值', 0, 50, 1,
     '重复动作被拦截到该次数即提前收尾并给出部分交付清单；0 = 只拦不提前收尾'],
   ['auto_verify_max_rounds', '验收修复轮上限', 0, 10, 1, '0 = 验收不通过也不自动修复'],
+  // v1.11.21：修复轮不再复用单任务最大步数（50+续步），避免"验收失败后重跑成
+  // 第二个长任务"。默认 1 步：修复轮是"小修小补"，不是重新做一遍。
+  ['auto_verify_fix_max_iterations', '修复轮最大步数', 0, 50, 1,
+    '验收未过时每个修复轮最多走多少步；0 = 不自动修复'],
   ['max_iterations', '单任务最大步数', 1, 500, 10,
     'ReAct / 编程模式单个任务最多执行多少步；到上限给出部分交付清单。长任务可适当调大'],
   ['task_token_budget', '单任务 Token 预算(每窗口)', 0, 20000000, 50000,

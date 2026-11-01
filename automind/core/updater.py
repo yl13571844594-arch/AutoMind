@@ -615,6 +615,9 @@ def _spawn_installer(bat: Path, tmp: Path) -> None:
     顺带把输出留到 ``trace.txt``，升级出问题时有据可查。
     """
     import subprocess as sp
+
+    from automind.core.proc import silent_process_kwargs
+
     # CREATE_NO_WINDOW / DETACHED_PROCESS / CREATE_NEW_PROCESS_GROUP 都是
     # **Windows 独有**的 subprocess 属性，Linux/macOS 上根本不存在 —— 直接引用会
     # AttributeError。升级流程本身只在 Windows 走（装的是 Inno 的 .exe），但本函数
@@ -623,6 +626,12 @@ def _spawn_installer(bat: Path, tmp: Path) -> None:
     flags = 0
     for name in ("CREATE_NO_WINDOW", "DETACHED_PROCESS", "CREATE_NEW_PROCESS_GROUP"):
         flags |= getattr(sp, name, 0)
+    # v1.11.20：统一走静默化 helper。这里本来就显式带了 DETACHED_PROCESS，
+    # helper 遇到它会**原样透传**（不会用 CREATE_NO_WINDOW 覆盖"脱离父进程"的
+    # 语义），因此三个标志都保留。flags == 0 的极端平台不调 helper，维持"不传
+    # 任何创建标志"的既有跨平台行为。
+    if flags:
+        flags = silent_process_kwargs(flags).get("creationflags", flags)
     trace = open(tmp / "trace.txt", "wb")  # noqa: SIM115 - 交给子进程，不能用 with
     try:
         sp.Popen(["cmd", "/c", str(bat)],

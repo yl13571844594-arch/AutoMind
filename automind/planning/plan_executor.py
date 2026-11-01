@@ -403,6 +403,56 @@ class PlanExecutor:
         goal: Goal,
         on_approval_needed: Any = None,
     ) -> StepResult:
+        """执行单个目标（治理来源绑定层，v1.11.19）。
+
+        把来源绑定抽在外层而不是散在每个分支里：计划执行器自己的
+        ``permissions.check`` 审批分支要记决策、内部 dispatch 要记来源，
+        两者都读 ContextVar —— 一处 bind、try/finally 恢复即可，且不会影响
+        调用方（Agent 的 plan 模式）原有的来源（通常是 direct）。
+        """
+        from automind.core import governance as _governance
+
+        token = _governance.bind_source("plan")
+        try:
+            return await self._execute_goal_inner(goal, on_approval_needed)
+        finally:
+            _governance.reset_source(token)
+
+    def _governance_risk(self, tool_name: str, tier: Any, params: Any) -> int:
+        """本次动作的风险分（治理记账用；拿不到就按声明等级折算）。"""
+        try:
+            fn = getattr(self.permissions, "assess_risk", None)
+            if callable(fn):
+                return int(fn(tool_name, tier, params if isinstance(params, dict) else {}))
+        except Exception:                               # pragma: no cover - 防御性
+            pass
+        tier_value = str(getattr(tier, "value", tier) or "")
+        return {"safe": 10, "sensitive": 50, "dangerous": 90}.get(tier_value, 50)
+
+    def _record_goal_decision(self, tool_name: str, tier: Any, risk: int,
+                              decision: str, reason: str, params: Any) -> None:
+        """把计划执行器的一次门控结论记进治理账本（失败不影响执行）。"""
+        try:
+            from automind.core import governance as _governance
+
+            _governance.record_decision(
+                tool=tool_name,
+                tier=getattr(tier, "value", tier),
+                risk=risk,
+                decision=decision,
+                reason=reason,
+                source=_governance.current_source(),
+                params=params if isinstance(params, dict) else None,
+            )
+        except Exception as e:                          # pragma: no cover - 防御性
+            logger.warning("plan_governance_record_failed", tool=tool_name,
+                           error=f"{type(e).__name__}: {e}")
+
+    async def _execute_goal_inner(
+        self,
+        goal: Goal,
+        on_approval_needed: Any = None,
+    ) -> StepResult:
         """执行单个目标。"""
         goal.status = GoalStatus.IN_PROGRESS
 
@@ -443,7 +493,16 @@ class PlanExecutor:
         decision, reason = self.permissions.check(
             action.tool_name, check_tier, action.parameters
         )
+        # v1.11.19：每个门控结论都落一条治理决策（来源=plan），让计划路径的
+        # "批了什么 / 拒了什么"在重启后仍可查。记账失败不影响执行。
+        _gov_risk = self._governance_risk(action.tool_name, check_tier, action.parameters)
+
+        def _mark(decision_value: str, reason_text: str) -> None:
+            self._record_goal_decision(action.tool_name, check_tier, _gov_risk,
+                                       decision_value, reason_text, action.parameters)
+
         if decision.value == "deny":
+            _mark("deny", reason)
             return StepResult(
                 goal_id=goal.id,
                 goal_description=goal.description,
@@ -453,12 +512,15 @@ class PlanExecutor:
         if decision.value == "allow" and tool is None:
             # 「全批准」模式下不会走审批，但"批准一个不存在的工具"毫无意义 ——
             # 直接如实失败，别让一个幻影动作被计成"已完成步骤"。
+            _mark("deny", self._unknown_tool_message(action.tool_name))
             return StepResult(
                 goal_id=goal.id,
                 goal_description=goal.description,
                 success=False,
                 error=self._unknown_tool_message(action.tool_name),
             )
+        if decision.value == "allow":
+            _mark("allow", reason)
         if decision.value == "ask_user":
             # 安全修复（v1.4.5）：原条件是 `ask_user and on_approval_needed` ——
             # 没接审批回调时整个判断被**整体跳过**，需要人工确认的操作直接执行了。
@@ -466,12 +528,14 @@ class PlanExecutor:
             # （要无人值守跑，应把审批模式设为「自动」/「全批准」——那样
             #   permissions.check() 不会返回 ask_user，根本走不到这里。）
             if on_approval_needed is None:
+                note = (f"{reason}；当前没有可用的审批通道，已按拒绝处理"
+                        "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）")
+                _mark("denied", note)
                 return StepResult(
                     goal_id=goal.id,
                     goal_description=goal.description,
                     success=False,
-                    error=(f"{reason}；当前没有可用的审批通道，已按拒绝处理"
-                           "（如需无人值守运行，请将审批模式设为「自动」或「全批准」）"),
+                    error=note,
                 )
             try:
                 from automind.state.human_loop import ApprovalOutcome
@@ -484,8 +548,11 @@ class PlanExecutor:
                     logger.info("approval_modified", goal=goal.id,
                                 tool=action.tool_name,
                                 keys=sorted(action.parameters))
+                    _mark("modified", f"{reason}；用户修改参数后批准")
                 elif not approved and outcome.comment:
                     reason = outcome.comment
+                if approved and not outcome.modified:
+                    _mark("approved", reason)
             except Exception as e:
                 approved = False   # 审批通道异常一律视为未批准
                 # v1.7.5：把原始异常信息带上。只有类型名时，用户看到的
@@ -493,7 +560,15 @@ class PlanExecutor:
                 # 里最常见的就是前端断开，说清楚才能自查。
                 reason = (f"审批通道异常（{type(e).__name__}: {str(e)[:160]}）；"
                           f"已按未批准处理")
+                _mark("error", reason)
+                return StepResult(
+                    goal_id=goal.id,
+                    goal_description=goal.description,
+                    success=False,
+                    error=f"User denied the action: {reason}",
+                )
             if not approved:
+                _mark("denied", reason)
                 return StepResult(
                     goal_id=goal.id,
                     goal_description=goal.description,

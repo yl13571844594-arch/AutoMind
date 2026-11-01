@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import itertools
 import time
 from typing import Any
 
+from automind.core import governance as _governance
 from automind.core.exceptions import BudgetExhaustedError, LLMContextTooLargeError
 from automind.core.llm import classify_llm_error, is_transient_llm_error
 from automind.core.logging import get_logger
@@ -603,6 +605,9 @@ class ReActExecutor:
         on_interjection: Any = None,
         on_reconnect: Any = None,
         memory_note: str = "",
+        on_action_start: Any = None,
+        on_action_progress: Any = None,
+        on_extension: Any = None,
     ) -> str:
         """执行 ReAct 循环。
 
@@ -624,6 +629,13 @@ class ReActExecutor:
                 ``(dict) -> None`` (可选，v1.7.6)。
             memory_note: 每个任务都可能变化的记忆片段（v1.11.10）。单独作为
                 一条 system 消息放在环境之后，避免它把稳定的前缀缓存一起作废。
+            on_action_start: 工具**开始执行**时的回调 ``(dict) -> None``
+                (可选，v1.11.20)。此前界面要等工具跑完才有 step_action，
+                执行一分钟的长命令期间看上去像卡死了。
+            on_action_progress: 工具执行期间的心跳回调 ``(dict) -> None``
+                (可选，v1.11.20)，默认每 5 秒一条，让用户知道它还在跑。
+            on_extension: 步数窗口续开时的回调 ``(dict) -> None`` (可选，
+                v1.11.20)；未提供时退回复用 on_no_progress 通道。
 
         Returns:
             最终答案文本。**上限耗尽 / 无进展提前收尾 / 超时 / 被中断时**
@@ -648,11 +660,18 @@ class ReActExecutor:
             self.progress.reset()
         except AttributeError:      # 老实例（测试里 __new__ 造的）没有该属性
             pass
+        # 治理来源绑定（v1.11.19）：本轮所有工具调用的账本来源 = "react"。
+        # dispatch 的分派级闸门据此认定"这次调用已经过执行器的人工审批门控"，
+        # 因此不再二次审批；同时让 execution 记录带上正确来源。
+        _gov_token = _governance.bind_source("react")
         try:
             return await self._run(task, context, on_thought, on_action,
                                    on_no_progress, deadline, on_timeout,
                                    on_interjection, on_reconnect,
-                                   memory_note=memory_note)
+                                   memory_note=memory_note,
+                                   on_action_start=on_action_start,
+                                   on_action_progress=on_action_progress,
+                                   on_extension=on_extension)
         except asyncio.CancelledError:
             # 被取消（用户停止 / 会话关闭 / 超时）—— 同样要留下结构化进度，
             # 否则用户只看到"任务没了"，不知道已经做成了什么。
@@ -664,6 +683,7 @@ class ReActExecutor:
             self.interrupted_reason = f"{type(e).__name__}: {e}"
             raise
         finally:
+            _governance.reset_source(_gov_token)
             self.running = False
 
     #: 清单里最多列出的动作条数（太长没人看，也太占上下文）
@@ -862,6 +882,9 @@ class ReActExecutor:
         on_interjection: Any = None,
         on_reconnect: Any = None,
         memory_note: str = "",
+        on_action_start: Any = None,
+        on_action_progress: Any = None,
+        on_extension: Any = None,
     ) -> str:
         # 只挑与本任务相关的工具完整下发，其余留一份一行式目录（见 _select_tools）
         self._select_tools(task, context)
@@ -893,6 +916,12 @@ class ReActExecutor:
                     f"（第 {self.iteration_extensions_used}/{self.max_iteration_extensions} 次续加）。"
                     "请先回顾还没完成的交付项，优先完成它们，不要重复已经做过的步骤；"
                     "全部完成后直接给出最终总结。")})
+                # v1.11.20：续步要**可见**。此前只写日志，前端/用户不知道上限被
+                # 悄悄放大了；现在推一条事件（没有 on_extension 时退回复用
+                # on_no_progress 通道，保持旧调用方也能收到）。
+                await self._emit_iteration_extension(
+                    on_extension if on_extension is not None else on_no_progress,
+                    self.iteration_extensions_used, limit)
             self.iterations_used = iteration + 1
             # 用户中途补充（v1.7.2）：在下一次思考**之前**并进消息列表。
             # 放在这里而不是流式回调里，是因为 ReAct 的"步与步之间"才是唯一
@@ -1054,10 +1083,19 @@ class ReActExecutor:
                 if reuse is not None:
                     results.append(self._as_reuse(tc, reuse, advice))
                     continue
+                heartbeat = None
                 try:
                     args = tc.arguments if isinstance(tc.arguments, dict) else {}
                     # v1.7.0 单步超时：工具挂住不再等于任务挂住。
                     timeout = self._effective_timeout(args)
+                    # v1.11.20：工具**一开始执行**就推一条 start 事件。此前界面
+                    # 要等工具跑完才收到 step_action —— 执行 `npm install` 这种
+                    # 一分钟的命令期间，用户看到的是"它不动了"。
+                    await self._emit_action_start(on_action_start, tc, timeout)
+                    # 执行期间每 TOOL_HEARTBEAT_INTERVAL 秒推一条心跳（同样只做
+                    # 观测，回调抛异常绝不影响工具执行）。
+                    heartbeat = self._start_tool_heartbeat(
+                        on_action_progress, tc.name)
                     if timeout:
                         result = await asyncio.wait_for(
                             self.tool_registry.dispatch(tc.name, **args),
@@ -1088,6 +1126,10 @@ class ReActExecutor:
                     results.append(ToolResult(
                         tool_name=tc.name, success=False,
                         error=f"工具执行异常：{reason}"))
+                finally:
+                    # 成功 / 超时 / 异常 / 取消都必须停掉心跳：否则取消路径会
+                    # 留下一个 pending task，事件循环关闭时报"Task was destroyed"。
+                    await self._stop_tool_heartbeat(heartbeat)
 
             for tc, result in zip(response.tool_calls, results):
                 self.actions.append((tc, result))
@@ -1252,12 +1294,25 @@ class ReActExecutor:
 
     # ── v1.7.0 单步超时 ────────────────────────────────────
 
+    #: v1.11.20：外层等待比工具自己的超时多留的余量（比例 / 上限，秒）。
+    #: 目的见 _effective_timeout 的注释 —— 让"工具自己的结构化超时回执"总能
+    #: 先于外层取消到达模型，而不是被外层 wait_for 抢先掐掉。
+    TOOL_TIMEOUT_GRACE_RATIO = 0.10
+    TOOL_TIMEOUT_GRACE_MAX = 30.0
+
     def _effective_timeout(self, args: dict[str, Any]) -> float:
         """本次工具调用的超时上限：模型可申请更长，但不越上限。
 
         ``timeout`` 是工具参数里已存在的约定（``terminal`` 就用它表达
         "这条命令要跑很久"）。这里把它同时用于 ReAct 的**等待上限**，
         避免出现"命令自己允许跑 600 秒，而外层 300 秒就把它掐了"的矛盾。
+
+        v1.11.20：算完 budget 后再加 ``min(30, budget*10%)`` 的让位余量。
+        原因：``terminal`` / ``pwsh`` 内部到点时会先返回**结构化超时回执**
+        （含"改用后台通道"的指引），而外层 ``asyncio.wait_for`` 若与它同时
+        到点，谁先触发没有保证 —— 实测外层抢先 cancel 时，模型只看到笼统的
+        "等待超时、输出已丢弃"，那句能指导下一步的回执被吞掉了。留出这段
+        余量，内部回执总能先返回。``tool_timeout=0``（不限）时仍返回 0。
         """
         if not getattr(self, "tool_timeout", 0):
             return 0.0
@@ -1273,6 +1328,9 @@ class ReActExecutor:
         cap = float(getattr(self, "tool_timeout_max", 0) or 0)
         if cap > 0:
             budget = min(budget, cap)
+        if budget > 0:
+            budget += min(self.TOOL_TIMEOUT_GRACE_MAX,
+                          budget * self.TOOL_TIMEOUT_GRACE_RATIO)
         return budget
 
     def _tool_timeout_note(self, name: str, timeout: float) -> str:
@@ -1298,6 +1356,96 @@ class ReActExecutor:
             })
         except Exception as e:          # pragma: no cover - 纯观测
             logger.warning("tool_timeout_emit_failed", tool=tc.name, error=str(e))
+
+    # ── v1.11.20 工具执行可见（start / 心跳）────────────────
+
+    #: 工具执行心跳间隔（秒）。5 秒是"看起来还活着"与"别刷屏"之间的折中；
+    #: 短于 1 秒的步骤不会产生任何心跳（没有必要，反而淹没真正的进度）。
+    TOOL_HEARTBEAT_INTERVAL = 5.0
+
+    async def _emit_action_start(self, cb: Any, tc: ToolCall,
+                                 timeout: float) -> None:
+        """推"工具开始执行"事件（回调异常只 warning，绝不影响工具）。"""
+        if cb is None:
+            return
+        try:
+            raw_args = tc.arguments if isinstance(tc.arguments, dict) else {}
+            await cb({
+                "type": "step_action_start",
+                "tool": tc.name,
+                # 200 字截断：start 只是"开始了"的信标，参数全文在 step_action 里
+                "args": {k: str(v)[:200] for k, v in raw_args.items()},
+                "timeout_s": timeout,
+            })
+        except Exception as e:                      # pragma: no cover - 纯观测
+            logger.warning("react_action_start_emit_failed",
+                           tool=tc.name, error=str(e))
+
+    def _start_tool_heartbeat(self, cb: Any, tool: str) -> Any:
+        """启动执行期心跳任务；没有回调/没有事件循环时返回 None。"""
+        if cb is None:
+            return None
+        try:
+            return asyncio.create_task(self._tool_heartbeat(cb, tool))
+        except RuntimeError:                        # pragma: no cover - 无事件循环
+            return None
+
+    async def _tool_heartbeat(self, cb: Any, tool: str) -> None:
+        """每隔 ``TOOL_HEARTBEAT_INTERVAL`` 秒推一条 ``tool_progress``。
+
+        回调抛异常**只记 warning 并继续**：心跳是纯观测，不能让它把工具执行
+        或整个任务带崩（回调常在 UI 层，UI 卡住/断开是常态）。
+        """
+        started = time.monotonic()
+        interval = float(getattr(self, "TOOL_HEARTBEAT_INTERVAL", 5.0) or 0)
+        interval = max(0.01, interval)
+        try:
+            while True:
+                await asyncio.sleep(interval)
+                try:
+                    await cb({
+                        "type": "tool_progress",
+                        "tool": tool,
+                        "elapsed_s": round(time.monotonic() - started, 1),
+                    })
+                except Exception as e:              # pragma: no cover - 纯观测
+                    logger.warning("react_tool_progress_emit_failed",
+                                   tool=tool, error=str(e))
+        except asyncio.CancelledError:
+            # 工具结束/任务取消时的正常退出路径，不向上抛（见 _stop_tool_heartbeat）
+            return
+
+    @staticmethod
+    async def _stop_tool_heartbeat(task: Any) -> None:
+        """取消并等待心跳任务结束（幂等、绝不抛异常）。"""
+        if task is None:
+            return
+        try:
+            task.cancel()
+        except Exception:                           # pragma: no cover - 防御性
+            return
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _emit_iteration_extension(self, cb: Any, used: int,
+                                        new_limit: int) -> None:
+        """推"步数窗口续开"事件（v1.11.20）。
+
+        续步本身是好事（长任务不中断），但**不能静默**：用户/前端要能解释
+        "为什么步数上限变大了"，否则看起来像护栏失效。
+        """
+        if cb is None:
+            return
+        try:
+            await cb({
+                "type": "react_iterations_extended",
+                "used": used,
+                "max": getattr(self, "max_iteration_extensions",
+                               self.MAX_ITERATION_EXTENSIONS),
+                "new_limit": new_limit,
+            })
+        except Exception as e:                      # pragma: no cover - 纯观测
+            logger.warning("react_iteration_extension_emit_failed", error=str(e))
 
     # ── v1.7.0 无进展治理的小接口（老实例缺属性时全部安全降级）──
 
@@ -1392,6 +1540,9 @@ class ReActExecutor:
                 "type": "react_no_progress", "tool": tc.name,
                 "blocked": getattr(guard, "blocked", 0),
                 "repeats": getattr(guard, "repeats", 0),
+                # v1.11.20：带上读目标守卫的账，前端/日志能分清"是逐字重复
+                # 还是换着 offset 反复读同一份内容"。
+                "read_target_hits": getattr(guard, "read_target_hits", 0),
                 "reason": advice.splitlines()[0] if advice else "重复动作已拦截",
             })
         except Exception as e:          # pragma: no cover - 纯观测
@@ -1516,8 +1667,11 @@ class ReActExecutor:
             return
         self._rounds_without_success = getattr(self, "_rounds_without_success", 0) + 1
 
-    #: v1.11.7 步数窗口：步数用完但仍在推进时最多续加几次（每次 = max_iterations 步）
-    MAX_ITERATION_EXTENSIONS = 2
+    #: v1.11.7 步数窗口：步数用完但仍在推进时最多续加几次（每次 = max_iterations 步）。
+    #: v1.11.20：2 → 1。读目标守卫（react_progress）已经把"换参数反复读同一目标"
+    #: 这条最常见的绕法堵住，续步窗口不再需要给两次机会 —— 150 步跑飞的长任务
+    #: 里，第二次续步几乎总是纯粹的预算消耗。
+    MAX_ITERATION_EXTENSIONS = 1
     #: 判定"仍在推进"：最近这么多轮里至少有一轮有工具调用成功
     PROGRESS_WINDOW = 3
 
@@ -1583,9 +1737,60 @@ class ReActExecutor:
             logger.warning("tool_name_resolve_failed", tool=name, error=str(e))
             return ""
 
+    def _governance_risk(self, tc: ToolCall, tier: Any) -> int:
+        """本次调用的风险分（治理记账用）：优先公开 ``assess_risk``，否则按等级折算。"""
+        try:
+            fn = getattr(self.permissions, "assess_risk", None)
+            if callable(fn):
+                params = tc.arguments if isinstance(tc.arguments, dict) else {}
+                return int(fn(tc.name, tier, params))
+        except Exception:                               # pragma: no cover - 防御性
+            pass
+        tier_value = str(getattr(tier, "value", tier) or "")
+        return {"safe": 10, "sensitive": 50, "dangerous": 90}.get(tier_value, 50)
+
+    def _record_gate_decision(self, tc: ToolCall, tier: Any, decision: str,
+                              reason: str, governed: bool = True) -> None:
+        """把一次门控结论记进治理账本（v1.11.19）。
+
+        记账失败**绝不改变门控结果**：账本是事后取证，不是安全控制的执行路径。
+        """
+        try:
+            _governance.record_decision(
+                tool=tc.name,
+                tier=getattr(tier, "value", tier),
+                risk=self._governance_risk(tc, tier),
+                decision=decision,
+                reason=reason,
+                source=_governance.current_source(),
+                params=tc.arguments if isinstance(tc.arguments, dict) else None,
+                call_id=getattr(tc, "id", "") or "",
+                governed=governed,
+            )
+        except Exception as e:                          # pragma: no cover - 防御性
+            logger.warning("react_governance_record_failed", tool=tc.name,
+                           error=f"{type(e).__name__}: {e}")
+
     async def _gate(self, tc: ToolCall) -> tuple[bool, str]:
-        """工具调用前的权限门控。返回 (是否允许, 原因)。"""
+        """工具调用前的权限门控。返回 (是否允许, 原因)。
+
+        v1.11.19：每个结论都落一条治理决策（allow/deny/approved/denied/
+        modified/error），让"这次任务到底批了什么、拒了什么"在进程重启后仍可查。
+        """
         if self.permissions is None:
+            # 没有权限引擎 = 这条链路**没有治理门控**（多为库调用 / 直连
+            # 执行器的单测）。既有行为是全部放行，这里**保持不变**（50+ 既有
+            # 用例依赖它）；只补一条 governed=False 的记账 + 警告，让这种
+            # "裸奔"状态在账本里可见，而不是静默地什么都不留。
+            _governance.record_decision(
+                tool=tc.name, tier="unknown", risk=0, decision="allow",
+                reason="未配置权限引擎：本次调用未经治理门控（既有行为保持不变）",
+                source=_governance.current_source(),
+                params=tc.arguments if isinstance(tc.arguments, dict) else None,
+                call_id=getattr(tc, "id", "") or "",
+                governed=False)
+            logger.warning("react_gate_ungoverned", tool=tc.name,
+                           note="permissions 未配置，本次调用没有经过治理门控")
             return True, ""
         from automind.core.types import PermissionTier
 
@@ -1606,8 +1811,10 @@ class ReActExecutor:
 
         decision, reason = self.permissions.check(tc.name, tier, tc.arguments)
         if decision.value == "allow":
+            self._record_gate_decision(tc, tier, "allow", reason)
             return True, reason
         if decision.value == "deny":
+            self._record_gate_decision(tc, tier, "deny", reason)
             return False, reason
         # ask_user —— 走到这里说明**权限策略明确要求人工确认**
         # （"询问"模式下的非只读操作，或"自动"模式下的高危操作）。
@@ -1623,8 +1830,10 @@ class ReActExecutor:
             self.skipped_approvals = getattr(self, "skipped_approvals", 0) + 1
             logger.warning("approval_channel_missing", tool=tc.name,
                            decision="denied", tier=tier.value)
-            return False, (f"{reason}；当前没有可用的审批通道，已按拒绝处理"
-                           "（若需无人值守运行，请将审批模式设为「自动」或「全批准」）")
+            note = (f"{reason}；当前没有可用的审批通道，已按拒绝处理"
+                    "（若需无人值守运行，请将审批模式设为「自动」或「全批准」）")
+            self._record_gate_decision(tc, tier, "denied", note)
+            return False, note
         try:
             from automind.state.human_loop import ApprovalOutcome
             outcome = ApprovalOutcome.normalize(
@@ -1635,17 +1844,23 @@ class ReActExecutor:
                 logger.info("approval_modified", tool=tc.name,
                             keys=sorted(outcome.arguments or {}))
                 tc.arguments = dict(outcome.arguments or {})
+                self._record_gate_decision(tc, tier, "modified",
+                                           f"{reason}；用户修改参数后批准")
                 return True, f"{reason}；用户修改参数后批准"
             if not outcome.approved:
                 logger.info("approval_denied", tool=tc.name,
                             comment=outcome.comment or "")
-            return outcome.approved, (
-                reason if outcome.approved
-                else f"用户拒绝：{outcome.comment or reason}")
+                note = f"用户拒绝：{outcome.comment or reason}"
+                self._record_gate_decision(tc, tier, "denied", note)
+                return False, note
+            self._record_gate_decision(tc, tier, "approved", reason)
+            return True, reason
         except Exception as e:
             logger.warning("react_approval_failed", tool=tc.name,
                            error=str(e), decision="denied")
-            return False, f"审批通道异常（{type(e).__name__}），已按拒绝处理"
+            note = f"审批通道异常（{type(e).__name__}），已按拒绝处理"
+            self._record_gate_decision(tc, tier, "error", f"{note}：{e}")
+            return False, note
 
     def get_trace(self) -> str:
         """获取执行跟踪。"""

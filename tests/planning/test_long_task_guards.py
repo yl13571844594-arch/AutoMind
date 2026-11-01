@@ -78,6 +78,35 @@ class _SlowRegistry:
         return ToolResult(tool_name=name, success=True, output="too late")
 
 
+class _SelfTimeoutRegistry:
+    """工具**自己**"超时"了，并在 0.05s 就返回了结构化回执（不是外层取消）。
+
+    用于验证 v1.11.20 的"让位余量"：外层等待必须比工具内部超时更宽，
+    否则外层 ``asyncio.wait_for`` 会抢先取消，工具那句能指导下一步的回执
+    （"改用后台通道"）就永远到不了模型。
+    """
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self.own_error = ("命令超过 5 秒仍未结束，已终止。"
+                          "这是工具自己的超时回执：安装/编译请改用后台通道。")
+
+    def list_names(self):
+        return ["stuck_tool"]
+
+    def list_all(self):
+        return [_Tool("stuck_tool")]
+
+    def get(self, name):
+        return _Tool(name)
+
+    async def dispatch(self, name, **kw):
+        self.calls += 1
+        await asyncio.sleep(0.05)      # 远早于外层 0.5s 上限
+        return ToolResult(tool_name=name, success=False, error=self.own_error,
+                          metadata={"timeout": True})
+
+
 class _OneCallLLM:
     """先请求若干次 stuck_tool（参数各异，**不触发无进展拦截**），再收尾。"""
 
@@ -167,7 +196,11 @@ class TestReactPerStepTimeout:
         asyncio.run(ex.run("干活"))
         r = next(r for _, r in ex.actions if not r.success)
         assert r.metadata.get("timeout") is True
-        assert r.metadata.get("timeout_s") == pytest.approx(0.3, abs=0.01)
+        # v1.11.20：外层等待在请求值之上多了 min(30, 10%) 的让位余量，
+        # 因此 timeout_s 记的是**实际生效值**（0.3 → 0.33），不再是 0.3。
+        assert r.metadata.get("timeout_s") == pytest.approx(
+            ex._effective_timeout({}), abs=0.01)
+        assert r.metadata.get("timeout_s") >= 0.3
 
     def test_repeated_timeouts_trip_the_existing_breaker(self):
         """连续超时要复用已有的熔断链路 —— 否则模型会一直等到超时上限耗尽。"""
@@ -195,18 +228,47 @@ class TestReactPerStepTimeout:
         ex = asyncio.run(_go())
         assert seen and seen[0]["type"] == "tool_timeout"
         assert seen[0]["tool"] == "stuck_tool"
-        assert seen[0]["timeout_s"] == pytest.approx(0.25, abs=0.01)
+        # v1.11.20：实际生效的超时 = 请求值 + 让位余量（0.25 → 0.275）
+        assert seen[0]["timeout_s"] >= 0.25
+        assert seen[0]["timeout_s"] == pytest.approx(0.275, abs=0.01)
         assert ex.token_report()["tool_timeouts"] == 1
 
+    def test_tool_own_timeout_receipt_wins_over_outer_cancel(self):
+        """v1.11.20：工具内部的超时回执必须优先于外层取消。
+
+        背景：``terminal`` / ``pwsh`` 到点时会先返回自己的结构化回执（"已终止，
+        改写后台通道"）。若外层 ``wait_for`` 与它同一时刻到点，谁先触发没有
+        保证 —— 实测外层抢先 cancel 时，模型只看到笼统的"等待超时、输出已丢弃"，
+        那句真正能指导下一步的回执被吞掉了。让位余量（10%，最多 30s）保证
+        工具内部回执先到。
+        """
+        reg = _SelfTimeoutRegistry()
+        ex = ReActExecutor(_OneCallLLM(n_calls=1), reg, max_iterations=3,
+                           tool_timeout=0.5)
+        asyncio.run(ex.run("干活"))
+
+        # 余量确实加上了（0.5 → 0.55），且工具在 0.05s 就返回了
+        assert ex._effective_timeout({}) == pytest.approx(0.55, abs=0.01)
+        err = next(r.error for _, r in ex.actions if not r.success)
+        assert err == reg.own_error, f"外层把工具自己的回执吞掉了：{err!r}"
+        assert ex.tool_timeouts == 0, "外层不该抢先取消：工具自己的回执早已返回"
+
     def test_model_can_request_a_longer_timeout(self):
-        """模型显式给 timeout 时应当被尊重（否则"命令允许跑 600s、外层 300s 就掐"）。"""
+        """模型显式给 timeout 时应当被尊重（否则"命令允许跑 600s、外层 300s 就掐"）。
+
+        v1.11.20：算完 budget 后会再加 ``min(30, 10%)`` 的让位余量（见
+        ``_effective_timeout``），所以断言按"请求值 + 余量"给。
+        """
         ex = ReActExecutor(_OneCallLLM(), _SlowRegistry(), tool_timeout=300.0,
                            tool_timeout_max=1800.0)
-        assert ex._effective_timeout({}) == 300.0
-        assert ex._effective_timeout({"timeout": 600}) == 600.0
-        assert ex._effective_timeout({"timeout": 99999}) == 1800.0, "没有上限"
-        assert ex._effective_timeout({"timeout": "abc"}) == 300.0, "乱填会放宽限制"
-        assert ex._effective_timeout({"timeout": -1}) == 300.0
+        # 300 → 300 + min(30, 30) = 330；600 → 600 + 30；1800 → 1800 + 30
+        assert ex._effective_timeout({}) == pytest.approx(330.0)
+        assert ex._effective_timeout({"timeout": 600}) == pytest.approx(630.0)
+        assert ex._effective_timeout({"timeout": 99999}) == pytest.approx(1830.0), "没有上限"
+        assert ex._effective_timeout({"timeout": "abc"}) == pytest.approx(330.0), "乱填会放宽限制"
+        assert ex._effective_timeout({"timeout": -1}) == pytest.approx(330.0)
+        # 关键语义：余量只会让等待更宽，绝不会把模型申请的时长压回去
+        assert ex._effective_timeout({"timeout": 600}) >= 600
 
     def test_zero_disables_the_timeout(self):
         reg = _SlowRegistry(hang_seconds=0.2)

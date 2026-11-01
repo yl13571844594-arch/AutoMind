@@ -37,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
+from automind.core import governance as _governance
 from automind.core.logging import get_logger
 from automind.core.types import ToolResult
 from automind.state.human_loop import ApprovalOutcome
@@ -1093,7 +1094,15 @@ class WorkflowExecutor:
                             attempt=attempt + 1)
             attempts.append({"tool": tool_name, "args": args})
             record.detail["tool"] = tool_name
-            result = await self.registry.dispatch(tool_name, **args)
+            # 治理来源绑定（v1.11.19）：工作流是**无人值守通道**，工具调用
+            # 没有经过 ReAct/Plan 的人工审批 —— dispatch 的分派级闸门据此
+            # 判定（高危 + 非全批准 = 拒绝），账本记录也带上 source="workflow"。
+            # 每次 dispatch 前后成对绑定/恢复，避免重试或嵌套调用串味。
+            _gov_token = _governance.bind_source("workflow")
+            try:
+                result = await self.registry.dispatch(tool_name, **args)
+            finally:
+                _governance.reset_source(_gov_token)
             if result.success:
                 break
             if policy.kind != "retry":
