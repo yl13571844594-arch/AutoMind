@@ -146,7 +146,7 @@ Results hold only for this model/environment/date. The commercial edition requir
 | 目标 | 文案 | 链接/命令 |
 | --- | --- | --- |
 | 体验社区版 | 下载 AutoMind 社区版（MIT） | `https://github.com/yl13571844594-arch/AutoMind/releases/latest` |
-| 从 PyPI 安装 | `pip install "automind-agent[web]"` | PyPI: automind-agent（v1.11.24 待发布；发布后更新此处） |
+| 从 PyPI 安装 | `pip install "automind-agent[web]"` | PyPI: utomind-agent（v1.11.25 已发布） |
 | 看方法/复跑 | 阅读 v1.11.24 基准报告并自行复跑 | `docs/BENCHMARK_v1.11.24.md` §11 |
 | 看数据 | 隔离矩阵 / 聚合报告 / 脱敏原始数据 | `docs/benchmark/v1.11.24/`（含 `SHA256SUMS.txt`） |
 | 看使用手册 | 零基础使用手册 | `使用手册.md` / `https://github.com/yl13571844594-arch/AutoMind` |

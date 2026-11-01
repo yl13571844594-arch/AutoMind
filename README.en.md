@@ -54,7 +54,8 @@ suite, collaboration matrix n=1 per task×mode — **not statistically significa
 ranking. Real failures in the collaboration matrix (e.g. community `single` 1/4, pro `multi` 0/4,
 enterprise `multi` 1/4) are **published as-is**, not removed or softened. Full methodology, every
 failure case, sanitized raw data and rerun commands: [benchmark report](docs/BENCHMARK_v1.11.24.md)
-and [docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md). Commercial capabilities require a
+and [docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md); ready-to-publish website/social
+copy is in [BENCHMARK_WEBSITE.md](docs/BENCHMARK_WEBSITE.md). Commercial capabilities require a
 separate `automind-pro` extension and a valid license and are **not distributed with Community**.
 
 ## ✨ What's new in v1.11.25

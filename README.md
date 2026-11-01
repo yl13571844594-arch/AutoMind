@@ -50,7 +50,8 @@
 **不构成统计显著结论**，不做版本或模型排名；协作矩阵存在真实失败（例如 community `single` 1/4、
 pro `multi` 0/4、enterprise `multi` 1/4），我们**原样保留**，未删除、未弱化。完整方法、全部失败案例、
 脱敏原始数据与复跑命令见 [基准报告](docs/BENCHMARK_v1.11.24.md) 与
-[docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md)。商业版能力需单独的 `automind-pro`
+[docs/benchmark/v1.11.24/](docs/benchmark/v1.11.24/README.md)；可直接用于官网/公众号的精简文案见
+[BENCHMARK_WEBSITE.md](docs/BENCHMARK_WEBSITE.md)。商业版能力需单独的 `automind-pro`
 扩展包与有效许可证，**不随社区版分发**。
 
 ## ✨ v1.11.25 更新亮点
