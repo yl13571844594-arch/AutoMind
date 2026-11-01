@@ -319,18 +319,19 @@ pip install "automind-agent[web]"               # latest PyPI release · Web + O
 # Upgrade: pip install -U "automind-agent[web]"; use [full] for every backend
 ```
 
-> ✅ **v1.11.25 is a community release-preparation version**: it fixes the multi-agent collaboration
+> ✅ **v1.11.25 is released**: it fixes the multi-agent collaboration
 > execution path and the "continue" prompt shown after delivery, and carries over the v1.11.24 web-evaluation
 > current-model/key fix. **Measured (single run n=1 — not statistically significant)**: PRO full 4×multi
 > **4/4** (v1.11.24 baseline 0/4; 512.69 s / 648,081 tokens / 97 LLM calls) and ENTERPRISE full 4×multi
 > **4/4** (**independent run** `20261101-0840-final-real`; 757.94 s / 1,069,092 tokens / 133 LLM calls;
 > ENT baseline 1/4; role-budget iterations 12/120k→3/4, 20/200k→3/4, 30/300k→4/4; runs not stitched);
-> delivered-no-continue **12 offline cases passed**. Community artifacts are built and pass build_community
-> audit / twine check; final full acceptance **OK exit 0** (community 3529 passed / 6 skipped, pro 326
-> passed). The v1.11.24 real-capability run is complete: core 54/54, 82/82 cells, with real collaboration
+> delivered-no-continue **12 offline cases passed**. Community artifacts pass build_community audit /
+> twine check; final full acceptance **OK exit 0** (community 3529 passed / 6 skipped, pro 326 passed).
+> The v1.11.24 real-capability run is complete: core 54/54, 82/82 cells, with real collaboration
 > failures disclosed as-is in the [benchmark report](docs/BENCHMARK_v1.11.24.md).
-> **The commercial edition is not released** (`pro` is version-synced only); community wheel / sdist and
-> desktop installers are verified per [RELEASE.md](RELEASE.md), after which PyPI's latest release is 1.11.25.
+> **The commercial edition is not released** (`pro` is version-synced only); PyPI, the three desktop
+> installers and the benchmark report are live on the
+> [v1.11.25 Release](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.25).
 > Desktop installers live on
 > [Releases](https://github.com/yl13571844594-arch/AutoMind/releases/latest)
 > (Windows `.exe` code-signed · macOS `.dmg` universal · Linux `.deb`), and each release ships a
