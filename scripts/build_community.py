@@ -99,13 +99,23 @@ def build_source_zip(version: str) -> Path:
 
 
 def audit(version: str) -> None:
-    """审计全部产物：不得含商业代码或敏感文件。"""
+    """审计社区构建产物：不得含商业代码或敏感文件。
+
+    只审计本脚本真正产出的 wheel / sdist / 开源源码包；`dist/` 里可能同时
+    放置 Release 专用附件（如 Windows 便携 ZIP，内含 python-docx 自带的
+    `default.docx` 模板），不能把依赖库的正常数据文件误判成商业手册。
+    """
     print(">> 审计发布产物 ...")
     bad: list[str] = []
     markers = ("automind_pro", "pro/automind_pro", ".automind_config.json",
                ".automind_license", "LICENSE-COMMERCIAL", ".docx",
                "manual_assets/", "商业运营升级与发证操作手册")
-    for art in DIST.glob(f"*{version}*"):
+    artifacts: list[Path] = []
+    for pattern in (f"automind_agent-{version}*.whl",
+                    f"automind_agent-{version}*.tar.gz",
+                    f"automind-community-{version}-src.zip"):
+        artifacts.extend(DIST.glob(pattern))
+    for art in sorted(artifacts):
         names: list[str] = []
         if art.suffix == ".zip" or art.name.endswith(".whl"):
             with zipfile.ZipFile(art) as z:
