@@ -80,13 +80,12 @@ pro `multi` 0/4、enterprise `multi` 1/4），我们**原样保留**，未删除
   verification 4/4、artifacts 3/3）。两个**独立完整 run，不拼接**；targeted 2/2 与旧 full 2/2 仅作补充证据。
   **单模型 / 单机 / 每组合 n=1，不构成统计显著结论**，也不做版本或模型排名；
   证据在 `.automind/multi_v11125/raw/`（gitignored），失败与中间轮次记录保留未删。
-- 🚀 **v1.11.25 发布准备**：核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.25**；
-  **本版仅做社区版发布准备**（社区 wheel / sdist / 安装包按发布流程验收），**商业版不发布**
-  （`pro` 仅版本号同步、不重建 / 不发布 Pro wheel 与 `.ampkg`）；版本一致性由
-  `tests/test_version_consistency.py` 守住（六处同号）。**社区版发布物已构建**：wheel 1,972,619 B /
-  sdist 1,962,058 B / src.zip 6,706,498 B（sha256 见 [RELEASE.md](RELEASE.md)），
+- 🚀 **v1.11.25 已发布**：核心 / 商业扩展包 / Web / Windows 安装器 / 使用手册统一 **1.11.25**；
+  **本次仅发布社区版**（PyPI wheel / sdist、Windows 签名安装包、macOS 通用 DMG、Linux deb、
+  社区源码包与基准报告均已上线），**商业版不发布**（`pro` 仅版本号同步，不发布 Pro wheel / `.ampkg`）；
+  版本一致性由 `tests/test_version_consistency.py` 守住（六处同号）。**发布验收**：
   `build_community` 审计通过、`twine check` **PASSED**；最终 full acceptance **OK exit 0**
-  （社区 **3529 passed / 6 skipped**、**pro 326 passed**、web/static 通过）。
+  （社区 **3529 passed / 6 skipped**、**pro 326 passed**、web/static 通过、IM 长连接测试通过）。
 
 ## ✨ v1.11.24 更新亮点
 
@@ -280,14 +279,16 @@ pip install "automind-agent[web]"               # 当前 PyPI 最新版 · Web +
 # 升级：pip install -U "automind-agent[web]"；全部模型后端换成 [full]
 ```
 
-> ✅ **v1.11.25 为社区版发布准备版本**：本版修复多智能体协同执行链路与"已交付仍提示续跑"的体验问题，
+> ✅ **v1.11.25 已发布**：本版修复多智能体协同执行链路与"已交付仍提示续跑"的体验问题，
 > 并沿用 v1.11.24 的 Web 评测取当前模型/Key 修复。**实测（单轮 n=1，不构成统计显著结论）**：
 > PRO 多智能体完整 4×multi **4/4**（v1.11.24 基线 0/4；512.69s / 648,081 tok / 97 次 LLM 调用）；
 > ENTERPRISE 完整 4×multi **4/4**（**独立 run** `20261101-0840-final-real`；757.94s / 1,069,092 tok /
 > 133 次 LLM 调用；未拼接）；v1.11.24 基线 ENT 1/4，角色预算迭代 12/120k→3/4、20/200k→3/4、30/300k→4/4；
-> 已交付不提示续跑 **12 个离线用例通过**；社区发布物已构建并通过 build_community 审计 / twine check，
-> 最终 full acceptance **OK exit 0**（社区 3529 passed / 6 skipped、pro 326 passed）。上一版 v1.11.24 的
-> 真实能力测评已完成：核心 54/54、82/82 cell 完整，协作矩阵真实失败已如实披露
+> 已交付不提示续跑 **12 个离线用例通过**；社区发布物已通过 build_community 审计 / twine check，
+> 最终 full acceptance **OK exit 0**（社区 3529 passed / 6 skipped、pro 326 passed）。
+> **下载**：PyPI `pip install -U "automind-agent[web]==1.11.25"`，三平台安装包与基准报告见
+> [v1.11.25 Release](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.25)。
+> 上一版 v1.11.24 的真实能力测评已完成：核心 54/54、82/82 cell 完整，协作矩阵真实失败已如实披露
 > （见 [基准报告](docs/BENCHMARK_v1.11.24.md)）。
 > **商业版不发布**（`pro` 仅版本号同步）；社区 wheel / sdist 与三平台安装包按
 > [RELEASE.md](RELEASE.md) 流程验收，发布后 PyPI 上的最新版即为 1.11.25。

@@ -91,14 +91,14 @@ separate `automind-pro` extension and a valid license and are **not distributed 
   supplementary evidence only. **Single model / single machine / n=1 per combination — not statistically
   significant**, and no version or model ranking. Evidence lives in `.automind/multi_v11125/raw/`
   (gitignored); failures and intermediate rounds are kept, not deleted.
-- 🚀 **v1.11.25 release preparation**: core / Pro extension / web / Windows installer / manual are unified
-  at **1.11.25**; **this round prepares the community release only** (community wheel / sdist / installers
-  are verified per the release process), and **the commercial edition is not released** (`pro` is
-  version-synced only; no Pro wheel or `.ampkg` rebuild/release); `tests/test_version_consistency.py`
-  keeps all six version declarations identical. **Community release artifacts built**: wheel
-  1,972,619 B / sdist 1,962,058 B / src.zip 6,706,498 B (sha256 in [RELEASE.md](RELEASE.md)),
-  `build_community` audit passed and `twine check` **PASSED**; final full acceptance **OK exit 0**
-  (community **3529 passed / 6 skipped**, **pro 326 passed**, web/static passed).
+- 🚀 **v1.11.25 released**: core / Pro extension / web / Windows installer / manual are unified at
+  **1.11.25**; **only the Community edition is released this round** (PyPI wheel/sdist, signed Windows
+  installer, universal macOS DMG, Linux deb, community source and the benchmark report are all live);
+  **the commercial edition is not released** (`pro` is version-synced only; no Pro wheel or `.ampkg`
+  release); `tests/test_version_consistency.py` keeps all six version declarations identical.
+  **Release acceptance**: `build_community` audit passed, `twine check` **PASSED**; final full
+  acceptance **OK exit 0** (Community **3529 passed / 6 skipped**, **Pro 326 passed**, web/static and
+  IM long-connection tests passed).
 
 ## ✨ What's new in v1.11.24
 

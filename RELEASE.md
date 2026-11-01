@@ -144,16 +144,16 @@ automind-community-<ver>-src.zip           ← 开源上传源码包（白名单
 > PRO run `20261101-0830-final-pro`（512.69s / 648,081 tok / 97 次 LLM 调用）、
 > ENTERPRISE run `20261101-0840-final-real`（本机真实许可证；757.94s / 1,069,092 tok / 133 次调用；
 > verification 4/4、artifacts 3/3）；角色预算迭代 12/120k→3/4、20/200k→3/4、30/300k→4/4（失败轨迹保留）；
-> 已交付不提示续跑 **12 个离线用例通过**。**本版仅做社区版发布准备，商业版不发布**
+> 已交付不提示续跑 **12 个离线用例通过**。**本版仅发布社区版，商业版不发布**
 > （`pro` 仅版本号同步、无功能变更，不重建 / 不发布 Pro wheel 与 `.ampkg`）。
 
-**v1.11.25 当前状态（2026-11-01，多智能体协同修复 + 社区版发布准备）**：
+**v1.11.25 已发布（2026-11-01，多智能体协同修复 + 真实能力测评宣传）**：
 
 | 项目 | 状态 |
 |---|---|
 | 版本号（core / pro / web / installer / 手册） | 已统一为 `1.11.25`，`tests/test_version_consistency.py` 全绿 |
-| 前端 `automind/static/dist/` | 本版**无前端源码变更** → 沿用上一版产物，**无需重建**（若最终验收前有前端改动再重建） |
-| 社区版发布物（wheel / sdist / PyPI / 三平台安装包） | **已构建（待发布）**：wheel `dist/automind_agent-1.11.25-py3-none-any.whl` **1,972,619 B**，sha256 `1a11241b…6406b9d`；sdist `dist/automind_agent-1.11.25.tar.gz` **1,962,058 B**，sha256 `e36e90e6…cb1ec73`；源码包 `dist/automind-community-1.11.25-src.zip` **6,706,498 B**，sha256 `be8415d0…8b7b083`；`build_community` 审计通过、`twine check` **PASSED**；**PyPI / 三平台安装包是否发布由发布负责人决定**，发布后 PyPI 最新版为 `1.11.25` |
+| 前端 `automind/static/dist/` | 已用 v1.11.25 前端源码重建（tsc --noEmit + vite build：`index-B2al-U9D.css` / `index-B2hJf0GU.js`） |
+| 社区版发布物（wheel / sdist / PyPI / 三平台安装包） | **已发布（2026-11-01）**：PyPI `automind_agent-1.11.25`（wheel `76802fd39172ed839cfdea85e4ff698093c31a989db72a713aebe31ca51228c1`，1,972,079 B；sdist `cb858cb27d379c900b6d5fa2e8bfae541ba262949208c06ecf700aa779a62d3b`，1,954,676 B）与 [GitHub Release v1.11.25](https://github.com/yl13571844594-arch/AutoMind/releases/tag/v1.11.25) 已上线：Windows `AutoMind-Setup-1.11.25.exe`（Certum 签名，`d1872b5382d9f5edd922c4e1588e5be7ecf7f3e51ae598bba0c619a079358ad9`）、Windows 便携版、macOS 通用 DMG（`d22c91e0b03db3c6776af3887e075cbc4c744b6e7c11d82fca5a7d50226f5d83`）、Linux deb（`269380b07909b9c210d72928281923e6116541bec914488980cfcb5080724096`）、社区源码包（`8407f8cff4479b10d2ad79fbc8923f128f913382ec9bcd9e86ca9b9c3f5679e6`，6,710,434 B）、`SHA256SUMS`、基准报告与脱敏数据；`build_community` 审计通过、`twine check` **PASSED**、full acceptance **OK exit 0** |
 | 商业扩展包 / `.ampkg` | **商业版不发布**：`pro` 仅版本号同步、无功能变更，**不重建 / 不发布** Pro wheel 与 `.ampkg`（公钥未轮换，旧许可证与旧 `.ampkg` 继续有效） |
 | 多智能体协同修复（已实测） | **PRO 完整 4×multi 4/4**（v1.11.24 基线 0/4；run `20261101-0830-final-pro`；512.69s / 648,081 tok / 97 次 LLM 调用；全部 completed + artifacts/verification 通过）；**ENTERPRISE 完整 4×multi 4/4**（**独立 run** `20261101-0840-final-real`，本机真实许可证；757.94s / 1,069,092 tok / 133 次调用；verification 4/4、artifacts 3/3；逐任务 analysis 206,078ms/78,241 tok、codegen 186,250/378,034、bugfix 101,734/135,182、multi_file 263,359/477,635）；targeted 2/2（`20261101-082717-real`）与旧 full 2/2（`20261101-080559-real`）仅作补充证据、**不拼接**；**单轮 n=1、单模型单机，不构成统计显著结论** |
 | 已交付不提示续跑（已验收） | **已修复并通过 12 个离线用例**（`tests/planning/test_artifact_scope_and_post_budget.py`，12 passed）：主任务 / 收尾预算分离，主交付完成后收尾预算耗尽不再 partial / 续跑（`resumable=false`、checkpoint completed）；真正 partial 仍可续跑；实际界面交互建议发版前人工复核 |
