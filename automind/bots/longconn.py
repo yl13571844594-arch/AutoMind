@@ -59,6 +59,16 @@ def _ws_connect(url: str, **kw: Any) -> Any:
         import websockets
     except ImportError as e:      # pragma: no cover - 依赖缺失
         raise ChannelError("长连接需要 websockets 库：pip install websockets") from e
+    # websockets>=15 默认会读系统代理（Windows 上尤其明显）。本机回环地址
+    # （本地测试服务 / 本地桥接）绝不能走代理，否则 CONNECT 收不到握手。
+    try:
+        host = (urlparse(url).hostname or "").lower()
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            import inspect
+            if "proxy" in inspect.signature(websockets.connect).parameters:
+                kw.setdefault("proxy", None)
+    except (TypeError, ValueError):  # pragma: no cover - 旧版 websockets 无 proxy 参数
+        pass
     return websockets.connect(url, max_size=8 * 1024 * 1024, open_timeout=20, **kw)
 
 
